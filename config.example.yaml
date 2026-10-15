@@ -1,0 +1,19 @@
+# DGXMM configuration. Copy to config.yaml next to docker-compose.yaml.
+safety_margin_gib: 8        # memory DGXMM never allocates
+os_reserve_gib: 4           # kept back for the OS and desktop
+port_range: [8100, 8199]    # engine container ports
+publish_bind: 127.0.0.1     # host interface engine ports are published on
+startup_timeout_s: 900
+auto_protect: false         # true = watchdog stops lowest-priority deployment when critical
+docker_network: gateway
+litellm_url: http://litellm-proxy:4000
+images:
+  vllm: vllm/vllm-openai:pinned-2026-08-27
+  llamacpp: ghcr.io/ggml-org/llama.cpp:server-cuda
+hf_cache:
+  host: /home/dgxuser/.cache/huggingface
+  local: /data/hf
+gguf_roots:
+  - host: /home/dgxuser/models
+    local: /data/gguf/0
+min_free_disk_gib: 50
