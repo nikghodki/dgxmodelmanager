@@ -125,3 +125,31 @@ QWEN_TINY = {"architectures": ["Qwen3ForCausalLM"], "model_type": "qwen3", "num_
              "num_attention_heads": 4, "num_key_value_heads": 2, "head_dim": 64, "hidden_size": 256,
              "intermediate_size": 512, "vocab_size": 1000, "max_position_embeddings": 4096,
              "torch_dtype": "bfloat16"}
+
+
+from types import SimpleNamespace
+
+from dgxmm.config import GIB
+
+
+@pytest.fixture
+def stack(settings, db, fake_hf_repo):
+    from dgxmm.deployer.service import Deployer
+    from dgxmm.docker_ctl import DockerController
+    from dgxmm.engines.registry import build_engines
+    from dgxmm.inventory.service import InventoryService
+    from dgxmm.memory.budget import BudgetService
+    from tests.fakes import FakeDockerClient, FakeEngines, FakeProbe
+
+    fake_hf_repo("Qwen/Qwen3-Tiny", config=QWEN_TINY, files={"model.safetensors": 2 * GIB})
+    fake_hf_repo("org/big-model", config=QWEN_TINY, files={"model.safetensors": 45 * GIB})
+    fake_hf_repo("org/partial", config=QWEN_TINY, incomplete=True)
+    inv = InventoryService(settings)
+    inv.refresh()
+    sdk, probe, engines_http = FakeDockerClient(), FakeProbe(), FakeEngines()
+    events = EventBroker()
+    deployer = Deployer(settings=settings, db=db, docker=DockerController(sdk), inventory=inv,
+                        engines=build_engines(settings), http=engines_http.client(), events=events)
+    deployer.budget = BudgetService(settings, probe, deployer.usage_rows)
+    return SimpleNamespace(settings=settings, db=db, inv=inv, sdk=sdk, probe=probe, http=engines_http,
+                           deployer=deployer, budget=deployer.budget, events=events)
