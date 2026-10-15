@@ -76,3 +76,52 @@ def login(client):
 def admin_csrf(make_user, login) -> str:
     make_user("root", "root-password-123", "admin")
     return login("root", "root-password-123")
+
+
+import json as _json
+import os as _os
+
+
+@pytest.fixture
+def fake_hf_repo(settings):
+    """Build models--org--name/{blobs,snapshots/<rev>,refs/main} like huggingface_hub does."""
+    hub = Path(settings.hf_cache.local) / "hub"
+
+    def _make(repo_id: str, rev: str = "a" * 40, config: dict | None = None,
+              files: dict[str, int] | None = None, main: bool = True, broken: list[str] | None = None,
+              incomplete: bool = False):
+        d = hub / ("models--" + repo_id.replace("/", "--"))
+        (d / "blobs").mkdir(parents=True, exist_ok=True)
+        snap = d / "snapshots" / rev
+        snap.mkdir(parents=True, exist_ok=True)
+        entries = dict(files or {"model.safetensors": 1000})
+        if config is not None:
+            entries["config.json"] = -1
+        broken_set = set(broken or [])
+        for name, size in entries.items():
+            if name in broken_set:
+                continue
+            blob = d / "blobs" / f"{rev[:8]}-{name.replace('/', '_')}"
+            if name == "config.json":
+                blob.write_text(_json.dumps(config))
+            else:
+                with open(blob, "wb") as f:
+                    f.truncate(size)
+            (snap / name).parent.mkdir(parents=True, exist_ok=True)
+            _os.symlink(_os.path.relpath(blob, (snap / name).parent), snap / name)
+        for name in broken or []:
+            (snap / name).parent.mkdir(parents=True, exist_ok=True)
+            _os.symlink("../../blobs/does-not-exist", snap / name)
+        if incomplete:
+            (d / "blobs" / "deadbeef.incomplete").write_bytes(b"x")
+        if main:
+            (d / "refs").mkdir(exist_ok=True)
+            (d / "refs" / "main").write_text(rev)
+        return snap
+    return _make
+
+
+QWEN_TINY = {"architectures": ["Qwen3ForCausalLM"], "model_type": "qwen3", "num_hidden_layers": 2,
+             "num_attention_heads": 4, "num_key_value_heads": 2, "head_dim": 64, "hidden_size": 256,
+             "intermediate_size": 512, "vocab_size": 1000, "max_position_embeddings": 4096,
+             "torch_dtype": "bfloat16"}
