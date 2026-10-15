@@ -6,8 +6,8 @@ TRANSITIONS: dict[str, set[str]] = {
     "ready": {"sleeping", "stopping", "failed"},
     "sleeping": {"ready", "stopping", "failed"},
     "stopping": {"stopped", "failed"},
-    "stopped": {"starting"},
-    "failed": {"starting", "stopped"},
+    "stopped": {"starting", "failed"},
+    "failed": {"starting", "stopped", "failed"},
     "unknown": {"stopping", "failed", "ready"},
 }
 ACTIVE_STATES = frozenset({"starting", "loading", "ready", "sleeping", "stopping", "unknown"})
