@@ -58,6 +58,19 @@ class FakeContainers:
         return items
 
     def get(self, key):
+        # Support skip_gets to allow initial gets to succeed before failing
+        if self.client.skip_gets > 0:
+            self.client.skip_gets -= 1
+            for c in self.client._containers.values():
+                if key in (c.id, c.name):
+                    return c
+            raise docker.errors.NotFound("no such container")
+        # Support fail_get_count for transient errors
+        if self.client.fail_get_count > 0:
+            self.client.fail_get_count -= 1
+            raise docker.errors.APIError("transient error")
+        if self.client.always_fail_get:
+            raise docker.errors.APIError("persistent error")
         for c in self.client._containers.values():
             if key in (c.id, c.name):
                 return c
@@ -90,6 +103,9 @@ class FakeDockerClient:
         self.run_calls: list[dict] = []
         self.fail_run = False
         self.oneshot_output = ""
+        self.fail_get_count = 0
+        self.always_fail_get = False
+        self.skip_gets = 0
 
     def add_unmanaged(self, name, image="vllm/vllm-openai:x", command=None, labels=None, ports=(), status="running",
                       mounts=(), networks=("gateway",), env=None):
