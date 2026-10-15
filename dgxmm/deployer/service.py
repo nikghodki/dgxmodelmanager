@@ -235,37 +235,59 @@ class Deployer:
         old = self._monitors.get(dep_id)
         if old and not old.done():
             old.cancel()
-        self._monitors[dep_id] = asyncio.get_running_loop().create_task(self._monitor(dep_id))
+        task = asyncio.get_running_loop().create_task(self._monitor(dep_id))
+        task.add_done_callback(lambda t: self._monitor_done(dep_id, t))
+        self._monitors[dep_id] = task
+
+    def _monitor_done(self, dep_id: int, task: asyncio.Task) -> None:
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            log.exception("monitor task for deployment %s died with uncaught exception", dep_id)
 
     def resume_monitor(self, dep_id: int) -> None:
         self._spawn_monitor(dep_id)
 
     async def _monitor(self, dep_id: int) -> None:
         start = self.clock()
+        consecutive_errors = 0
         while True:
             await asyncio.sleep(self.settings.monitor_poll_s)
-            dep = self._get(dep_id)
-            if dep is None or dep.state not in ("starting", "loading"):
-                return
-            info = await asyncio.to_thread(self.docker.get, dep.container_id)
-            if info is None:
-                self._transition(dep_id, "failed", message="container disappeared", last_error="container disappeared")
-                return
-            if info.status in ("exited", "dead"):
-                await self._fail_exited(dep, info.exit_code)
-                return
-            if dep.state == "starting" and info.status == "running":
-                self._transition(dep_id, "loading", message="container running; loading model")
-            mem = await asyncio.to_thread(self.budget.probe.meminfo)
-            if mem.available < self.settings.margin_bytes:
-                await self._abort(dep, "aborted: available memory fell below the safety margin during startup")
-                return
-            if self.clock() - start > self.settings.startup_timeout_s:
-                await self._abort(dep, f"startup timed out after {self.settings.startup_timeout_s}s")
-                return
-            if info.status == "running" and await self._healthy(dep):
-                self._transition(dep_id, "ready", message="health check and test completion passed")
-                return
+            try:
+                dep = self._get(dep_id)
+                if dep is None or dep.state not in ("starting", "loading"):
+                    return
+                info = await asyncio.to_thread(self.docker.get, dep.container_id)
+                if info is None:
+                    self._transition(dep_id, "failed", message="container disappeared", last_error="container disappeared")
+                    return
+                if info.status in ("exited", "dead"):
+                    await self._fail_exited(dep, info.exit_code)
+                    return
+                if dep.state == "starting" and info.status == "running":
+                    self._transition(dep_id, "loading", message="container running; loading model")
+                mem = await asyncio.to_thread(self.budget.probe.meminfo)
+                if mem.available < self.settings.margin_bytes:
+                    await self._abort(dep, "aborted: available memory fell below the safety margin during startup")
+                    return
+                if self.clock() - start > self.settings.startup_timeout_s:
+                    await self._abort(dep, f"startup timed out after {self.settings.startup_timeout_s}s")
+                    return
+                if info.status == "running" and await self._healthy(dep):
+                    self._transition(dep_id, "ready", message="health check and test completion passed")
+                    return
+                consecutive_errors = 0  # Reset on success
+            except Exception as e:
+                consecutive_errors += 1
+                log.exception("monitor error for deployment %s (consecutive: %d)", dep_id, consecutive_errors)
+                if consecutive_errors >= 5:
+                    try:
+                        self._transition(dep_id, "failed", message="monitor error", last_error=f"monitor error: {e}")
+                    except Exception:
+                        log.exception("failed to transition deployment %s to failed after monitor errors", dep_id)
+                    return
 
     async def _healthy(self, dep: Deployment) -> bool:
         engine = self.engines[dep.engine]
@@ -276,18 +298,32 @@ class Deployer:
             return False
 
     async def _fail_exited(self, dep: Deployment, exit_code: int | None) -> None:
-        logs = await asyncio.to_thread(self.docker.logs, dep.container_id, 200)
+        try:
+            logs = await asyncio.to_thread(self.docker.logs, dep.container_id, 200)
+        except Exception:
+            log.exception("failed to capture logs for deployment %s", dep.id)
+            logs = ""
         hint = " (likely out of memory)" if exit_code == 137 else ""
         msg = f"container exited with code {exit_code}{hint}"
-        await asyncio.to_thread(self.docker.stop_and_remove, dep.container_id)
+        try:
+            await asyncio.to_thread(self.docker.stop_and_remove, dep.container_id)
+        except Exception:
+            log.exception("failed to cleanup container for deployment %s", dep.id)
         self._transition(dep.id, "failed", message=msg, log_tail=logs, last_error=msg, exit_code=exit_code,
                          container_id=None)
         if exit_code == 137 and self.calibration is not None:
             self.calibration.record_oom(dep.engine, dep.model_ref, config_hash(dep.config), dep.reserved_bytes)
 
     async def _abort(self, dep: Deployment, reason: str) -> None:
-        logs = await asyncio.to_thread(self.docker.logs, dep.container_id, 200)
-        await asyncio.to_thread(self.docker.stop_and_remove, dep.container_id)
+        try:
+            logs = await asyncio.to_thread(self.docker.logs, dep.container_id, 200)
+        except Exception:
+            log.exception("failed to capture logs for deployment %s", dep.id)
+            logs = ""
+        try:
+            await asyncio.to_thread(self.docker.stop_and_remove, dep.container_id)
+        except Exception:
+            log.exception("failed to cleanup container for deployment %s", dep.id)
         self._transition(dep.id, "failed", message=reason, log_tail=logs, last_error=reason, container_id=None)
 
     async def wait_ready(self, dep_id: int, timeout: float) -> str:
@@ -311,7 +347,8 @@ class Deployer:
             if dep.state in ("planned", "failed"):
                 await asyncio.to_thread(self.docker.stop_and_remove, dep.container_id)
                 return self._transition(dep_id, "stopped", message=f"cleaned up ({reason})", container_id=None)
-            self._transition(dep_id, "stopping", message=f"stop requested ({reason})")
+            if dep.state != "stopping":
+                self._transition(dep_id, "stopping", message=f"stop requested ({reason})")
             try:
                 await asyncio.to_thread(self.docker.stop_and_remove, dep.container_id)
             except Exception as e:
@@ -332,9 +369,18 @@ class Deployer:
                 fit = check_fit(prep.estimate, budget)
                 if not fit.fits:
                     raise InsufficientMemory(fit)
-                port = dep.port if dep.port else self._allocate_port(exclude_dep=dep_id)
-                if port in {p for c in self.docker.list_all() for p in c.host_ports if not c.managed}:
-                    port = self._allocate_port(exclude_dep=dep_id)
+                # Check all used ports (active/planned DB rows + unmanaged containers)
+                with self.db.session() as s:
+                    db_used = {d.port for d in s.scalars(select(Deployment))
+                               if d.port and d.state in ACTIVE_STATES | {"planned"} and d.id != dep_id}
+                try:
+                    containers = await asyncio.to_thread(self.docker.list_all)
+                    unmanaged_used = {p for c in containers for p in c.host_ports if not c.managed}
+                except Exception:
+                    log.warning("could not list containers for restart port check", exc_info=True)
+                    unmanaged_used = set()
+                used_ports = db_used | unmanaged_used
+                port = dep.port if dep.port and dep.port not in used_ports else self._allocate_port(exclude_dep=dep_id)
                 with self.db.session() as s:
                     row = s.get(Deployment, dep_id)
                     row.model_ref, row.config, row.port = ref, prep.cfg.model_dump(mode="json"), port
