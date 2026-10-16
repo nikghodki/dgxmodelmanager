@@ -5,7 +5,9 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Iterator
 
-from sqlalchemy import JSON, BigInteger, Boolean, DateTime, Float, ForeignKey, Integer, String, Text, create_engine, event
+from sqlalchemy import (JSON, BigInteger, Boolean, DateTime, Float, ForeignKey, Integer, String, Text, create_engine, event,
+                        inspect, text)
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 
 
@@ -104,6 +106,7 @@ class Benchmark(Base):
     input_len: Mapped[int] = mapped_column(Integer)
     output_len: Mapped[int] = mapped_column(Integer)
     requests: Mapped[int] = mapped_column(Integer)
+    errors: Mapped[int | None] = mapped_column(Integer, nullable=True)  # failed requests at this level
     ttft_p50: Mapped[float | None] = mapped_column(Float, nullable=True)
     ttft_p95: Mapped[float | None] = mapped_column(Float, nullable=True)
     itl_p50: Mapped[float | None] = mapped_column(Float, nullable=True)
@@ -177,7 +180,6 @@ class AppSetting(Base):
 def add_missing_columns(engine) -> list[str]:
     """Tiny idempotent schema upgrade (there is no migration framework): `create_all` creates new tables but
     never alters existing ones, so add any nullable model column missing from an existing table."""
-    from sqlalchemy import inspect, text
     added: list[str] = []
     insp = inspect(engine)
     existing_tables = set(insp.get_table_names())
@@ -190,9 +192,16 @@ def add_missing_columns(engine) -> list[str]:
                 if col.name in have:
                     continue
                 if not col.nullable:
+                    # SQLite can only ADD a NOT NULL column with a constant default, and existing rows would need a
+                    # real value: that is a data migration, not something to guess at startup. Fail loudly instead.
                     raise RuntimeError(f"cannot auto-add NOT NULL column {table.name}.{col.name}")
                 ddl = col.type.compile(dialect=engine.dialect)
-                conn.execute(text(f'ALTER TABLE "{table.name}" ADD COLUMN "{col.name}" {ddl}'))
+                try:
+                    conn.execute(text(f'ALTER TABLE "{table.name}" ADD COLUMN "{col.name}" {ddl}'))
+                except OperationalError as e:
+                    if "duplicate column name" not in str(e).lower():
+                        raise
+                    continue  # another process (e.g. a concurrent startup) added it first
                 added.append(f"{table.name}.{col.name}")
     return added
 

@@ -95,11 +95,12 @@ def benchmarks(dep_id: int, p: Principal = Depends(current_principal), ctx: AppC
     except DeployError as e:
         raise deploy_error(e)
     with ctx.db.session() as s:
-        # requests > 0: hide legacy rows from levels where every request failed (they are not measurements)
-        rows = s.scalars(select(Benchmark).where(Benchmark.model_ref == v["model_ref"], Benchmark.requests > 0)
+        # hide legacy rows from levels where every request failed / nothing was generated (not measurements)
+        rows = s.scalars(select(Benchmark).where(Benchmark.model_ref == v["model_ref"], Benchmark.requests > 0,
+                                                 Benchmark.tps_per_req > 0)
                          .order_by(Benchmark.id.desc()).limit(200))
         return [{"id": b.id, "ts": b.ts.isoformat(), "config_hash": b.config_hash, "config": b.config, "engine": b.engine,
-                 "concurrency": b.concurrency, "requests": b.requests, "ttft_p50": b.ttft_p50, "ttft_p95": b.ttft_p95,
+                 "concurrency": b.concurrency, "requests": b.requests, "errors": b.errors, "ttft_p50": b.ttft_p50, "ttft_p95": b.ttft_p95,
                  "itl_p50": b.itl_p50, "tps_total": b.tps_total, "tps_per_req": b.tps_per_req,
                  "current": b.config == v["config"]} for b in rows]
 

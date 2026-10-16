@@ -49,3 +49,26 @@ def test_add_missing_columns_upgrades_old_schema_idempotently(tmp_path):
         db.engine.dispose()
     cols = {r[1] for r in sqlite3.connect(path).execute("PRAGMA table_info(memory_calibration)")}
     assert {"method", "quality", "detail"} <= cols
+
+
+def test_add_missing_columns_tolerates_concurrent_add(tmp_path, monkeypatch):
+    """Two processes starting at once: the other one added the column between our inspect and ALTER."""
+    import sqlalchemy
+
+    import dgxmm.db as dbmod
+    path = tmp_path / "c.sqlite3"
+    db = dbmod.Database(f"sqlite:///{path}")
+    real_inspect = sqlalchemy.inspect
+
+    class StaleInspector:
+        def __init__(self, engine):
+            self._i = real_inspect(engine)
+
+        def get_table_names(self):
+            return self._i.get_table_names()
+
+        def get_columns(self, table):
+            cols = self._i.get_columns(table)
+            return [c for c in cols if not (table == "memory_calibration" and c["name"] == "method")]
+    monkeypatch.setattr(dbmod, "inspect", StaleInspector)
+    assert dbmod.add_missing_columns(db.engine) == []
