@@ -54,8 +54,12 @@ async def test_switch_failure_rolls_back(stack):
         await stack.deployer.switch(a["id"], req("b"), [], 1)
     old = stack.deployer.view(a["id"])
     assert old["state"] == "ready" and old["alias"] == "chat"
-    names = {v["name"]: v["state"] for v in stack.deployer.list_views()}
-    assert names["b"] in ("failed", "stopped")
+    # I5: the failed new deployment is removed so its name can be reused
+    assert "b" not in {v["name"] for v in stack.deployer.list_views()}
+    assert not any(c.name == "dgxmm-b" for c in stack.sdk._containers.values())
+    stack.sdk.exit_on_start.clear()
+    b = await stack.deployer.switch(a["id"], req("b"), [], 1)
+    assert b["state"] == "ready" and b["alias"] == "chat"
 
 
 async def test_reconfigure_success_and_rollback(stack):
@@ -80,3 +84,22 @@ async def test_apply_actions_undo_on_partial_failure(stack):
         await stack.deployer.apply_actions([{"type": "sleep", "deployment_id": a["id"]},
                                             {"type": "stop", "deployment_id": 999}], 1)
     assert stack.deployer.view(a["id"])["state"] == "ready"
+
+
+async def test_switch_docker_error_removes_new_row(stack):
+    """I5: even when deploy() itself raises after creating the row, rollback removes it."""
+    a = await ready(stack, "a", alias="chat")
+    stack.sdk.fail_run = True
+    with pytest.raises(DeployError):
+        await stack.deployer.switch(a["id"], req("b"), [], 1)
+    stack.sdk.fail_run = False
+    assert "b" not in {v["name"] for v in stack.deployer.list_views()}
+    assert stack.deployer.view(a["id"])["state"] == "ready"
+
+
+async def test_switch_name_in_use_never_removes_existing_row(stack):
+    a = await ready(stack, "a")
+    other = await ready(stack, "b")
+    with pytest.raises(DeployError):
+        await stack.deployer.switch(a["id"], req("b"), [], 1)
+    assert stack.deployer.view(other["id"])["state"] == "ready"

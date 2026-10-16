@@ -30,7 +30,11 @@ async def test_switch_escalates_to_stop_when_sleep_insufficient(stack):
     # A: reserved ~7 GiB, weights ~3 GiB → sleep frees ~4 GiB, stop frees ~7 GiB
     # B: needs ~7 GiB
     # Set available so: free_for_new + sleep_frees < 7 GiB, but free_for_new + stop_frees >= 7 GiB
-    stack.probe.available = 20 * GIB  # Give enough headroom for B after stopping A
+    # GB10: `used` includes A's full reservation. Leave less than B needs even after sleeping A
+    # (sleep frees almost nothing for this tiny model), but enough once A is stopped.
+    from tests.fakes import free_on_stop
+    free_on_stop(stack.deployer, stack.probe)
+    stack.probe.available = 15 * GIB
 
     # Switch should auto-escalate to stop (not sleep) A
     b = await stack.deployer.switch(a["id"], req("b", ref="Qwen/Qwen3-Tiny"), [], 1)
@@ -62,3 +66,40 @@ async def test_switch_raises_insufficient_memory_before_touching_anything(stack)
 
     # The 409 should include plans
     assert exc.value.fit is not None
+
+
+async def test_switch_credits_user_chosen_stop_of_third_deployment(stack):
+    """I1: an explicit plan action (stop C) must count toward the fit, in addition to the old deployment."""
+    from tests.fakes import free_on_stop
+    a = await ready(stack, "a", enable_sleep_mode=False, alias="chat")
+    c = await ready(stack, "c", enable_sleep_mode=False)
+    free_on_stop(stack.deployer, stack.probe)
+    need = stack.deployer.prepare("vllm", "Qwen/Qwen3-Tiny", SMALL).estimate.total
+    ra, rc = a["reserved_bytes"], c["reserved_bytes"]
+    usable = stack.probe.total - stack.settings.margin_bytes - stack.settings.os_reserve_bytes
+    # GB10 accounting: both ready reservations are inside `used`; free_for_new = usable - used.
+    # Stopping A alone is not enough; stopping A and C is.
+    stack.probe.available = stack.probe.total - (usable - (need - ra - rc // 2))
+    b = await stack.budget.refresh()
+    assert b.free_for_new + ra < need <= b.free_for_new + ra + rc
+    out = await stack.deployer.switch(a["id"], req("b"), [{"type": "stop", "deployment_id": c["id"]}], 1)
+    assert out["state"] == "ready" and out["alias"] == "chat"
+    assert stack.deployer.view(a["id"])["state"] == "stopped"
+    assert stack.deployer.view(c["id"])["state"] == "stopped"
+
+
+async def test_switch_agrees_with_preview_for_sleeping_old(stack):
+    """I1: preview credits a sleeping old deployment's measured memory; switch must do the same."""
+    from tests.fakes import free_on_stop
+    a = await ready(stack, "a", enable_sleep_mode=True)
+    await stack.deployer.sleep(a["id"])
+    cid = stack.deployer.view(a["id"])["container_id"]
+    stack.probe.managed_actual[cid] = 4 * GIB
+    free_on_stop(stack.deployer, stack.probe)
+    need = stack.deployer.prepare("vllm", "Qwen/Qwen3-Tiny", SMALL).estimate.total
+    usable = stack.probe.total - stack.settings.margin_bytes - stack.settings.os_reserve_bytes
+    stack.probe.available = stack.probe.total - (usable - (need - 2 * GIB))  # short by 2 GiB until A is stopped
+    p = await stack.deployer.preview("vllm", "Qwen/Qwen3-Tiny", SMALL, replacing=a["id"])
+    assert p["fit"]["fits"] and not (await stack.budget.refresh()).free_for_new >= need
+    out = await stack.deployer.switch(a["id"], req("b"), [], 1)
+    assert out["state"] == "ready" and stack.deployer.view(a["id"])["state"] == "stopped"

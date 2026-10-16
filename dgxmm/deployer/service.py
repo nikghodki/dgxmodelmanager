@@ -189,6 +189,21 @@ class Deployer:
         actual = next((u.actual for u in current.deployments if u.deployment_id == replacing), 0) if current else 0
         return max(dep.reserved_bytes, actual) if dep.state != "sleeping" else actual
 
+    def _action_frees(self, action: PlanAction, budget) -> int:
+        """Memory a plan action releases: sleep frees KV/activations of a ready deployment;
+        stop frees max(reserved, actual), or only the measured memory of a sleeping one."""
+        dep = self._get(action.deployment_id)
+        if dep is None or dep.state not in ACTIVE_STATES:
+            return 0
+        actual = next((u.actual for u in budget.deployments if u.deployment_id == dep.id), 0) if budget else 0
+        if action.type == "sleep":
+            if not self._can_sleep(dep):
+                return 0
+            est = dep.estimate or {}
+            return max(dep.reserved_bytes - est.get("weights", 0) - est.get("draft_weights", 0)
+                       - est.get("runtime", 0), 0)
+        return actual if dep.state == "sleeping" else max(dep.reserved_bytes, actual)
+
     async def preview(self, engine: str, model_ref: str, raw_cfg: dict, replacing: int | None = None) -> dict:
         prep = self.prepare(engine, model_ref, raw_cfg)
         budget = await self.budget.refresh()
@@ -198,6 +213,8 @@ class Deployer:
                "config": prep.cfg.model_dump(mode="json")}
         if engine == "vllm":
             out["gpu_memory_utilization"] = vllm_gpu_util(prep.estimate.total, budget.total)
+        if hasattr(prep.engine, "pool_tokens"):
+            out["kv_pool_tokens"] = prep.engine.pool_tokens(prep.cfg)
         out["plans"] = [] if fit.fits else self.plans_for(prep, fit, replacing)
         return out
 
@@ -319,6 +336,35 @@ class Deployer:
                          container_id=None)
         if exit_code == 137 and self.calibration is not None:
             self.calibration.record_oom(dep.engine, dep.model_ref, config_hash(dep.config), dep.reserved_bytes)
+
+    LIVE_STATES = ("ready", "sleeping", "unknown")
+
+    async def check_liveness(self) -> list[int]:
+        """Re-check running deployments: a crashed / OOM-killed / vanished engine container goes to
+        failed via the same path as during startup (state hooks then deregister it from LiteLLM)."""
+        with self.db.session() as s:
+            ids = [d.id for d in s.scalars(select(Deployment)) if d.state in self.LIVE_STATES and d.container_id]
+        failed: list[int] = []
+        for dep_id in ids:
+            lock = self._lock(dep_id)
+            if lock.locked():  # sleep/wake/stop in progress; never stall the budget loop behind it
+                continue
+            try:
+                async with lock:
+                    dep = self._get(dep_id)
+                    if dep is None or dep.state not in self.LIVE_STATES or not dep.container_id:
+                        continue
+                    info = await asyncio.to_thread(self.docker.get, dep.container_id)
+                    if info is None:
+                        self._transition(dep_id, "failed", message="container disappeared",
+                                         last_error="container disappeared", container_id=None)
+                        failed.append(dep_id)
+                    elif info.status in ("exited", "dead"):
+                        await self._fail_exited(dep, info.exit_code)
+                        failed.append(dep_id)
+            except Exception:
+                log.warning("liveness check failed for deployment %s", dep_id, exc_info=True)
+        return failed
 
     async def _abort(self, dep: Deployment, reason: str) -> None:
         try:
@@ -581,39 +627,31 @@ class Deployer:
         prep = self.prepare(req.engine, req.model_ref, req.config)
         budget = await self.budget.refresh()
 
-        # Determine what we'll actually free
-        if not any(a.deployment_id == old_id for a in acts) and old.state in ("ready", "sleeping", "unknown"):
-            if old.state == "sleeping":
-                freed = 0  # already sleeping
-            elif self._can_sleep(old):
-                # Compute sleep_frees
-                est = old.estimate or {}
-                sleep_frees = max(old.reserved_bytes - est.get("weights", 0) - est.get("draft_weights", 0)
-                                  - est.get("runtime", 0), 0)
-                # Check if sleep is enough
-                fit_with_sleep = check_fit(prep.estimate, budget, extra_free=sleep_frees)
-                if fit_with_sleep.fits:
-                    acts.insert(0, PlanAction(type="sleep", deployment_id=old_id))
-                    freed = sleep_frees
-                else:
-                    # Sleep not enough; escalate to stop
-                    stop_frees = max(old.reserved_bytes, next((u.actual for u in budget.deployments
-                                                               if u.deployment_id == old_id), 0))
-                    acts.insert(0, PlanAction(type="stop", deployment_id=old_id))
-                    freed = stop_frees
+        # Memory freed by the user's chosen actions (each deployment counted once)
+        seen: set[int] = set()
+        unique: list[PlanAction] = []
+        for a in acts:
+            if a.deployment_id not in seen:
+                seen.add(a.deployment_id)
+                unique.append(a)
+        acts = unique
+        freed = sum(self._action_frees(a, budget) for a in acts)
+
+        # The old deployment's own credit, unless the user already chose what to do with it.
+        # Prefer sleep when it is enough; otherwise stop (agrees with preview's _replacing_credit).
+        if old_id not in seen and old.state in ("ready", "sleeping", "unknown"):
+            sleep_act = PlanAction(type="sleep", deployment_id=old_id)
+            stop_act = PlanAction(type="stop", deployment_id=old_id)
+            if self._can_sleep(old) and check_fit(prep.estimate, budget,
+                                                  extra_free=freed + self._action_frees(sleep_act, budget)).fits:
+                chosen = sleep_act
+            elif old.state == "sleeping" and check_fit(prep.estimate, budget, extra_free=freed).fits:
+                chosen = None  # already asleep and nothing more is needed
             else:
-                # Can't sleep; must stop
-                stop_frees = max(old.reserved_bytes, next((u.actual for u in budget.deployments
-                                                           if u.deployment_id == old_id), 0))
-                acts.insert(0, PlanAction(type="stop", deployment_id=old_id))
-                freed = stop_frees
-        else:
-            # Explicit actions provided; compute total freed
-            freed = sum(
-                (max(d.reserved_bytes, next((u.actual for u in budget.deployments if u.deployment_id == a.deployment_id), 0))
-                 if a.type == "stop" else 0)
-                for a in acts for d in [self._get(a.deployment_id)] if d
-            )
+                chosen = stop_act
+            if chosen is not None:
+                acts.insert(0, chosen)
+                freed += self._action_frees(chosen, budget)
 
         # Final fit check
         fit = check_fit(prep.estimate, budget, extra_free=freed)
@@ -621,6 +659,8 @@ class Deployer:
             raise InsufficientMemory(fit)
 
         alias = old.alias
+        with self.db.session() as s:
+            name_taken = s.scalar(select(Deployment).where(Deployment.name == req.name)) is not None
         applied = await self.apply_actions(acts, user_id)
         new_id = None
         try:
@@ -634,11 +674,16 @@ class Deployer:
             return self.view(new_id)
         except Exception as original_error:
             rollback_failures = []
+            if new_id is None and not name_taken:  # deploy() created the row but raised (e.g. docker error)
+                with self.db.session() as s:
+                    row = s.scalar(select(Deployment).where(Deployment.name == req.name))
+                    new_id = row.id if row is not None else None
             if new_id is not None:
                 try:
                     await self.stop(new_id, user_id, reason="switch rollback")
+                    await self.remove(new_id)  # free the name so the switch can be retried
                 except Exception as e:
-                    log.exception("rollback: could not stop %s", new_id)
+                    log.exception("rollback: could not stop/remove %s", new_id)
                     rollback_failures.append(f"stop new deployment {new_id}: {e}")
             if alias:
                 try:

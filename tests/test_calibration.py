@@ -20,9 +20,22 @@ def test_adjust_exact_ratio_and_oom(db):
     assert cal.adjust("vllm", "r2", "y", est(10 * GIB)).total == int(10 * GIB * 1.5)  # ratio clamped
     cal.record_oom("vllm", "r", "h1", 13 * GIB)
     after_oom = cal.adjust("vllm", "r", "h1", est(10 * GIB))
-    assert after_oom.total == int(int(12 * GIB * 1.05) * 1.10) and "OOM" in after_oom.notes[-1]
-    cal.record("vllm", "r", "h1", 10 * GIB, 12 * GIB)  # a later success clears the OOM penalty
-    assert cal.adjust("vllm", "r", "h1", est(10 * GIB)).total == int(12 * GIB * 1.05)
+    # pending penalty (12.6 x 1.10 = 13.9 GiB) is below the M1 floor (13 GiB OOM x 1.10 = 14.3 GiB)
+    assert after_oom.total == max(int(int(12 * GIB * 1.05) * 1.10), int(13 * GIB * 1.10)) and "OOM" in after_oom.notes[-1]
+    cal.record("vllm", "r", "h1", 10 * GIB, 12 * GIB)  # a later success clears the pending penalty...
+    # ...but M1: never swing back below the size that was OOM-killed (13 GiB) + 10%
+    assert cal.adjust("vllm", "r", "h1", est(10 * GIB)).total == int(13 * GIB * 1.10)
+
+
+def test_oom_floor_survives_later_success(db):
+    """M1: after an OOM at 20 GiB, a success measured at 8 GiB must not bring the estimate back to <=20 GiB."""
+    cal = Calibration(db)
+    cal.record_oom("vllm", "m", "h", 20 * GIB)
+    cal.record("vllm", "m", "h", 22 * GIB, 8 * GIB)
+    adj = cal.adjust("vllm", "m", "h", est(18 * GIB))
+    assert adj.total == int(20 * GIB * 1.10) and any("OOM" in n for n in adj.notes)
+    # other configs of the same model are not floored by this config's OOM
+    assert cal.adjust("vllm", "m", "other", est(18 * GIB)).total == 18 * GIB
 
 
 def test_measurement_below_estimate_never_lowers(db):
