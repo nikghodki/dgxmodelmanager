@@ -208,7 +208,11 @@ class LiteLLMClient:
             if ok:
                 return v
             # LiteLLM >= 1.7x no longer reports its version in /health/readiness; the OpenAPI document does
-            v = await self._openapi_version(cfg, timeout)
+            try:
+                v = await self._openapi_version(cfg, timeout)
+            except asyncio.CancelledError:  # probe deadline hit: don't refetch on every probe
+                self._versions[cfg.url] = (self.clock(), None)
+                raise
             self._versions[cfg.url] = (self.clock(), v)
             return v
 

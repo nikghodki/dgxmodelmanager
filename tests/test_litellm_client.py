@@ -63,6 +63,23 @@ async def test_probe_overall_deadline():
     assert out["reachable"] is False and "timed out" in out["error"]
 
 
+async def test_cancelled_version_fetch_is_negative_cached():
+    fake, clock = FakeLiteLLM(), Clock()
+
+    async def handler(req):
+        if req.url.path == "/openapi.json":
+            fake.calls.append(("GET", "/openapi.json"))
+            await asyncio.sleep(10)
+        return fake.handler(req)
+    c = LiteLLMClient.fixed("http://litellm:4000", "sk-test", httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    c.clock, c.probe_deadline_s = clock, 0.2
+    out = await c.status()
+    assert out["reachable"] is True and out["version"] is None
+    clock.t += 16  # status cache expired, negative version cache (30 s) not
+    out = await c.status()
+    assert out["reachable"] is True and n(fake, "/openapi.json") == 1
+
+
 async def test_not_a_litellm_endpoint():
     fake = FakeLiteLLM()
     fake.impostor = True
