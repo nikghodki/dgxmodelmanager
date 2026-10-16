@@ -198,6 +198,10 @@ class FakeLiteLLM:
         self.down = False
         self.no_db = False
         self.readiness_version = False  # older LiteLLM builds put litellm_version in /health/readiness
+        self.readiness_db: str | None = None  # override the reported db state
+        self.impostor = False  # behave like some other HTTP server
+        self.openapi_status, self.openapi_pad = 200, 0
+        self.raw: dict[str, httpx.Response] = {}  # path -> canned response (after auth)
         self.auth: list[str | None] = []
         self.calls: list[tuple[str, str]] = []
         self.hosts: list[str] = []
@@ -231,18 +235,23 @@ class FakeLiteLLM:
         self.auth.append(req.headers.get("authorization"))
         if self.down:
             raise httpx.ConnectError("connection refused")
+        if self.impostor:
+            return httpx.Response(200, text="<html>hello</html>") if path == "/health/liveliness" else httpx.Response(404)
         if path == "/health/liveliness":
             return httpx.Response(200, json="I'm alive!")
         if path == "/health/readiness":
-            body = {"status": "healthy", "db": "Not connected" if self.no_db else "connected"}
+            body = {"status": "healthy", "db": self.readiness_db or ("Not connected" if self.no_db else "connected")}
             if self.readiness_version:
                 body["litellm_version"] = self.version
             return httpx.Response(200, json=body)
         if path == "/openapi.json":
-            return httpx.Response(200, json={"info": {"title": "LiteLLM API", "version": self.version}, "paths": {}})
+            return httpx.Response(self.openapi_status, json={"info": {"title": "LiteLLM API", "version": self.version},
+                                                             "paths": {}, "pad": "x" * self.openapi_pad})
         if req.headers.get("authorization") != f"Bearer {self.master_key}":
             return self._err(401, "Authentication Error, Invalid proxy server token passed. Received API Key = sk-...wxyz, "
                                   "Key Hash (Token) =" + "ab" * 32, "token_not_found_in_db")
+        if path in self.raw:
+            return self.raw[path]
         body = json.loads(req.content) if req.content else {}
         if body:
             self.bodies.append(body)

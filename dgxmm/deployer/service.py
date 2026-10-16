@@ -40,9 +40,9 @@ class DeployRequest(BaseModel):
 
 
 class DeployError(Exception):
-    def __init__(self, code: str, message: str, status: int = 400):
+    def __init__(self, code: str, message: str, status: int = 400, **extra):
         super().__init__(message)
-        self.code, self.message, self.status = code, message, status
+        self.code, self.message, self.status, self.extra = code, message, status, extra
 
 
 class InsufficientMemory(DeployError):
@@ -224,9 +224,10 @@ class Deployer:
         with self.db.session() as s:
             if s.scalar(select(Deployment).where(Deployment.name == req.name)):
                 raise DeployError("name_in_use", f"a deployment named {req.name} already exists", 409)
-        if req.alias:
-            self._check_alias_free(req.alias, None)
+        model_name = req.alias or prep.engine.served_name(prep.cfg, req.model_ref)
+        self.require_model_name(model_name, None)
         async with self.mem_lock:
+            self.require_model_name(model_name, None)  # again under the lock: concurrent deploys
             budget = await self.budget.refresh()
             fit = check_fit(prep.estimate, budget)
             if not fit.fits:
@@ -419,6 +420,7 @@ class Deployer:
             ref = model_ref or dep.model_ref
             prep = self.prepare(dep.engine, ref, config_override if config_override is not None else dep.config)
             async with self.mem_lock:
+                self.require_model_name(dep.alias or prep.engine.served_name(prep.cfg, ref), dep_id)
                 budget = await self.budget.refresh()
                 fit = check_fit(prep.estimate, budget)
                 if not fit.fits:
@@ -573,6 +575,7 @@ class Deployer:
                 raise DeployError("not_sleeping", f"deployment is {dep.state}", 409)
             engine = self.engines[dep.engine]
             async with self.mem_lock:
+                self.require_model_name(self._model_name(dep), dep_id)
                 budget = await self.budget.refresh()
                 actual = next((u.actual for u in budget.deployments if u.deployment_id == dep_id), 0)
                 need = max(dep.reserved_bytes - actual, 0)
@@ -613,24 +616,52 @@ class Deployer:
                 failures.append(f"{typ} deployment {dep_id}: {e}")
         return failures
 
-    def _check_alias_free(self, alias: str, dep_id: int | None) -> None:
-        """An alias must be unique among deployments and must not shadow the model name (served name) another
-        active deployment is registered under in LiteLLM."""
+    # States in which a deployment holds its LiteLLM model name (it is, or is about to be, registered).
+    # Sleeping/stopped/failed deployments do not; they are re-checked when they wake or start again.
+    NAME_HOLDING_STATES = frozenset({"planned", "starting", "loading", "ready", "unknown"})
+
+    def _served_name(self, d: Deployment) -> str | None:
+        engine = self.engines.get(d.engine)
+        if engine is None:
+            return None
+        try:
+            return engine.served_name(engine.validate_config(d.config), d.model_ref)
+        except (ValidationError, ValueError):
+            return None
+
+    def _model_name(self, d: Deployment) -> str | None:
+        return d.alias or self._served_name(d)
+
+    def model_name_holder(self, model_name: str, dep_id: int | None) -> Deployment | None:
+        """The other deployment that owns ``model_name``: any deployment whose alias it is (aliases are reserved
+        while the deployment exists, whatever its state), or an active deployment registered under it.
+        Removing a deployment deletes its row, which frees its alias."""
         with self.db.session() as s:
-            for d in s.scalars(select(Deployment).where(Deployment.id != (dep_id or -1))):
-                if d.alias == alias:
-                    raise DeployError("alias_in_use", f"deployment {d.name} already uses the model name {alias}", 409)
-                if d.state in ACTIVE_STATES and not d.alias and self._view(d)["served_name"] == alias:
-                    raise DeployError("alias_in_use", f"deployment {d.name} is already served as {alias}", 409)
+            for d in s.scalars(select(Deployment).where(Deployment.id != (dep_id or -1)).order_by(Deployment.id)):
+                if d.alias == model_name or (d.state in self.NAME_HOLDING_STATES and self._model_name(d) == model_name):
+                    return d
+        return None
+
+    def require_model_name(self, model_name: str | None, dep_id: int | None) -> None:
+        if not model_name:
+            return
+        d = self.model_name_holder(model_name, dep_id)
+        if d is not None:
+            raise DeployError("model_name_taken",
+                              f"the model name {model_name} is already used by deployment {d.name} ({d.state}); "
+                              "choose a different model name (alias)", 409,
+                              holder={"id": d.id, "name": d.name, "state": d.state})
 
     def set_alias(self, dep_id: int, alias: str | None) -> dict:
         """Change the LiteLLM model name. Empty/None clears it (the served name is used)."""
         alias = alias or None
         if alias is not None and not re.fullmatch(ALIAS_PATTERN, alias):
             raise DeployError("invalid_alias", "model name must be 1-64 characters: letters, digits and . _ : / -", 422)
-        self._require(dep_id)
+        dep = self._require(dep_id)
         if alias is not None:
-            self._check_alias_free(alias, dep_id)
+            self.require_model_name(alias, dep_id)
+        elif dep.state in self.NAME_HOLDING_STATES:
+            self.require_model_name(self._served_name(dep), dep_id)
         self._set_alias(dep_id, alias)
         return self.view(dep_id)
 

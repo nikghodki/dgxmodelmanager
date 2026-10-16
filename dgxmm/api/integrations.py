@@ -17,7 +17,8 @@ from dgxmm.audit import audit
 from dgxmm.auth.deps import Principal, current_principal, get_ctx, require_admin
 from dgxmm.context import AppContext
 from dgxmm.litellm import UNRESTRICTED, LiteLLMClient, LiteLLMError
-from dgxmm.settings_store import LITELLM_ENABLED, LITELLM_MASTER_KEY, LITELLM_PUBLIC_URL, LITELLM_URL
+from dgxmm.settings_store import (LITELLM_ENABLED, LITELLM_MASTER_KEY, LITELLM_MASTER_KEY_URL, LITELLM_PUBLIC_URL,
+                                  LITELLM_URL)
 
 router = APIRouter(prefix="/api/integrations/litellm", tags=["integrations"])
 
@@ -61,6 +62,9 @@ def key_out(k: dict) -> dict:
 
 
 def key_allows(k: dict, model_name: str) -> bool:
+    """Best-effort "can this key call model_name": unrestricted ([] or all-proxy-models) or listed by exact name.
+    Not modelled: team-level model lists/key inheritance from a team, access groups, wildcard patterns
+    (e.g. "openai/*"), per-model budgets, and expiry/blocked state. Treat the result as informational."""
     models = k.get("models") or []
     return not models or UNRESTRICTED in models or model_name in models
 
@@ -81,14 +85,16 @@ def _http_url(field: str, v: str) -> str:
 def settings_out(ctx: AppContext, status: dict) -> dict:
     cfg = ctx.settings_store.litellm()
     return {"enabled": cfg.enabled, "url": cfg.url, "public_url": cfg.public_url, "endpoint": cfg.endpoint,
-            "master_key_set": bool(cfg.master_key), "master_key_source": cfg.master_key_source, "status": status}
+            "master_key_set": bool(cfg.master_key), "master_key_source": cfg.master_key_source,
+            "master_key_hint": cfg.master_key_hint, "status": status}
 
 
-async def _status(ctx: AppContext) -> dict:
+async def _status(ctx: AppContext, force: bool = False) -> dict:
+    """Unauthenticated status, cached ~15 s (so viewers polling GET never cause more than one probe)."""
     if ctx.litellm is None or ctx.litellm.client is None:
         return {"reachable": False, "version": None, "db": None, "error": "LiteLLM integration not initialised",
                 "checked_at": None}
-    return await ctx.litellm.client.probe(timeout=3)
+    return await ctx.litellm.client.status(force=force)
 
 
 # ---------- settings ----------
@@ -118,41 +124,37 @@ async def put_settings(raw: Any = Body(...), p: Principal = Depends(require_admi
         raise api_error(422, "invalid_settings", f"invalid value for {field}", field=field) from None
     fields = body.model_fields_set
     store, changes = ctx.settings_store, {}
-    updates: list[tuple[str, str | None]] = []
     if "url" in fields and body.url is not None:
         url = _http_url("url", body.url) if body.url.strip() else None
-        updates.append((LITELLM_URL, url))
-        changes["url"] = url or "(default)"
+        if url != store.get(LITELLM_URL):
+            store.set(LITELLM_URL, url)
+            changes["url"] = url or "(default)"
     if "public_url" in fields and body.public_url is not None:
         pub = _http_url("public_url", body.public_url) if body.public_url.strip() else None
-        updates.append((LITELLM_PUBLIC_URL, pub))
-        changes["public_url"] = pub or ""
+        if pub != store.get(LITELLM_PUBLIC_URL):
+            store.set(LITELLM_PUBLIC_URL, pub)
+            changes["public_url"] = pub or ""
     if "master_key" in fields and body.master_key is not None:
         mk = body.master_key
         if mk and (len(mk) > 512 or any(c.isspace() or not c.isprintable() for c in mk)):
             raise api_error(422, "invalid_settings", "invalid value for master_key", field="master_key")
-        updates.append((LITELLM_MASTER_KEY, mk or None))
-        changes["master_key"] = "set" if mk else "cleared"
-    new_url = next((v for k, v in updates if k == LITELLM_URL), "-")
-    if new_url != "-":
-        cur = store.litellm()
-        effective = (new_url or ctx.settings.litellm_url).rstrip("/")
-        supplied = bool(body.master_key)
-        keeps_key = bool(cur.master_key) if body.master_key is None else \
-            bool(body.master_key or ctx.settings.read_secret(ctx.settings.litellm_key_file))
-        if effective != cur.url and keeps_key and not supplied:
-            # Write-only means write-only: pointing the stored key at another server would disclose it.
-            raise api_error(409, "master_key_required",
-                            "enter the master key again when changing the LiteLLM URL", field="master_key")
-    for key, value in updates:
-        store.set(key, value)
-    if "enabled" in fields and body.enabled is not None:
+        # Bound to the URL in effect after this request: it is never used with any other URL (see
+        # SettingsStore.litellm), so repointing the URL later cannot disclose it.
+        url_now = store.litellm().url
+        if mk and (mk != store.get(LITELLM_MASTER_KEY) or url_now != store.get(LITELLM_MASTER_KEY_URL)):
+            store.set_master_key(mk, url_now)
+            changes["master_key"] = "set"
+        elif not mk and store.get(LITELLM_MASTER_KEY) is not None:
+            store.set_master_key(None)
+            changes["master_key"] = "cleared"
+    if "enabled" in fields and body.enabled is not None and store.get(LITELLM_ENABLED) != str(body.enabled).lower():
         store.set_bool(LITELLM_ENABLED, body.enabled)
         changes["enabled"] = body.enabled
-    audit(ctx.db, p.user.id, "litellm_settings_update", "litellm", changes)
-    if ctx.litellm is not None:
-        ctx.litellm.trigger()
-    return settings_out(ctx, await _status(ctx))
+    if changes:
+        audit(ctx.db, p.user.id, "litellm_settings_update", "litellm", changes)
+        if ctx.litellm is not None:
+            ctx.litellm.trigger()
+    return settings_out(ctx, await _status(ctx, force=bool(changes)))
 
 
 @router.post("/test")
@@ -218,7 +220,7 @@ class KeyCreate(_Limits):
 class KeyPatch(_Limits):
     key_alias: str | None = Field(None, pattern=KEY_ALIAS_RE)
     models: list[str] | None = Field(None, max_length=200)
-    blocked: bool | None = None
+    blocked: StrictBool | None = None
 
 
 def _token(token: str) -> str:
