@@ -50,7 +50,7 @@ class FakeContainers:
     def __init__(self, client):
         self.client = client
 
-    def list(self, all=False, filters=None):
+    def list(self, all=False, filters=None, sparse=False):
         items = list(self.client._containers.values())
         if filters and "label" in filters:
             k, _, v = filters["label"].partition("=")
