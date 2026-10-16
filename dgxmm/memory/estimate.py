@@ -81,3 +81,27 @@ def estimate_vllm(spec: ArchSpec, weights_bytes: int, cfg: VllmSizing, settings:
 def vllm_gpu_util(total_bytes: int, mem_total: int) -> float:
     """vLLM's --gpu-memory-utilization is a fraction of TOTAL device memory."""
     return math.ceil(total_bytes / mem_total * 100) / 100
+
+
+MIB = 1024**2
+
+
+@dataclass(frozen=True)
+class LlamaCppSizing:
+    ctx_size: int
+    parallel: int
+    cache_type_k: str
+    cache_type_v: str
+    n_ubatch: int
+
+
+def estimate_llamacpp(spec: ArchSpec, weights_bytes: int, cfg: LlamaCppSizing, settings: Settings) -> MemoryEstimate:
+    b = (kv_dtype_bytes(cfg.cache_type_k, spec.torch_dtype) + kv_dtype_bytes(cfg.cache_type_v, spec.torch_dtype)) / 2
+    kv = kv_cache_bytes(spec, tokens_total=cfg.ctx_size, seqs=cfg.parallel, context=max(cfg.ctx_size // cfg.parallel, 1),
+                        bytes_per_elem=b, window_slack=cfg.n_ubatch)
+    st = state_bytes(spec, cfg.parallel)
+    compute = cfg.n_ubatch * spec.vocab_size * 4 + cfg.n_ubatch * spec.hidden_size * 4 * 8 + 256 * MIB
+    runtime = int(settings.llamacpp_runtime_fixed_gib * GIB)
+    margin, confidence, notes = _low_conf_margin(spec, kv, st, compute)
+    return MemoryEstimate(weights=weights_bytes, draft_weights=0, kv_cache=kv, state=st, activations=compute,
+                          runtime=runtime, margin=margin, confidence=confidence, notes=notes)

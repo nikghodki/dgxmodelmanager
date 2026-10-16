@@ -167,3 +167,39 @@ def api_stack(stack, settings, db):
         tc.stack = stack
         tc.ctx = c
         yield tc
+
+
+import gguf as _gguf
+
+
+def write_gguf(path, arch="qwen3", layers=36, hidden=4096, heads=32, kv=8, head_dim=128, ctx=40960, vocab=151936,
+               ftype=15, extra: dict | None = None, pad_bytes: int = 0):
+    """Write a metadata-only GGUF (no tensors) that llama.cpp-style readers can parse."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    w = _gguf.GGUFWriter(str(path), arch)
+    w.add_uint32(f"{arch}.block_count", layers)
+    w.add_uint32(f"{arch}.embedding_length", hidden)
+    w.add_uint32(f"{arch}.feed_forward_length", hidden * 3)
+    w.add_uint32(f"{arch}.attention.head_count", heads)
+    if isinstance(kv, list):
+        w.add_array(f"{arch}.attention.head_count_kv", kv)
+    else:
+        w.add_uint32(f"{arch}.attention.head_count_kv", kv)
+    w.add_uint32(f"{arch}.attention.key_length", head_dim)
+    w.add_uint32(f"{arch}.attention.value_length", head_dim)
+    w.add_uint32(f"{arch}.context_length", ctx)
+    w.add_uint32("general.file_type", ftype)
+    w.add_array("tokenizer.ggml.tokens", [f"t{i}" for i in range(vocab)])
+    for k, v in (extra or {}).items():
+        if isinstance(v, list):
+            w.add_array(k, v)
+        else:
+            w.add_uint32(k, v)
+    w.write_header_to_file()
+    w.write_kv_data_to_file()
+    w.write_tensors_to_file()
+    w.close()
+    if pad_bytes:
+        with open(path, "ab") as f:
+            f.truncate(path.stat().st_size + pad_bytes)
+    return path

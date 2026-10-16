@@ -102,11 +102,13 @@ class Deployer:
         if re.fullmatch(REPO_RE, ref) and ".." not in ref:
             return True
         try:
-            p = Path(ref).resolve(strict=False)
+            p = Path(ref)
+            p_resolved = p.resolve(strict=False)
         except (OSError, RuntimeError):
             return False
         roots = [Path(m.local).resolve() for m in self.settings.gguf_roots] + [Path(self.settings.hf_cache.local).resolve()]
-        return str(p) == ref and p.suffix.lower() == ".gguf" and any(r in p.parents for r in roots)
+        # Accept if: absolute path, has .gguf suffix, and the resolved path is under an allowed root
+        return p.is_absolute() and p.suffix.lower() == ".gguf" and any(r in p_resolved.parents for r in roots)
 
     def _transition(self, dep_id: int, to: str, message: str = "", log_tail: str | None = None, **fields) -> dict:
         with self.db.session() as s:
