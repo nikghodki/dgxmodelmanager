@@ -202,6 +202,7 @@ class FakeLiteLLM:
         self.impostor = False  # behave like some other HTTP server
         self.openapi_status, self.openapi_pad = 200, 0
         self.raw: dict[str, httpx.Response] = {}  # path -> canned response (after auth)
+        self.fail_update_tokens: set[str] = set()  # /key/update fails (500) for these tokens
         self.auth: list[str | None] = []
         self.calls: list[tuple[str, str]] = []
         self.hosts: list[str] = []
@@ -292,6 +293,8 @@ class FakeLiteLLM:
             rec = self.keys.get(body.get("key", ""))
             if rec is None:
                 return self._err(404, "Key not found.", "not_found_error")
+            if rec["token"] in self.fail_update_tokens:
+                return self._err(500, "boom", "internal_server_error")
             for k, v in body.items():
                 if k != "key" and v is not None:
                     rec[k] = v

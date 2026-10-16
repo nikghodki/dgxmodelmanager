@@ -665,6 +665,12 @@ class Deployer:
         self._set_alias(dep_id, alias)
         return self.view(dep_id)
 
+    async def rename(self, dep_id: int, alias: str | None) -> dict:
+        """set_alias under mem_lock: deploy/start/wake check and claim model names while holding it, so a rename
+        cannot take a name inside their await window."""
+        async with self.mem_lock:
+            return self.set_alias(dep_id, alias)
+
     def _set_alias(self, dep_id: int, alias: str | None) -> None:
         with self.db.session() as s:
             s.get(Deployment, dep_id).alias = alias
