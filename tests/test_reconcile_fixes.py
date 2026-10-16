@@ -13,7 +13,8 @@ SMALL = {"max_model_len": 4096, "max_num_seqs": 2, "max_num_batched_tokens": 204
 
 
 async def deploy(stack, name):
-    return await stack.deployer.deploy(DeployRequest(name=name, engine="vllm", model_ref="Qwen/Qwen3-Tiny", config=SMALL), 1)
+    return await stack.deployer.deploy(DeployRequest(name=name, engine="vllm", model_ref="Qwen/Qwen3-Tiny", config=SMALL,
+                                                     alias=name), 1)  # distinct LiteLLM model names (same model twice)
 
 
 async def test_reconcile_handles_interrupted_stop_and_continues(stack):
