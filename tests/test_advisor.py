@@ -79,3 +79,18 @@ def test_measured_benchmarks_override_rule_estimate():
             {"config_hash": config_hash(patched), "concurrency": 1, "tps_per_req": 31.0}]
     a = {x.id: x for x in advise(inp(benchmarks=rows))}["fp8_kv"]
     assert a.confidence == "measured" and "31" in a.expected_effect and "20" in a.expected_effect
+
+
+def test_measured_benchmarks_ignore_failed_zero_rows():
+    """Bug B: the newest row for a config can be a failed (requests=0, tps=0) level; it must be skipped."""
+    patched = {**VCFG, "kv_cache_dtype": "fp8"}
+    rows = [{"config_hash": config_hash(patched), "concurrency": 1, "tps_per_req": 0.0, "requests": 0},  # newest, failed
+            {"config_hash": config_hash(VCFG), "concurrency": 1, "tps_per_req": 0.0, "requests": 0},  # newest, failed
+            {"config_hash": config_hash(VCFG), "concurrency": 1, "tps_per_req": 20.0, "requests": 8},
+            {"config_hash": config_hash(patched), "concurrency": 1, "tps_per_req": 31.0, "requests": 8}]
+    a = {x.id: x for x in advise(inp(benchmarks=rows))}["fp8_kv"]
+    assert a.confidence == "measured" and "31" in a.expected_effect and "20" in a.expected_effect
+    # only failed rows for the patched config -> no "measured" claim at all
+    only_bad = [rows[0], rows[2]]
+    b = {x.id: x for x in advise(inp(benchmarks=only_bad))}["fp8_kv"]
+    assert b.confidence != "measured" and "measured on this box" not in b.expected_effect
