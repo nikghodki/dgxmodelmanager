@@ -2,5 +2,98 @@
 @tailwind components;
 @tailwind utilities;
 
-.th { @apply px-3 py-2 text-left text-xs font-semibold uppercase tracking-wide text-slate-500; }
-.td { @apply px-3 py-2 text-sm align-top; }
+@layer base {
+  :root {
+    /* Light — "Enterprise" (Stripe/Datadog) */
+    --background: 216 38.5% 97.5%;
+    --foreground: 222 47.4% 11.2%;
+    --card: 0 0% 100%;
+    --card-foreground: 222 47.4% 11.2%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 222 47.4% 11.2%;
+    --primary: 221 83.2% 53.3%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 214 33.3% 95.9%;
+    --secondary-foreground: 222 47.4% 11.2%;
+    --muted: 214 33.3% 95.9%;
+    --muted-foreground: 215 19.3% 34.5%;
+    --accent: 219 100% 96.7%;
+    --accent-foreground: 224 76.3% 48%;
+    --destructive: 0 72.2% 50.6%;
+    --destructive-foreground: 0 0% 100%;
+    --border: 218 26.8% 92%;
+    --input: 218 26.8% 92%;
+    --ring: 221 83.2% 53.3%;
+    --radius: 0.5rem;
+    --sidebar: 0 0% 100%;
+    --sidebar-foreground: 215 19.3% 34.5%;
+    --sidebar-border: 218 26.8% 92%;
+    --sidebar-accent: 219 100% 96.7%;
+    --card-shadow: 0 1px 2px rgb(16 24 40 / 0.04);
+
+    --status-good: #047857; --status-good-bg: #e7f8ef;
+    --status-warning: #b45309; --status-warning-bg: #fef3c7;
+    --status-sleeping: #6d28d9; --status-sleeping-bg: #f1ecff;
+    --status-critical: #b91c1c; --status-critical-bg: #fee2e2;
+    --status-neutral: #475569; --status-neutral-bg: #f1f5f9;
+
+    --chart-1: #2a78d6; --chart-2: #eb6834; --chart-3: #1baf7a; --chart-4: #eda100;
+    --chart-5: #e87ba4; --chart-6: #008300; --chart-7: #4a3aa7; --chart-8: #e34948;
+    --chart-external: #94a3b8; --chart-reserve: #dbe1ea; --chart-free: #bfe9d2;
+  }
+
+  .dark {
+    /* Dark — "Graphite" (Vercel/Linear) */
+    --background: 240 4.8% 4.1%;
+    --foreground: 240 5.9% 93.3%;
+    --card: 240 8.1% 7.3%;
+    --card-foreground: 240 5.9% 93.3%;
+    --popover: 240 8.1% 7.3%;
+    --popover-foreground: 240 5.9% 93.3%;
+    --primary: 239 83.5% 66.7%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 240 5.9% 10%;
+    --secondary-foreground: 240 5.9% 93.3%;
+    --muted: 240 5.9% 10%;
+    --muted-foreground: 240 5% 64.9%;
+    --accent: 240 8.2% 12%;
+    --accent-foreground: 0 0% 98%;
+    --destructive: 0 84.2% 60.2%;
+    --destructive-foreground: 0 0% 100%;
+    --border: 240 6.1% 12.9%;
+    --input: 240 6.1% 12.9%;
+    --ring: 234 89.5% 73.9%;
+    --sidebar: 240 6.2% 6.3%;
+    --sidebar-foreground: 240 5% 64.9%;
+    --sidebar-border: 240 6.1% 12.9%;
+    --sidebar-accent: 240 8.2% 12%;
+    --card-shadow: none;
+
+    --status-good: #4ade80; --status-good-bg: #10291c;
+    --status-warning: #fbbf24; --status-warning-bg: #2d2208;
+    --status-sleeping: #c4b5fd; --status-sleeping-bg: #231b3a;
+    --status-critical: #f87171; --status-critical-bg: #3b1111;
+    --status-neutral: #a1a1aa; --status-neutral-bg: #1c1c21;
+
+    --chart-1: #3987e5; --chart-2: #d95926; --chart-3: #199e70; --chart-4: #c98500;
+    --chart-5: #d55181; --chart-6: #008300; --chart-7: #9085e9; --chart-8: #e66767;
+    --chart-external: #6b6b70; --chart-reserve: #2a2a30; --chart-free: #1c3b2a;
+  }
+
+  * { @apply border-border; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    @apply bg-background text-foreground font-sans antialiased;
+    font-feature-settings: "cv11", "ss01";
+  }
+  :focus-visible { @apply outline-none ring-2 ring-ring ring-offset-2 ring-offset-background; }
+}
+
+@layer utilities {
+  .shadow-card { box-shadow: var(--card-shadow); }
+  .pb-safe { padding-bottom: env(safe-area-inset-bottom); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; transition-duration: 0.01ms !important; }
+}
