@@ -41,7 +41,7 @@ function DeployWizardPage() {
   const nav = useNavigate();
   const inv = useQuery({ queryKey: ["inventory"], queryFn: () => api<Artifact[]>("/inventory") });
   const engines = useQuery({ queryKey: ["engines"], queryFn: () => api<EngineInfo[]>("/engines") });
-  const litellm = useQuery({ queryKey: ["litellm"], queryFn: () => api<LiteLLMSettings>("/integrations/litellm"), staleTime: 60000 });
+  const litellm = useQuery({ queryKey: ["litellm"], queryFn: () => api<LiteLLMSettings>("/integrations/litellm?probe=false"), staleTime: 60000 });
   const deployable = (inv.data ?? []).filter((a) => a.complete && a.kind === "llm" && a.engines.length > 0);
   const [ref, setRef] = useState(params.get("model") ?? "");
   const artifact = deployable.find((a) => a.ref === ref);

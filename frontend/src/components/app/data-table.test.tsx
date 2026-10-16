@@ -69,4 +69,15 @@ describe("DataTable", () => {
     expect(errors.mock.calls.map((c) => String(c[0])).join("\n")).not.toMatch(/same key/);
     errors.mockRestore();
   });
+  it("keeps the row actions column pinned to the right edge (visible without sideways scrolling)", () => {
+    setMobile(false);
+    render(<DataTable columns={columns} data={rows} rowActions={(r) => <button type="button">Act {r.name}</button>} />);
+    const head = screen.getByText("Actions").closest("th")!;
+    const cell = screen.getByRole("button", { name: "Act beta" }).closest("td")!;
+    for (const el of [head, cell]) {
+      expect(el.className).toMatch(/\bsticky\b/);
+      expect(el.className).toMatch(/\bright-0\b/);
+      expect(el.className).toMatch(/\bsticky-actions\b/);  // opaque background + left edge (index.css)
+    }
+  });
 });

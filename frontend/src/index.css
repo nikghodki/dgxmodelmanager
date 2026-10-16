@@ -97,3 +97,10 @@
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; transition-duration: 0.01ms !important; }
 }
+
+/* DataTable: the pinned row-actions column needs an opaque background (it scrolls over other cells) and keeps
+   the row's hover tint. */
+@layer components {
+  .sticky-actions { background: hsl(var(--card)); box-shadow: inset 1px 0 0 hsl(var(--border)); }
+  tr:hover > .sticky-actions { background: linear-gradient(hsl(var(--muted) / 0.5), hsl(var(--muted) / 0.5)), hsl(var(--card)); }
+}

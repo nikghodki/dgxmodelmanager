@@ -583,3 +583,40 @@ def test_round5_wrapper_walks_stay_fast(argv):
     t0 = time.perf_counter()
     format_command(argv)
     assert time.perf_counter() - t0 < 0.2
+
+
+def test_exec_subcommand_is_not_the_exec_builtin():
+    """docker/podman/kubectl … exec is a subcommand, not the shell builtin exec: its -u/-w/--user values are option
+    values, never the command (docker exec -u curl -it c redis-cli -a S leaked S)."""
+    from dgxmm.memory.redact import _KNOWN_TOOLS, _TOOL_VALUE_FLAGS
+    leaks = []
+    container_opts = ("-u", "-w", "--user", "--workdir")
+    opts = {"docker": container_opts, "podman": container_opts, "nerdctl": container_opts, "crictl": container_opts,
+            "/usr/bin/docker": container_opts, "kubectl": ("-c", "--container", "--user", "-n"),
+            "oc": ("-c", "--container", "--user", "-n")}
+    for wrapper, wopts in opts.items():
+        for opt in wopts:
+            for name in sorted(_KNOWN_TOOLS):
+                for inner, flags in _TOOL_VALUE_FLAGS.items():
+                    for flag in flags:
+                        argv = [wrapper, "exec", opt, name, "-it", "c", inner, flag, S]
+                        if S in format_command(argv)[0]:
+                            leaks.append(argv)
+    assert leaks == [], f"{len(leaks)} leaks, e.g. {leaks[:3]}"
+    f = lambda argv: format_command(argv)[0]  # noqa: E731
+    assert f(["docker", "exec", "-u", "curl", "-it", "c", "redis-cli", "-a", S]) == \
+        "docker exec -u curl -it c redis-cli -a ***"
+    assert f(["docker", "--context", "x", "exec", "-u", "curl", "c", "redis-cli", "-a", S]).endswith("redis-cli -a ***")
+    # the shell builtin is still a prefix command
+    assert f(["exec", "redis-cli", "-a", S]) == "exec redis-cli -a ***"
+    assert f(["ssh", "h", "exec", "redis-cli", "-a", S]) == "ssh h exec redis-cli -a ***"
+
+
+def test_nul_padded_titles_drop_empty_args():
+    """redis-server rewrites its title padded with NULs: no trail of '' arguments in the display."""
+    assert format_command(["redis-server *:6379"] + [""] * 30) == ("'redis-server *:6379'", False)
+    assert format_command(["prog", "a", "", "", "", "b", "", ""])[0] == "prog a '' b"
+    assert format_command(["prog", "", "x"])[0] == "prog '' x"
+    # empties are collapsed after redaction, so they still count as positionals for it
+    out = format_command(["htpasswd", "-b", "f", "", "", S])[0]
+    assert S not in out

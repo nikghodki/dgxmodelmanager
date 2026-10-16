@@ -188,7 +188,8 @@ Interrupted downloads and models with missing files are marked **Incomplete**. F
 **Clean up** instead of Deploy. When there are any, the header shows **Clean up incomplete (N · size)**,
 which lists them all with checkboxes (all selected). Items that cannot be cleaned up right now are
 disabled with the reason: a download is running, a deployment uses the model, or a partial file was
-written in the last 10 minutes. Clean up only ever deletes incomplete models, never complete ones.
+written in the last 10 minutes. The same rules apply to a row's **Clean up**: its dialog shows the reason and
+keeps the confirm button disabled. Clean up only ever deletes incomplete models, never complete ones.
 
 ## Catalog and downloads
 
@@ -258,7 +259,8 @@ LiteLLM side, see [configuration](configuration.md#litellm-integration).
 
 The **LiteLLM** page (admins, under Integrations) has three parts. Notices at the top say when LiteLLM
 cannot be reached, no master key is set, or the integration is turned off. When LiteLLM is reachable,
-its version and database state are shown.
+its version and database state are shown. The settings appear straight away; the connection status
+shows "Checking LiteLLM…" until the probe answers.
 
 **Connection**
 
@@ -272,6 +274,11 @@ its version and database state are shown.
   DGXMM so the secret file applies again. A master key is only ever used with the URL it was entered
   for. If you change the internal URL, the page asks you to enter the master key for the new URL.
 - **Integration enabled**: when off, deployments are not registered.
+- **Turning it off, or changing the internal URL**, first removes the models DGXMM registered in the
+  LiteLLM it is leaving (only entries DGXMM created; models added by hand are untouched), using that
+  LiteLLM's own master key. The toast says how many were removed. If that LiteLLM cannot be reached, the
+  settings are still saved and a warning says how many DGXMM models may remain there and at which URL:
+  delete them in that LiteLLM, or re-enable the integration with that URL so DGXMM cleans up.
 - **Save** and **Discard changes**. **Test connection** checks that LiteLLM answers and accepts the
   master key, and shows the version, database state and model count. **Sync now** registers and
   removes models right away and reports the counts. Both use the saved settings.

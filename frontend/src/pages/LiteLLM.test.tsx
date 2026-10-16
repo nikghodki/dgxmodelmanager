@@ -34,7 +34,8 @@ function setup(over: Record<string, any> = {}, extra?: Handler) {
   vi.mocked(apiModule.api).mockImplementation(async (url: string, opts?: any) => {
     const r = extra?.(url, opts);
     if (r !== undefined) return r;
-    if (url === "/integrations/litellm" && !opts?.method) return settings(over);
+    if (url === "/integrations/litellm?probe=false" && !opts?.method) return settings(over);
+    if (url === "/integrations/litellm/status") return settings(over).status;
     if (url === "/integrations/litellm/models") return models;
     if (url === "/integrations/litellm/keys" && !opts?.method) return [key];
     if (url === "/deployments") return deployments;
@@ -280,5 +281,33 @@ describe("LiteLLM page", () => {
     await userEvent.clear(await screen.findByLabelText("Internal URL"));
     expect(screen.queryByTestId("master-key-hint")).toBeNull();
     expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
+  });
+
+  it("renders the form, models and keys before the status probe answers", async () => {
+    setup({ status: null }, (url) => (url === "/integrations/litellm/status" ? new Promise(() => undefined) : undefined));
+    expect(await screen.findByLabelText("Internal URL")).toHaveValue("http://litellm-proxy:4000");
+    expect(screen.getByText(/Checking LiteLLM/)).toBeInTheDocument();
+    expect(await screen.findByText("hand-written")).toBeInTheDocument();
+    expect(await screen.findByText("team-a")).toBeInTheDocument();
+    expect(screen.queryByText("Cannot reach LiteLLM")).toBeNull();
+    expect(calls(undefined as any, "/integrations/litellm")).toHaveLength(0);  // never the probing settings read
+  });
+
+  it("shows the LiteLLM version from the status probe", async () => {
+    setup({ status: null }, (url) => (url === "/integrations/litellm/status" ? okStatus : undefined));
+    expect(await screen.findByText(/LiteLLM 1\.100\.0/)).toBeInTheDocument();
+    expect(screen.queryByText(/version unknown/)).toBeNull();
+  });
+
+  it("says turning the integration off removes DGXMM's models, and warns when some may remain", async () => {
+    const user = userEvent.setup();
+    const warning = "1 DGXMM model may remain registered in http://litellm-proxy:4000; remove them there, or re-enable the integration with that URL to clean up";
+    setup({}, (url, opts) => (url === "/integrations/litellm" && opts?.method === "PUT"
+      ? { ...settings({ enabled: false }), deregistered: 0, deregister_error: "could not reach LiteLLM", warning } : undefined));
+    expect(await screen.findByText(/Turning it off \(or changing the internal URL\) first removes the models DGXMM registered there/)).toBeInTheDocument();
+    await user.click(screen.getByRole("switch", { name: "Integration enabled" }));
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    expect(await screen.findByText(warning)).toBeInTheDocument();
+    expect(screen.getByText(/while the integration is off; turning it off removes the models DGXMM registered there/)).toBeInTheDocument();
   });
 });

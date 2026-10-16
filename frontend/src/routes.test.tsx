@@ -57,7 +57,7 @@ describe("routes", () => {
         </MemoryRouter>
       </QueryClientProvider>,
     );
-    await waitFor(() => expect(vi.mocked(apiModule.api).mock.calls.some(([u]) => u === "/integrations/litellm")).toBe(true));
+    await waitFor(() => expect(vi.mocked(apiModule.api).mock.calls.some(([u]) => u === "/integrations/litellm?probe=false")).toBe(true));
     expect(screen.getByTestId("where")).toHaveTextContent("/litellm");
   });
 });

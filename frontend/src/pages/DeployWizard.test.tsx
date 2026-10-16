@@ -141,7 +141,7 @@ describe("DeployWizard", () => {
       if (url === "/inventory") return Promise.resolve([artifact]);
       if (url === "/engines") return Promise.resolve(engines);
       if (url === "/deployments/preview") return Promise.resolve({ ...fitsPreview, served_name: "model-a" });
-      if (url === "/integrations/litellm") return Promise.resolve({ endpoint: "https://llm.example.com/v1" });
+      if (url === "/integrations/litellm?probe=false") return Promise.resolve({ endpoint: "https://llm.example.com/v1" });
       return Promise.reject(new Error(`unexpected ${url}`));
     });
     renderWizard();

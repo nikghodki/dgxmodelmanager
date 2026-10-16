@@ -188,4 +188,16 @@ describe("Models", () => {
     const previews = () => api.mock.calls.filter(([p]) => p.startsWith("/inventory/delete-preview")).length;
     await waitFor(() => expect(previews()).toBeGreaterThanOrEqual(2));
   });
+  it("labels kinds as LLM / Draft / Other and hides low-value columns below 2xl", async () => {
+    vi.mocked(auth.useIsAdmin).mockReturnValue(false);
+    mockApi((path) => path === "/inventory" ? [art("org/done", true), art("org/draft", true, { kind: "draft" }), art("org/x", true, { kind: "other" })] : undefined);
+    renderModels();
+    expect(within(await row("org/done")).getByText("LLM")).toBeInTheDocument();
+    expect(within(await row("org/draft")).getByText("Draft")).toBeInTheDocument();
+    expect(within(await row("org/x")).getByText("Other")).toBeInTheDocument();
+    expect(screen.queryByText("llm")).toBeNull();
+    for (const h of ["Architecture", "Context"]) {
+      expect(screen.getByText(h).closest("th")!.className).toMatch(/\bhidden\b.*\b2xl:table-cell\b/);
+    }
+  });
 });
