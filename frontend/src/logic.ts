@@ -1,5 +1,7 @@
 // Small pure helpers used by pages; unit-tested in logic.test.ts.
 
+import type { PlanAction, Preview } from "./types";
+
 /** I5: only stopped/failed deployments can be removed (DELETE /deployments/{id}). */
 export const canRemove = (state: string) => state === "stopped" || state === "failed";
 
@@ -41,4 +43,13 @@ export function deploymentActions(d: { state: string; sleep_capable: boolean }, 
   if (d.state === "stopped" || d.state === "failed") out.push("start");
   if (canRemove(d.state)) out.push("remove");
   return out;
+}
+
+export function submitState(preview: Preview | null, actions: PlanAction[], pending: boolean, mode: "deploy" | "switch" | "reconfigure") {
+  if (pending) return { disabled: true, label: mode === "deploy" ? "Deploying…" : "Working… this can take minutes" };
+  const base = mode === "deploy" ? "Deploy" : mode === "switch" ? "Switch" : "Apply and restart";
+  if (!preview) return { disabled: true, label: base };
+  if (!preview.fit.fits && actions.length === 0) return { disabled: true, label: "Choose a plan to fit" };
+  if (actions.length) return { disabled: false, label: mode === "deploy" ? "Apply plan and deploy" : `Apply plan and ${base.toLowerCase()}` };
+  return { disabled: false, label: base };
 }
