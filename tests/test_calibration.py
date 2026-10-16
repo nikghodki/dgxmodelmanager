@@ -243,7 +243,7 @@ async def test_vllm_without_formula_kv_is_not_recorded(stack):
 
 async def test_memavailable_overshoot_is_learned_conservatively(stack, caplog):
     """Clean window, MemAvailable dropped far more than the engine accounted for: something was missed.
-    Record measured + the unexplained excess, flag it, and don't present it as 'measured' confidence."""
+    Flag it, warn, and don't present it as 'measured' confidence."""
     from dgxmm.memory.estimate import vllm_gpu_util
     cal = _wire(stack)
     total = stack.probe.total
@@ -257,7 +257,9 @@ async def test_memavailable_overshoot_is_learned_conservatively(stack, caplog):
     (r,) = cal.summary("vllm", "Qwen/Qwen3-Tiny")
     det = r["detail"]
     assert r["quality"] == "disputed_high" and any("MemAvailable" in m for m in caplog.messages)
-    assert det["unexplained_bytes"] == 10 * GIB and r["measured"] == det["learned_bytes"] + 10 * GIB
+    # a single disputed reading is recorded (and lowers confidence) but its excess is not learned (round 2)
+    assert det["unexplained_bytes"] == 10 * GIB and det["learned_excess_bytes"] == 0
+    assert r["measured"] == det["learned_bytes"]
     est = stack.deployer.prepare("vllm", "Qwen/Qwen3-Tiny", SMALL).estimate
     assert est.confidence == "calibrated" and est.total >= int(r["measured"] * 1.05)
 
@@ -279,3 +281,59 @@ def test_only_verified_exact_rows_claim_measured_confidence(db):
     assert a.total == int(12 * GIB * 1.05) and a.confidence == "calibrated" and "unverified" in a.notes[-1]
     cal.record("vllm", "r", "h", 10 * GIB, 12 * GIB, method="engine_log", quality="verified")
     assert cal.adjust("vllm", "r", "h", est(10 * GIB)).confidence == "measured"
+
+
+# ---- review round 2: disputed_high excess must be confirmed and capped ----
+async def _overshoot_launches(stack, extras):
+    from dgxmm.memory.estimate import vllm_gpu_util
+    cal = _wire(stack)
+    total = stack.probe.total
+
+    def make_log(d):
+        return vllm_log(vllm_gpu_util(d["reserved_bytes"], total) * total / GIB - 2.88)
+    req = DeployRequest(name="a", engine="vllm", model_ref="Qwen/Qwen3-Tiny", config=SMALL)
+    dep_id, res = None, []
+    for extra in extras:
+        dep_id, r = await _cycle(stack, dep_id=dep_id, req=req, make_log=make_log, host=GIB, extra_drop=extra)
+        res.append(r)
+    res.append(stack.deployer.prepare("vllm", "Qwen/Qwen3-Tiny", SMALL).estimate.total)
+    return cal, res
+
+
+async def test_single_external_allocation_is_not_learned(stack):
+    """One unrelated +8 GiB allocation during a startup window must not inflate the next reservation."""
+    cal, res = await _overshoot_launches(stack, [8 * GIB])
+    (r,) = cal.summary("vllm", "Qwen/Qwen3-Tiny")
+    assert r["quality"] == "disputed_high" and r["detail"]["unexplained_bytes"] == 8 * GIB
+    assert r["detail"]["learned_excess_bytes"] == 0 and r["measured"] == r["detail"]["learned_bytes"]
+    # the next reservation is what a clean launch would give: the 8 GiB excess is not in it
+    assert res[1] == max(int(r["measured"] * 1.05), res[0])
+
+
+async def test_repeated_excess_is_learned_but_capped(stack):
+    from dgxmm.memory.calibration import excess_cap
+    cal, res = await _overshoot_launches(stack, [8 * GIB, 9 * GIB])
+    rows = cal.summary("vllm", "Qwen/Qwen3-Tiny")  # newest first
+    second, first = rows[0], rows[1]
+    assert first["detail"]["learned_excess_bytes"] == 0
+    cap = excess_cap(second["detail"]["observed_bytes"])
+    assert cap < 8 * GIB  # the cap matters in this scenario
+    assert second["detail"]["learned_excess_bytes"] == cap
+    assert second["measured"] == second["detail"]["learned_bytes"] + cap
+
+
+def test_excess_cap_is_max_of_tolerance_cap_and_15_percent():
+    from dgxmm.memory.calibration import excess_cap
+    assert excess_cap(10 * GIB) == 3 * GIB
+    assert excess_cap(100 * GIB) == 15 * GIB
+
+
+def test_reset_removes_rows_for_one_model(db):
+    cal = Calibration(db)
+    cal.record("vllm", "a/m", "h", 10 * GIB, 12 * GIB, method="engine_log", quality="verified")
+    cal.record_oom("vllm", "a/m", "h", 10 * GIB)
+    cal.record("llamacpp", "a/m", "h", 10 * GIB, 12 * GIB, method="engine_log")
+    cal.record("vllm", "b/m", "h", 10 * GIB, 12 * GIB, method="engine_log")
+    assert cal.reset("a/m", engine="vllm") == 2
+    assert cal.summary("vllm", "a/m") == [] and len(cal.summary("llamacpp", "a/m")) == 1
+    assert cal.reset("a/m") == 1 and len(cal.summary("vllm", "b/m")) == 1
