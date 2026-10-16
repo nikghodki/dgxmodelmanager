@@ -10,16 +10,20 @@ from pathlib import Path
 from fastapi import FastAPI
 from fastapi.responses import FileResponse
 
-from dgxmm.api import auth as auth_api
-from dgxmm.api import users as users_api
+from dgxmm.api import auth as auth_api, users as users_api, host as host_api, inventory as inventory_api
+from dgxmm.api import engines as engines_api, deployments as deployments_api, stream as stream_api
 from dgxmm.context import AppContext
 
 log = logging.getLogger("dgxmm")
+
+ROUTERS = [auth_api, users_api, host_api, inventory_api, engines_api, deployments_api, stream_api]
 
 
 def create_app(ctx: AppContext) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
+        for fn in ctx.startup:
+            await fn()
         tasks = [asyncio.create_task(fn(), name=getattr(fn, "__name__", "bg")) for fn in ctx.background]
         try:
             yield
@@ -29,11 +33,13 @@ def create_app(ctx: AppContext) -> FastAPI:
             for t in tasks:
                 with contextlib.suppress(asyncio.CancelledError, Exception):
                     await t
+            if ctx.deployer is not None:
+                await ctx.deployer.aclose()
 
     app = FastAPI(title="DGX Model Manager", lifespan=lifespan, docs_url=None, redoc_url=None)
     app.state.ctx = ctx
     bp = ctx.settings.base_path
-    for module in (auth_api, users_api):
+    for module in ROUTERS:
         app.include_router(module.router, prefix=bp)
     _mount_static(app, Path(ctx.settings.static_dir), bp)
     return app
