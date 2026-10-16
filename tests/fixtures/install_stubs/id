@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+case "$1" in
+  -u) echo "${FAKE_UID:-1234}" ;;
+  -g) echo "${FAKE_GID:-2345}" ;;
+  -un) echo "tester" ;;
+  *) echo "uid=${FAKE_UID:-1234}(tester) gid=${FAKE_GID:-2345}(tester)" ;;
+esac

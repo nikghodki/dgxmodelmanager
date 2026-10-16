@@ -6,3 +6,7 @@ secrets
 tests
 docs
 .git
+.env
+config.yaml
+install.sh
+Makefile
