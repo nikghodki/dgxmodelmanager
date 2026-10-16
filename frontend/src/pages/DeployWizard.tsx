@@ -15,19 +15,18 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { fmtBytes } from "@/format";
+import { engineLabel, fmtBytes } from "@/format";
 import { useActionMutation } from "@/hooks/use-action-mutation";
 import { submitState } from "@/logic";
 import type { Artifact, EngineInfo, PlanAction, Preview } from "@/types";
 
 const slug = (ref: string) => ref.split("/").pop()!.toLowerCase().replace(/\.gguf$/, "").replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40) || "model";
-const engineLabel = (e: string) => (e === "llamacpp" ? "llama.cpp" : "vLLM");
 
-function Section({ n, title, description, children }: { n: number; title: string; description?: string; children: React.ReactNode }) {
+function Section({ n, title, titleId, description, children }: { n: number; title: string; titleId?: string; description?: string; children: React.ReactNode }) {
   return (
     <Card className="shadow-card">
       <CardHeader className="pb-3">
-        <CardTitle className="flex items-center gap-2 text-sm"><span className="flex h-5 w-5 items-center justify-center rounded-full bg-primary/10 text-[11px] font-semibold text-primary">{n}</span>{title}</CardTitle>
+        <CardTitle id={titleId} className="flex items-center gap-2 text-sm"><span aria-hidden className="flex h-5 w-5 items-center justify-center rounded-full bg-primary/10 text-[11px] font-semibold text-primary">{n}</span>{title}</CardTitle>
         {description && <CardDescription className="text-xs">{description}</CardDescription>}
       </CardHeader>
       <CardContent>{children}</CardContent>
@@ -70,11 +69,14 @@ function DeployWizardPage() {
   const body = useMemo(() => ({ engine, model_ref: ref, config }), [engine, ref, config]);
   useEffect(() => {
     if (!engine || !ref) return;
+    let live = true; // a slower, older preview must not overwrite the current one
     const t = setTimeout(async () => {
-      try { setPreview(await api<Preview>("/deployments/preview", { method: "POST", body })); setPreviewErr(null); }
-      catch (e) { setPreviewErr(e); setPreview(null); }
+      try {
+        const p = await api<Preview>("/deployments/preview", { method: "POST", body });
+        if (live) { setPreview(p); setPreviewErr(null); }
+      } catch (e) { if (live) { setPreviewErr(e); setPreview(null); } }
     }, 350);
-    return () => clearTimeout(t);
+    return () => { live = false; clearTimeout(t); };
   }, [body, engine, ref]);
 
   const actions = plan?.actions ?? [];
@@ -86,14 +88,15 @@ function DeployWizardPage() {
     onSuccess: (d: any) => nav(`/deployments/${d.id}`),
   });
 
+  // A 409 carries a fresh fit + plans: show them and make the user choose again. Depends only on the error,
+  // so choosing a plan afterwards sticks (and the functional update cannot re-trigger this effect).
   useEffect(() => {
-    if (deploy.error instanceof ApiError && deploy.error.code === "insufficient_memory") {
-      setPlan(null);
-      if (deploy.error.detail?.fit && deploy.error.detail?.plans) {
-        setPreview({ ...preview!, fit: deploy.error.detail.fit, plans: deploy.error.detail.plans });
-      }
-    }
-  }, [deploy.error, preview]);
+    const e = deploy.error;
+    if (!(e instanceof ApiError) || e.code !== "insufficient_memory") return;
+    setPlan(null);
+    const { fit, plans } = e.detail ?? {};
+    if (fit && plans) setPreview((p) => p && { ...p, fit, plans });
+  }, [deploy.error]);
 
   const submit = submitState(preview, actions, deploy.isPending, "deploy");
   const memoryChanged = deploy.error instanceof ApiError && deploy.error.code === "insufficient_memory";
@@ -117,23 +120,23 @@ function DeployWizardPage() {
   return (
     <div className="pb-[calc(44px+env(safe-area-inset-bottom)+1rem)] md:pb-0">
       <PageHeader title="Deploy a model" description="DGXMM checks memory before anything starts. Nothing is evicted without your confirmation." />
-      <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_380px]">
+      <div className="grid grid-cols-1 gap-6 lg:grid-cols-[minmax(0,1fr)_380px]">
         <div className="space-y-4">
-          <Section n={1} title="Model" description="Only complete, downloaded models are listed.">
-            <ModelSelect artifacts={deployable} value={ref} onChange={setRef} />
+          <Section n={1} title="Model" titleId="dep-model-label" description="Only complete, downloaded models are listed.">
+            <ModelSelect id="dep-model" labelledBy="dep-model-label" artifacts={deployable} value={ref} onChange={setRef} />
             {artifact && <p className="mt-2 text-xs text-muted-foreground tabular-nums">{artifact.architecture} · {artifact.quant} · {fmtBytes(artifact.weights_bytes)} weights · max context {artifact.max_context?.toLocaleString() ?? "?"}</p>}
           </Section>
           {artifact && (
             <>
               <Section n={2} title="Engine and name">
-                <div className="grid gap-4 sm:grid-cols-2">
-                  <div className="space-y-1.5"><Label>Engine</Label>
+                <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                  <div className="space-y-1.5"><Label id="dep-engine-label">Engine</Label>
                     <Select value={engine} onValueChange={(e) => { setEngine(e); setConfig(defaultsFor(e, artifact)); setPlan(null); }}>
-                      <SelectTrigger aria-label="Engine"><SelectValue /></SelectTrigger>
+                      <SelectTrigger id="dep-engine" aria-labelledby="dep-engine-label dep-engine-value"><SelectValue id="dep-engine-value" /></SelectTrigger>
                       <SelectContent>{artifact.engines.map((e) => <SelectItem key={e} value={e}>{engineLabel(e)}</SelectItem>)}</SelectContent>
                     </Select></div>
                   <div className="space-y-1.5"><Label htmlFor="dep-name">Deployment name</Label><Input id="dep-name" value={name} onChange={(e) => setName(e.target.value)} /></div>
-                  <div className="space-y-1.5"><Label htmlFor="dep-prio">Priority</Label><Input id="dep-prio" type="number" value={priority} onChange={(e) => setPriority(parseInt(e.target.value || "0", 10))} />
+                  <div className="space-y-1.5"><Label htmlFor="dep-prio">Priority</Label><Input id="dep-prio" type="number" value={priority} onChange={(e) => { const n = parseInt(e.target.value, 10); setPriority(Number.isFinite(n) ? n : 0); }} />
                     <p className="text-xs text-muted-foreground">Lower priority is evicted first.</p></div>
                   <div className="space-y-1.5"><Label htmlFor="dep-alias">LiteLLM alias</Label><Input id="dep-alias" placeholder="optional, e.g. default-chat" value={alias} onChange={(e) => setAlias(e.target.value)} /></div>
                 </div>

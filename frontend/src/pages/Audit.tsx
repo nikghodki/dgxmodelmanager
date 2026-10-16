@@ -32,7 +32,7 @@ function AuditPage() {
     <div className="space-y-4">
       <PageHeader title="Audit log" description="Every sign-in and change, newest first." />
       <ErrorState error={q.error} onRetry={() => q.refetch()} />
-      <DataTable columns={columns} data={shown} loading={q.isLoading} getRowId={(r) => `${r.ts}-${r.action}-${r.target}`}
+      <DataTable columns={columns} data={shown} loading={q.isLoading} getRowId={(r, i) => (r.id != null ? String(r.id) : String(i))}
         searchPlaceholder="Search user, action, target" searchText={(r) => `${r.user} ${r.action} ${r.target}`}
         toolbar={<Select value={action} onValueChange={setAction}><SelectTrigger className="h-9 w-48" aria-label="Filter by action"><SelectValue /></SelectTrigger>
           <SelectContent><SelectItem value={ALL}>All actions</SelectItem>{actions.map((a) => <SelectItem key={a} value={a}>{a}</SelectItem>)}</SelectContent></Select>}

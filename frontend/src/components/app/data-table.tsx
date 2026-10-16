@@ -3,7 +3,7 @@ import {
   flexRender, getCoreRowModel, getFilteredRowModel, getSortedRowModel, useReactTable,
   type ColumnDef, type SortingState,
 } from "@tanstack/react-table";
-import { ArrowDown, ArrowUp, ArrowUpDown, ChevronDown, ChevronRight, Search } from "lucide-react";
+import { ArrowDown, ArrowUp, ArrowUpDown, ChevronDown, ChevronRight, Search, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -17,7 +17,7 @@ export interface ColumnMeta { label?: string; className?: string; hideOnMobile?:
 export interface DataTableProps<T> {
   columns: ColumnDef<T, any>[];
   data: T[];
-  getRowId?: (r: T) => string;
+  getRowId?: (r: T, index: number) => string;
   searchPlaceholder?: string;
   searchText?: (r: T) => string;
   toolbar?: ReactNode;
@@ -72,7 +72,17 @@ export function DataTable<T>({
   if (loading) {
     return <div className="space-y-2">{bar}{[0, 1, 2, 3].map((i) => <Skeleton key={i} className="h-10 w-full" />)}</div>;
   }
-  if (!rows.length) return <div>{bar}{empty ?? <p className="py-8 text-center text-sm text-muted-foreground">No results.</p>}</div>;
+  if (!data.length) return <div>{bar}{empty ?? <p className="py-8 text-center text-sm text-muted-foreground">No results.</p>}</div>;
+  if (!rows.length) {
+    return (
+      <div>{bar}
+        <div className="flex flex-col items-center gap-2 py-8 text-center text-sm text-muted-foreground">
+          <p>No matches{query ? <> for “{query}”</> : null}.</p>
+          {query && <Button variant="outline" size="sm" onClick={() => setQuery("")}><X className="mr-1 h-3.5 w-3.5" />Clear search</Button>}
+        </div>
+      </div>
+    );
+  }
 
   if (mobile) {
     return (

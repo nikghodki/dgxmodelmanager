@@ -49,4 +49,24 @@ describe("DataTable", () => {
     render(<DataTable columns={columns} data={[]} empty={<p>Nothing here</p>} />);
     expect(screen.getByText("Nothing here")).toBeInTheDocument();
   });
+
+  it("says 'No matches' (not the empty slot) when search hides every row, and can clear the search", async () => {
+    setMobile(false);
+    render(<DataTable columns={columns} data={rows} searchPlaceholder="Search" searchText={(r) => r.name} empty={<p>Nothing here</p>} />);
+    await userEvent.type(screen.getByPlaceholderText("Search"), "zzz");
+    expect(screen.queryByText("Nothing here")).toBeNull();
+    expect(screen.getByText(/No matches/)).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Clear search" }));
+    expect(screen.getAllByRole("row")).toHaveLength(3);
+  });
+
+  it("passes the row index to getRowId so duplicate-looking rows get distinct keys", () => {
+    setMobile(false);
+    const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const dup = [rows[0], { ...rows[0] }];
+    render(<DataTable columns={columns} data={dup} getRowId={(r, i) => `${r.name}-${i}`} />);
+    expect(screen.getAllByRole("row")).toHaveLength(3);
+    expect(errors.mock.calls.map((c) => String(c[0])).join("\n")).not.toMatch(/same key/);
+    errors.mockRestore();
+  });
 });
