@@ -119,3 +119,13 @@ def benchmark_runs(dep_id: int, limit: int = Query(10, ge=1, le=100), p: Princip
         return [{"id": r.id, "status": r.status, "levels": r.levels, "failed_concurrency": r.failed_concurrency,
                  "error": r.error, "config_hash": r.config_hash, "started_at": r.started_at.isoformat(),
                  "finished_at": r.finished_at.isoformat() if r.finished_at else None} for r in rows]
+
+
+@router.delete("/calibration")
+def reset_calibration(repo: str = Query(..., min_length=1, max_length=512), engine: str | None = Query(None, max_length=16),
+                      p: Principal = Depends(require_admin), ctx: AppContext = Depends(get_ctx)):
+    """Forget learned memory calibration (measurements and OOM records) for one model, optionally one engine."""
+    from dgxmm.memory.calibration import Calibration
+    deleted = Calibration(ctx.db).reset(repo, engine=engine)
+    audit(ctx.db, p.user.id, "calibration_reset", repo, {"engine": engine, "deleted": deleted})
+    return {"deleted": deleted}

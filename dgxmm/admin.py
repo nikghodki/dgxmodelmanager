@@ -2,6 +2,9 @@
 
     docker exec dgxmm python -m dgxmm.admin reset-password <username>
     docker exec dgxmm python -m dgxmm.admin list-users
+    docker exec dgxmm python -m dgxmm.admin reset-calibration <repo> [--engine vllm|llamacpp]
+
+reset-calibration forgets learned memory calibration (measurements and OOM records) for one model.
 
 reset-password sets a new random password, forces a change at the next login, signs the user out
 everywhere and prints the new password once. It works while DGXMM is running (SQLite WAL).
@@ -49,6 +52,14 @@ def list_users(db: Database) -> list[tuple[str, str]]:
         return [(u.username, u.role) for u in s.scalars(select(User).order_by(User.username))]
 
 
+def reset_calibration(db: Database, repo: str, engine: str | None = None) -> int:
+    """Delete calibration rows for `repo` (optionally one engine); returns how many were deleted."""
+    from dgxmm.memory.calibration import Calibration
+    deleted = Calibration(db).reset(repo, engine=engine)
+    audit(db, None, "calibration_reset_cli", repo, {"engine": engine, "deleted": deleted})
+    return deleted
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m dgxmm.admin", description="DGXMM admin commands")
     parser.add_argument("--config", help="config file (default: $DGXMM_CONFIG or config.yaml)")
@@ -56,9 +67,16 @@ def main(argv: list[str] | None = None) -> int:
     rp = sub.add_parser("reset-password", help="set a new random password and sign the user out")
     rp.add_argument("username")
     sub.add_parser("list-users", help="list user names and roles")
+    rc = sub.add_parser("reset-calibration", help="forget learned memory calibration for a model")
+    rc.add_argument("repo")
+    rc.add_argument("--engine", help="only this engine (vllm or llamacpp)")
     args = parser.parse_args(argv)
 
     db = _db(args.config)
+    if args.cmd == "reset-calibration":
+        n = reset_calibration(db, args.repo, engine=args.engine)
+        print(f"deleted {n} calibration row(s) for {args.repo}" + (f" ({args.engine})" if args.engine else ""))
+        return 0
     if args.cmd == "list-users":
         for name, role in list_users(db):
             print(f"{name}\t{role}")

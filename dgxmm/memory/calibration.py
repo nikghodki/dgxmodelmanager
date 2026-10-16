@@ -18,8 +18,12 @@ recorded. llama.cpp allocates a fixed KV for its n_ctx, so its log total is lear
 The MemAvailable delta across startup (snapshot when the container starts vs. when it is ready) is
 compared with the *observed* footprint (full log total + host) and stored as `quality`:
   verified      - agrees within the tolerance min(max(10 %, 1 GiB), 3 GiB)
-  disputed_high - MemAvailable dropped by MORE than accounted for (OOM direction): the unexplained excess is
-                  added to the learned figure (conservative) and a warning is logged
+  disputed_high - MemAvailable dropped by MORE than accounted for (OOM direction); a warning is logged.
+                  A single such reading is usually an unrelated allocation elsewhere on the host, so its excess
+                  is NOT learned. Only when the previous engine-log reading for the same (engine, repo,
+                  config) was also disputed_high is an excess learned: the smaller of the two excesses, capped
+                  at max(DELTA_TOLERANCE_MAX, 15 % of observed) (`excess_cap`). Rows can be cleared with
+                  DELETE /api/calibration?repo=&engine= or `python -m dgxmm.admin reset-calibration <repo>`.
   disputed_low  - dropped by less (other host activity freed memory, or double counting): the log-based
                   figure is kept (it is a sum of real allocations)
   unverified    - no clean delta (another deployment changed state during the window, or no snapshot)
@@ -47,6 +51,7 @@ RELIABLE_METHODS = frozenset({"engine_log"})
 DELTA_TOLERANCE = 0.10
 DELTA_TOLERANCE_MIN = 1 * GIB
 DELTA_TOLERANCE_MAX = 3 * GIB
+EXCESS_CAP_RATIO = 0.15
 LOG_TAIL = 10000
 
 
@@ -68,6 +73,19 @@ class Calibration:
         with self.db.session() as s:
             s.add(MemoryCalibration(engine=engine, repo=repo, config_hash=config_hash, estimated_bytes=estimated,
                                     measured_bytes=0, oom=True, method="oom"))
+
+    def reset(self, repo: str, engine: str | None = None) -> int:
+        """Delete every calibration row (measurements and OOM records) for `repo` (optionally one engine)."""
+        from sqlalchemy import delete
+        stmt = delete(MemoryCalibration).where(MemoryCalibration.repo == repo)
+        if engine:
+            stmt = stmt.where(MemoryCalibration.engine == engine)
+        with self.db.session() as s:
+            return s.execute(stmt).rowcount or 0
+
+    def last_reading(self, engine: str, repo: str, config_hash: str) -> MemoryCalibration | None:
+        """Newest engine-log measurement for this exact configuration."""
+        return next((r for r in self._rows(engine, repo) if r.config_hash == config_hash and _usable(r)), None)
 
     def _rows(self, engine: str, repo: str) -> list[MemoryCalibration]:
         with self.db.session() as s:
@@ -115,6 +133,11 @@ class Calibration:
 
 def delta_tolerance(observed: int) -> int:
     return int(min(max(DELTA_TOLERANCE * observed, DELTA_TOLERANCE_MIN), DELTA_TOLERANCE_MAX))
+
+
+def excess_cap(observed: int) -> int:
+    """Most unexplained MemAvailable excess a confirmed disputed_high reading may add to what is learned."""
+    return int(max(DELTA_TOLERANCE_MAX, EXCESS_CAP_RATIO * observed))
 
 
 def delta_quality(observed: int, delta: int | None) -> str:
@@ -194,16 +217,25 @@ class CalibrationRecorder:
             delta = window["before"] - after
         quality = delta_quality(observed, delta)
         unexplained = delta - observed if quality == "disputed_high" else 0
-        measured = learned + unexplained
-        if unexplained:
-            log.warning("calibration: %s MemAvailable dropped %.1f GiB but the engine log + host account for %.1f GiB; "
-                        "learning the %.1f GiB excess too", dep.name, delta / GIB, observed / GIB, unexplained / GIB)
         from dgxmm.deployer.service import config_hash
+        h = config_hash(dep.config)
+        learned_excess = 0
+        if unexplained:
+            prev = self.calibration.last_reading(dep.engine, dep.model_ref, h)
+            prev_excess = (prev.detail or {}).get("unexplained_bytes", 0) if prev and prev.quality == "disputed_high" else 0
+            if prev_excess > 0:  # confirmed by two consecutive readings: learn the smaller excess, capped
+                learned_excess = min(unexplained, prev_excess, excess_cap(observed))
+            log.warning("calibration: %s MemAvailable dropped %.1f GiB but the engine log + host account for %.1f GiB; "
+                        "%s", dep.name, delta / GIB, observed / GIB,
+                        f"learning {learned_excess / GIB:.1f} GiB of the excess (seen twice, capped)" if learned_excess
+                        else "not learned unless the next launch of this configuration shows it too")
+        measured = learned + learned_excess
         raw = dep.estimate.get("total", dep.reserved_bytes) - dep.estimate.get("margin", 0) if dep.estimate else dep.reserved_bytes
         detail = {"engine_bytes": fp.total, "host_bytes": host, "observed_bytes": observed, "learned_bytes": learned,
-                  "formula_kv_bytes": formula_kv, "unexplained_bytes": unexplained, "complete": fp.complete,
+                  "formula_kv_bytes": formula_kv, "unexplained_bytes": unexplained,
+                  "learned_excess_bytes": learned_excess, "complete": fp.complete,
                   "parts": fp.parts, "memavailable_delta": delta, "cgroup_nvml_bytes": actual}
-        self.calibration.record(dep.engine, dep.model_ref, config_hash(dep.config), int(raw), int(measured),
+        self.calibration.record(dep.engine, dep.model_ref, h, int(raw), int(measured),
                                 method="engine_log", quality=quality, detail=detail)
         log.info("calibration: %s estimated %.1f GiB (formula) measured %.1f GiB (observed %.1f = engine log %.1f + "
                  "host %.1f; MemAvailable delta %s) quality=%s", dep.name, raw / GIB, measured / GIB, observed / GIB,
