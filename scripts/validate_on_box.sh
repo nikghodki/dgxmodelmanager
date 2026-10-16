@@ -33,7 +33,8 @@ run_one() {  # name engine ref config_json
   wait_state "$id" ready 600 || { curl "${H[@]}" "$B/deployments/$id" | py 'print(d["last_error"])'; fail "$1 ready"; }
   pass "$1 ready"
   sleep 20
-  curl "${H[@]}" "$B/deployments/$id" | py 'r,a=d["reserved_bytes"],d["actual_bytes"] or 0; print("reserved %.2f GiB measured %.2f GiB ratio %.2f" % (r/2**30, a/2**30, a/max(r,1))); assert a<=r*1.15, "measured exceeds reservation by >15%"' || fail "$1 memory check"
+  curl "${H[@]}" "$B/deployments/$id" | py 'r,a=d["reserved_bytes"],d["actual_bytes"] or 0; print("reserved %.2f GiB measured %.2f GiB ratio %.2f (measured = cgroup + NVML; on GB10 CUDA memory is not attributed, so the gap is credited out of external while ready)" % (r/2**30, a/2**30, a/max(r,1))); assert a<=r*1.15, "measured exceeds reservation by >15%"' || fail "$1 memory check"
+  curl "${H[@]}" "$B/host" | py 'b=d["budget"]; print("  host while ready: external %.1f GiB committed %.1f GiB free_for_new %.1f GiB" % (b["external"]/2**30, b["committed"]/2**30, b["free_for_new"]/2**30)); assert b["free_for_new"] == b["usable"]-b["committed"]-b["external"]' || fail "$1 budget identity"
   pass "$1 memory within reservation"
   curl "${H[@]}" -d '{"levels":[1,4],"input_len":256,"output_len":64,"duration_s":20,"max_requests":8}' "$B/deployments/$id/benchmark" >/dev/null
   for _ in $(seq 1 120); do n=$(curl "${H[@]}" "$B/deployments/$id/benchmarks" | py 'print(len([b for b in d if b["current"]]))'); [ "$n" -ge 2 ] && break; sleep 1; done

@@ -10,6 +10,7 @@ from dgxmm.memory.hostmem import HostMemory, HostSample
 
 COMMITTED_STATES = frozenset({"starting", "loading", "ready", "unknown"})
 MEASURED_STATES = COMMITTED_STATES | {"sleeping", "stopping"}
+CREDITED_STATES = frozenset({"ready"})  # reservation fully allocated: unattributed gap is ours
 
 UsageRow = tuple[int, str, str, int, str | None]
 
@@ -52,7 +53,12 @@ def compute_budget(mem: HostMemory, usages: list[DeploymentUsage], settings: Set
         elif u.state in ("sleeping", "stopping"):
             committed += u.actual
     managed_actual = sum(u.actual for u in usages if u.state in MEASURED_STATES)
-    external = max(mem.used - managed_actual, 0)
+    # GB10 unified memory: CUDA allocations are neither charged to the container cgroup nor reported
+    # per process by NVML, so a ready model's reservation is in `used` but only partly in `actual`.
+    # Credit that unattributed gap for READY deployments only (their allocation is complete); never for
+    # starting/loading (still growing) so the gate stays conservative.
+    ready_gap = sum(max(u.reserved - u.actual, 0) for u in usages if u.state in CREDITED_STATES)
+    external = max(mem.used - managed_actual - ready_gap, 0)
     return Budget(total=mem.total, available=mem.available, margin=settings.margin_bytes,
                   os_reserve=settings.os_reserve_bytes, usable=usable, committed=committed,
                   managed_actual=managed_actual, external=external,

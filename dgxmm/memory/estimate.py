@@ -53,6 +53,12 @@ class VllmSizing:
     kv_tokens: int | None
 
 
+def default_kv_tokens(max_model_len: int, max_num_seqs: int) -> int:
+    """Default vLLM KV pool when kv_tokens is not set. vLLM pages all sequences into ONE shared pool,
+    so reserving context x seqs is rarely needed; two full-length requests' worth is the default."""
+    return min(max_model_len * max_num_seqs, 2 * max_model_len)
+
+
 def _low_conf_margin(spec: ArchSpec, *parts: int) -> tuple[int, str, tuple[str, ...]]:
     if spec.confident:
         return 0, "estimated", ()

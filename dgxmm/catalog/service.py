@@ -8,7 +8,7 @@ from dgxmm.catalog.llmfit import LlmfitError
 from dgxmm.catalog.support import engine_support
 from dgxmm.config import GIB
 from dgxmm.inventory.archspec import parse_hf_config
-from dgxmm.memory.estimate import VllmSizing, estimate_vllm
+from dgxmm.memory.estimate import VllmSizing, default_kv_tokens, estimate_vllm
 from dgxmm.planner.fit import check_fit
 from dgxmm.planner.plans import base_model_name
 
@@ -79,7 +79,9 @@ class CatalogService:
                      "quant": spec.quant if spec else guess_quant(repo_id)}
         evictable = self._evictable()
         if spec and weights:
-            est = estimate_vllm(spec, weights, VllmSizing(min(ctx, spec.max_context), 8, 8192, "auto", None), self.settings)
+            n_ctx = min(ctx, spec.max_context)
+            est = estimate_vllm(spec, weights, VllmSizing(n_ctx, 8, 8192, "auto", default_kv_tokens(n_ctx, 8)),
+                                self.settings)
             out["estimate"] = est.as_dict()
             out["fit"] = {**fit_badge(est.total, budget, evictable), **check_fit(est, budget).as_dict()}
         out["gguf_files"] = [{"name": f.name, "size": f.size, "quant": guess_quant(f.name),

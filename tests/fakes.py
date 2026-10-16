@@ -167,3 +167,21 @@ class FakeEngines:
 
     def client(self) -> httpx.AsyncClient:
         return httpx.AsyncClient(transport=httpx.MockTransport(self.handler))
+
+
+def free_on_stop(deployer, probe) -> None:
+    """Make FakeProbe behave like GB10 unified memory: stopping a deployment returns its memory
+    (reservation, or measured memory if it was sleeping) to MemAvailable."""
+    orig = deployer.stop
+
+    async def stop(dep_id, *a, **kw):
+        dep = deployer._get(dep_id)
+        before = dep.state if dep else None
+        actual = deployer._actual(dep_id) or 0
+        out = await orig(dep_id, *a, **kw)
+        if before in ("ready", "unknown", "starting", "loading"):
+            probe.available += max(dep.reserved_bytes, actual)
+        elif before == "sleeping":
+            probe.available += actual
+        return out
+    deployer.stop = stop
