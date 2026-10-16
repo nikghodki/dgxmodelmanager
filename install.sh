@@ -670,6 +670,19 @@ cmd_install() {
 
   if ((DRY_RUN)); then
     note "[dry-run] would wait for the healthcheck, then save a first-run admin password to secrets/admin_password"
+    # Reverse proxy trusted_proxies hint
+    if [ "$BIND" = "127.0.0.1" ] || [ "$BIND" = "::1" ]; then
+      if [ -z "${DGXMM_TRUSTED_PROXIES:-}" ]; then
+        local gw
+        gw=$(docker network inspect "$NETWORK" -f '{{(index .IPAM.Config 0).Gateway}}' 2>/dev/null || true)
+        if [ -n "$gw" ]; then
+          printf '
+'
+          note "[dry-run] Behind a reverse proxy? Set DGXMM_TRUSTED_PROXIES in .env to your proxy's address"
+          note "           For a proxy on this host use $gw (the gateway IP of $NETWORK), then re-run ./install.sh"
+        fi
+      fi
+    fi
     info "Dry run complete: nothing was changed. DGXMM would be reachable at:"
     print_urls
     return 0

@@ -24,7 +24,7 @@ an admin creates or resets.
 
 | Role | Can |
 |---|---|
-| **viewer** | See the dashboard, deployments, models, catalog, downloads and planner, and run memory checks. |
+| **viewer** | See the dashboard, deployments, models, catalog, downloads and planner, and run memory checks. Cannot see users, audit log or container logs. |
 | **admin** | Everything: deploy, start, stop, sleep, switch, reconfigure, remove, download, benchmark, view container logs, manage users, read the audit log. |
 
 After 5 failed sign-ins within a minute (per IP or per username), further attempts are refused for a
