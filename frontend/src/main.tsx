@@ -3,10 +3,10 @@ import "@fontsource-variable/jetbrains-mono";
 import React from "react";
 import ReactDOM from "react-dom/client";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { BrowserRouter, Route, Routes } from "react-router-dom";
+import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
 import "./index.css";
 import { AuthProvider, RequireAuth } from "./auth";
-import { Layout } from "./components/Layout";
+import { AppShell } from "@/components/app/app-shell";
 import { Audit } from "./pages/Audit";
 import { Catalog } from "./pages/Catalog";
 import { ChangePassword } from "./pages/ChangePassword";
@@ -38,9 +38,9 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
             <AuthProvider>
               <Routes>
                 <Route path="/login" element={<Login />} />
-                <Route path="/change-password" element={<RequireAuth><ChangePassword /></RequireAuth>} />
-                <Route element={<RequireAuth><Layout /></RequireAuth>}>
+                <Route element={<RequireAuth><AppShell /></RequireAuth>}>
                   <Route path="/" element={<Dashboard />} />
+                  <Route path="/deployments" element={<Navigate to="/" replace />} />
                   <Route path="/models" element={<Models />} />
                   <Route path="/catalog" element={<Catalog />} />
                   <Route path="/downloads" element={<Downloads />} />
@@ -49,6 +49,7 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
                   <Route path="/deployments/:id" element={<DeploymentDetail />} />
                   <Route path="/users" element={<Users />} />
                   <Route path="/audit" element={<Audit />} />
+                  <Route path="/change-password" element={<ChangePassword />} />
                 </Route>
               </Routes>
             </AuthProvider>
