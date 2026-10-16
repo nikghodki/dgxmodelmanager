@@ -111,7 +111,7 @@ def test_alias_change_reregisters_via_api(lite):
     lite.post(BASE + "/sync", headers=lite.h)
     lite.ctx.litellm._wake.clear()
     r = lite.patch(f"{DEP}/{a['id']}", headers=lite.h, json={"alias": "chat2"})
-    assert r.json()["affected_keys"] == [] and r.json()["keys_rewritten"] is False
+    assert r.json()["affected_keys"] == [] and r.json()["keys_rewritten"] == 0
     assert lite.ctx.litellm._wake.is_set()
     r = lite.post(BASE + "/sync", headers=lite.h).json()
     assert (r["registered"], r["removed"]) == (1, 1)
@@ -126,17 +126,53 @@ def test_alias_change_reports_and_rewrites_scoped_keys(lite):
     r = lite.patch(f"{DEP}/{a['id']}", headers=lite.h, json={"alias": "chat2"})
     assert r.status_code == 200
     j = r.json()
-    assert [k["key_alias"] for k in j["affected_keys"]] == ["scoped"] and j["keys_rewritten"] is False
-    assert j["affected_keys"][0] == {"token": scoped, "key_alias": "scoped", "models": ["chat", "other"]}
+    assert [k["key_alias"] for k in j["affected_keys"]] == ["scoped"] and j["keys_rewritten"] == 0
+    assert j["affected_keys"][0] == {"token": scoped, "key_alias": "scoped", "models": ["chat", "other"],
+                                     "rewritten": False}
     assert lite.fake.keys[scoped]["models"] == ["chat", "other"]  # untouched without rewrite_keys
     r = lite.patch(f"{DEP}/{a['id']}", headers=lite.h, json={"alias": "chat3", "rewrite_keys": False})
     assert r.json()["affected_keys"] == []  # the key no longer names chat2
     lite.fake.keys[scoped]["models"] = ["chat3", "other"]
     r = lite.patch(f"{DEP}/{a['id']}", headers=lite.h, json={"alias": "chat4", "rewrite_keys": True})
     j = r.json()
-    assert j["keys_rewritten"] is True and lite.fake.keys[scoped]["models"] == ["chat4", "other"]
+    assert j["keys_rewritten"] == 1 and lite.fake.keys[scoped]["models"] == ["chat4", "other"]
+    assert j["affected_keys"][0]["rewritten"] is True
     row = [d for a_, _, d in audit_rows(lite) if a_ == "deployment_alias"][-1]
-    assert row["keys_rewritten"] == 1
+    assert row["keys_rewritten"] == 1 and row["rewritten_keys"] == ["scoped"]
+
+
+def test_partial_key_rewrite_is_reported_and_audited(lite):
+    a = deploy(lite, lite.h, "a", alias="chat")
+    k1 = lite.fake.add_key("k1", ["chat"])
+    k2 = lite.fake.add_key("k2", ["chat"])
+    lite.fake.fail_update_tokens.add(k2)
+    r = lite.patch(f"{DEP}/{a['id']}", headers=lite.h, json={"alias": "chat2", "rewrite_keys": True})
+    assert r.status_code == 200
+    j = r.json()
+    assert {k["key_alias"]: k["rewritten"] for k in j["affected_keys"]} == {"k1": True, "k2": False}
+    assert j["keys_rewritten"] == 1 and j["keys_error"]["code"] == "litellm_error"
+    assert lite.fake.keys[k1]["models"] == ["chat2"] and lite.fake.keys[k2]["models"] == ["chat"]
+    row = [d for a_, _, d in audit_rows(lite) if a_ == "deployment_alias"][-1]
+    assert row["keys_rewritten"] == 1 and row["rewritten_keys"] == ["k1"]
+
+
+def test_rewrite_does_not_duplicate_new_name(lite):
+    a = deploy(lite, lite.h, "a", alias="chat")
+    k = lite.fake.add_key("both", ["chat", "chat2", "x"])
+    lite.patch(f"{DEP}/{a['id']}", headers=lite.h, json={"alias": "chat2", "rewrite_keys": True})
+    assert lite.fake.keys[k]["models"] == ["chat2", "x"]
+
+
+async def test_rename_waits_for_name_reservation_lock(stack):
+    import asyncio
+    from dgxmm.deployer.service import DeployRequest
+    stack.http.all_healthy = True
+    d = await stack.deployer.deploy(DeployRequest(name="a", engine="vllm", model_ref="Qwen/Qwen3-Tiny", config=SMALL), 1)
+    async with stack.deployer.mem_lock:  # held by deploy/wake/start while they check and claim names
+        t = asyncio.create_task(stack.deployer.rename(d["id"], "chat"))
+        await asyncio.sleep(0.05)
+        assert not t.done()
+    assert (await t)["alias"] == "chat"
 
 
 def test_alias_change_keys_unavailable(lite):
