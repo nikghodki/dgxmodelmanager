@@ -17,8 +17,9 @@ import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { engineLabel, fmtBytes } from "@/format";
 import { useActionMutation } from "@/hooks/use-action-mutation";
+import { aliasProblem } from "@/lib/litellm";
 import { submitState } from "@/logic";
-import type { Artifact, EngineInfo, PlanAction, Preview } from "@/types";
+import type { Artifact, EngineInfo, LiteLLMSettings, PlanAction, Preview } from "@/types";
 
 const slug = (ref: string) => ref.split("/").pop()!.toLowerCase().replace(/\.gguf$/, "").replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40) || "model";
 
@@ -39,6 +40,7 @@ function DeployWizardPage() {
   const nav = useNavigate();
   const inv = useQuery({ queryKey: ["inventory"], queryFn: () => api<Artifact[]>("/inventory") });
   const engines = useQuery({ queryKey: ["engines"], queryFn: () => api<EngineInfo[]>("/engines") });
+  const litellm = useQuery({ queryKey: ["litellm"], queryFn: () => api<LiteLLMSettings>("/integrations/litellm"), staleTime: 60000 });
   const deployable = (inv.data ?? []).filter((a) => a.complete && a.kind === "llm" && a.engines.length > 0);
   const [ref, setRef] = useState(params.get("model") ?? "");
   const artifact = deployable.find((a) => a.ref === ref);
@@ -81,7 +83,7 @@ function DeployWizardPage() {
 
   const actions = plan?.actions ?? [];
   const deploy = useActionMutation(() => api<{ id: number }>("/deployments", {
-    method: "POST", body: { name, engine, model_ref: ref, config, priority, alias: alias || null, actions },
+    method: "POST", body: { name, engine, model_ref: ref, config, priority, alias: alias.trim() || null, actions },
   }), {
     success: (d: any) => `Deploying ${name} (id ${d.id})`,
     invalidate: [["deployments"], ["host"]],
@@ -98,7 +100,9 @@ function DeployWizardPage() {
     if (fit && plans) setPreview((p) => p && { ...p, fit, plans });
   }, [deploy.error]);
 
-  const submit = submitState(preview, actions, deploy.isPending, "deploy");
+  const aliasErr = aliasProblem(alias);
+  const baseSubmit = submitState(preview, actions, deploy.isPending, "deploy");
+  const submit = { ...baseSubmit, disabled: baseSubmit.disabled || !!aliasErr };
   const memoryChanged = deploy.error instanceof ApiError && deploy.error.code === "insufficient_memory";
 
   const check = (
@@ -138,7 +142,14 @@ function DeployWizardPage() {
                   <div className="space-y-1.5"><Label htmlFor="dep-name">Deployment name</Label><Input id="dep-name" value={name} onChange={(e) => setName(e.target.value)} /></div>
                   <div className="space-y-1.5"><Label htmlFor="dep-prio">Priority</Label><Input id="dep-prio" type="number" value={priority} onChange={(e) => { const n = parseInt(e.target.value, 10); setPriority(Number.isFinite(n) ? n : 0); }} />
                     <p className="text-xs text-muted-foreground">Lower priority is evicted first.</p></div>
-                  <div className="space-y-1.5"><Label htmlFor="dep-alias">LiteLLM alias</Label><Input id="dep-alias" placeholder="optional, e.g. default-chat" value={alias} onChange={(e) => setAlias(e.target.value)} /></div>
+                  <div className="space-y-1.5"><Label htmlFor="dep-alias">Model name (LiteLLM)</Label>
+                    <Input id="dep-alias" placeholder={preview?.served_name ?? "optional, e.g. default-chat"} value={alias} aria-invalid={!!aliasErr}
+                      aria-describedby="dep-alias-help" onChange={(e) => setAlias(e.target.value)} />
+                    {aliasErr ? <p id="dep-alias-help" className="text-xs text-status-critical">{aliasErr}</p> : (
+                      <p id="dep-alias-help" className="break-words text-xs text-muted-foreground">
+                        Clients call <code className="font-mono">{litellm.data?.endpoint ?? "the LiteLLM endpoint"}</code> with model: <code className="font-mono">{alias.trim() || preview?.served_name || "<served name>"}</code>. Defaults to the served name.
+                      </p>)}
+                  </div>
                 </div>
               </Section>
               <Section n={3} title="Sizing and features">

@@ -53,7 +53,15 @@ export function DeploymentsTable({ deployments, isAdmin, loading, searchable, on
       <span className="tabular-nums">{fmtBytes(row.original.actual_bytes)} <span className="text-muted-foreground">/ {fmtBytes(row.original.reserved_bytes)}</span></span>) },
     { id: "tps", header: "Tok/s", enableSorting: false, cell: ({ row }) => <Live id={row.original.id} field="gen_tps" fmt={(v) => fmtNum(v, 1)} /> },
     { id: "kv", header: "KV", enableSorting: false, meta: { hideOnMobile: true }, cell: ({ row }) => <Live id={row.original.id} field="kv_usage" fmt={fmtPct} /> },
-    { accessorKey: "litellm_status", header: "LiteLLM", meta: { hideOnMobile: true }, cell: ({ getValue }) => <StatusBadge state={getValue()} /> },
+    { id: "litellm", header: "LiteLLM", meta: { hideOnMobile: true }, accessorFn: (d) => d.model_name ?? d.alias ?? d.served_name ?? "", cell: ({ row }) => {
+      const name = row.original.model_name ?? row.original.alias ?? row.original.served_name;
+      return (
+        <span className="flex flex-col items-start gap-1">
+          {name && <span title={name} className="block max-w-[22ch] truncate font-mono text-xs">{name}</span>}
+          <StatusBadge state={row.original.litellm_status} />
+        </span>
+      );
+    } },
   ];
 
   const menu = (d: Deployment) => {
@@ -82,7 +90,7 @@ export function DeploymentsTable({ deployments, isAdmin, loading, searchable, on
     <>
       <DataTable columns={columns} data={deployments} getRowId={(d) => String(d.id)} loading={loading} rowActions={menu}
         searchPlaceholder={searchable ? "Search deployments" : undefined}
-        searchText={(d) => `${d.name} ${d.model_ref} ${d.engine} ${d.state}`}
+        searchText={(d) => `${d.name} ${d.model_ref} ${d.engine} ${d.state} ${d.model_name ?? ""}`}
         mobileTitle={(d) => <div className="flex items-center gap-2"><Link to={`/deployments/${d.id}`} className="hover:underline">{d.name}</Link></div>} />
       <ConfirmDialog open={!!pending} onOpenChange={(o) => !o && setPending(null)}
         title={pending?.kind === "stop" ? `Stop ${pending?.d.name}?` : `Remove ${pending?.d.name}?`}
