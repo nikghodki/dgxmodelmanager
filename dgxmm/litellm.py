@@ -67,17 +67,19 @@ class LiteLLMSync:
             self._set_status("disabled")
             return True
         try:
-            have: dict[tuple[str, str], list[tuple[str, str]]] = {}
+            have: dict[tuple[str, str], list[tuple[str, str, str]]] = {}
             for m in await self.client.list_dgxmm():
                 key = (str(m["model_info"]["dgxmm_id"]), m["model_name"])
-                have.setdefault(key, []).append((m["model_info"]["id"], (m.get("litellm_params") or {}).get("api_base", "")))
+                have.setdefault(key, []).append((m["model_info"]["id"],
+                                                (m.get("litellm_params") or {}).get("api_base", ""),
+                                                (m.get("litellm_params") or {}).get("model", "")))
             want = self.desired()
             for key, entries in have.items():
                 target = want.get(key)
                 keep = None
                 if target:
-                    keep = next((e for e in entries if e[1] == target[0]), None)
-                for model_id, _ in entries:
+                    keep = next((e for e in entries if e[1] == target[0] and e[2] == f"openai/{target[1]}"), None)
+                for model_id, _, _ in entries:
                     if keep is None or model_id != keep[0]:
                         await self.client.delete(model_id)
                 if target and keep is None:
@@ -102,7 +104,11 @@ class LiteLLMSync:
     async def run(self) -> None:
         failure_delay = 5.0
         while True:
-            ok = await self.sync()
+            try:
+                ok = await self.sync()
+            except Exception as e:
+                log.exception("LiteLLM sync unexpected error: %s", e)
+                ok = False
             if ok:
                 delay, failure_delay = 60.0, 5.0
             else:

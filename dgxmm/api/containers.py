@@ -18,7 +18,7 @@ class AdoptIn(BaseModel):
 
 
 @router.get("/adoptable")
-async def adoptable(p: Principal = Depends(current_principal), ctx: AppContext = Depends(get_ctx)):
+async def adoptable(p: Principal = Depends(require_admin), ctx: AppContext = Depends(get_ctx)):
     return await asyncio.to_thread(list_adoptable, ctx.deployer)
 
 
