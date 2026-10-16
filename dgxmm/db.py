@@ -129,6 +129,11 @@ class Download(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
+class Favourite(Base):
+    __tablename__ = "favourites"
+    ref: Mapped[str] = mapped_column(String(512), primary_key=True)
+
+
 class AuditLog(Base):
     __tablename__ = "audit_log"
     id: Mapped[int] = mapped_column(primary_key=True)
