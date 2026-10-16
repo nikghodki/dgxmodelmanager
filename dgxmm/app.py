@@ -14,12 +14,12 @@ from dgxmm.api import auth as auth_api, users as users_api, host as host_api, in
 from dgxmm.api import engines as engines_api, deployments as deployments_api, stream as stream_api
 from dgxmm.api import audit as audit_api, containers as containers_api
 from dgxmm.api import catalog as catalog_api, downloads as downloads_api, planner as planner_api
-from dgxmm.api import metrics as metrics_api
+from dgxmm.api import metrics as metrics_api, integrations as integrations_api
 from dgxmm.context import AppContext
 
 log = logging.getLogger("dgxmm")
 
-ROUTERS = [auth_api, users_api, host_api, inventory_api, engines_api, deployments_api, stream_api, audit_api, containers_api, catalog_api, downloads_api, planner_api, metrics_api]
+ROUTERS = [auth_api, users_api, host_api, inventory_api, engines_api, deployments_api, stream_api, audit_api, containers_api, catalog_api, downloads_api, planner_api, metrics_api, integrations_api]
 
 
 def create_app(ctx: AppContext) -> FastAPI:

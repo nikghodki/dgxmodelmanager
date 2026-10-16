@@ -99,7 +99,7 @@ async def test_switch_docker_error_removes_new_row(stack):
 
 async def test_switch_name_in_use_never_removes_existing_row(stack):
     a = await ready(stack, "a")
-    other = await ready(stack, "b")
+    other = await ready(stack, "b", alias="b")  # distinct LiteLLM model names (same model twice)
     with pytest.raises(DeployError):
         await stack.deployer.switch(a["id"], req("b"), [], 1)
     assert stack.deployer.view(other["id"])["state"] == "ready"
