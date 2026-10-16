@@ -80,6 +80,9 @@ class Deployer:
         self.state_hooks: list[StateHook] = []
         self.calibration = None  # set in Task 32
         self.delete_guard: Callable[[str], bool] | None = None  # WeightsDeleter.is_being_deleted
+        # dep_id -> model refs while a container is being (re)launched; until it reaches "starting" the DB row may
+        # still be planned/stopped/failed, so the weights deleter treats these as blocking.
+        self.launching: dict[int, tuple[str, ...]] = {}
 
     def _check_not_deleting(self, *refs: str | None) -> None:
         for ref in refs:
@@ -251,21 +254,33 @@ class Deployer:
         return self.view(dep_id)
 
     async def _launch(self, dep_id: int, name: str, port: int, prep: Prepared, mem_total: int) -> None:
-        try:  # re-check now that the planned row exists (closes the race with a concurrent weights delete)
-            self._check_not_deleting(prep.artifact.ref, prep.draft.ref if prep.draft else None)
-        except DeployError as e:
-            self._transition(dep_id, "failed", message=e.message, last_error=e.message)
-            raise
-        launch = LaunchContext(dep_id, name, port, prep.estimate.total, mem_total)
-        spec = prep.engine.container_spec(prep.artifact, prep.cfg, prep.draft, launch, self.settings)
+        refs = tuple(r for r in (prep.artifact.ref, prep.draft.ref if prep.draft else None) if r)
+        # Publish "launching" BEFORE consulting the guard; the deleter publishes its markers before re-planning.
+        # Either it sees us launching (refuses) or we see its markers (we refuse).
+        self.launching[dep_id] = refs
         try:
-            await asyncio.to_thread(self.docker.remove_by_name, spec.name)
-            cid = await asyncio.to_thread(self.docker.run, spec)
-        except Exception as e:
-            self._transition(dep_id, "failed", message=f"docker error: {e}", last_error=f"docker error: {e}")
-            raise DeployError("docker_error", f"could not start container: {e}", 502)
-        self._transition(dep_id, "starting", message=f"container {cid[:12]} created", container_id=cid,
-                         last_error=None, exit_code=None)
+            try:
+                self._check_not_deleting(*refs)
+            except DeployError:
+                dep = self._get(dep_id)
+                if dep is not None and dep.state == "planned":  # fresh deploy: don't leave a row holding the name
+                    with self.db.session() as s:
+                        row = s.get(Deployment, dep_id)
+                        if row is not None:
+                            s.delete(row)
+                raise  # restart/reconfigure: row keeps its stopped/failed state
+            launch = LaunchContext(dep_id, name, port, prep.estimate.total, mem_total)
+            spec = prep.engine.container_spec(prep.artifact, prep.cfg, prep.draft, launch, self.settings)
+            try:
+                await asyncio.to_thread(self.docker.remove_by_name, spec.name)
+                cid = await asyncio.to_thread(self.docker.run, spec)
+            except Exception as e:
+                self._transition(dep_id, "failed", message=f"docker error: {e}", last_error=f"docker error: {e}")
+                raise DeployError("docker_error", f"could not start container: {e}", 502)
+            self._transition(dep_id, "starting", message=f"container {cid[:12]} created", container_id=cid,
+                             last_error=None, exit_code=None)
+        finally:
+            self.launching.pop(dep_id, None)
 
     def _spawn_monitor(self, dep_id: int) -> None:
         old = self._monitors.get(dep_id)
