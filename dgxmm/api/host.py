@@ -11,7 +11,8 @@ router = APIRouter(prefix="/api/host", tags=["host"])
 def host_payload(ctx: AppContext, budget) -> dict:
     sample = ctx.budget.last_sample
     out = {"budget": budget.as_dict(),
-           "external_top": [p.__dict__ for p in sample.external_top] if sample else [],
+           "external_top": [{"pid": p.pid, "name": p.name, "rss": p.rss, "gpu": p.gpu}
+                            for p in sample.external_top] if sample else [],
            "gpu": sample.gpu if sample else {},
            "alert": ctx.watchdog.state() if ctx.watchdog else {"level": "ok"}}
     try:

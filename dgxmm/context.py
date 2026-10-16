@@ -55,6 +55,13 @@ async def budget_loop(ctx: AppContext) -> None:
         await asyncio.sleep(ctx.settings.budget_interval_s)
 
 
+def liveness_listener(deployer):
+    """Budget listener: re-check ready/sleeping/unknown containers on every budget refresh."""
+    async def _check(_budget) -> None:
+        await deployer.check_liveness()
+    return _check
+
+
 def build_context(settings: Settings) -> AppContext:
     import httpx
 
@@ -111,6 +118,7 @@ def build_context(settings: Settings) -> AppContext:
     from dgxmm.watchdog import Watchdog
     ctx.watchdog = Watchdog(settings, deployer, events, db)
     ctx.budget_listeners.append(ctx.watchdog.check)
+    ctx.budget_listeners.append(liveness_listener(deployer))
 
     from dgxmm.catalog.support import VllmArchRegistry
     archs = VllmArchRegistry(settings, docker)
@@ -132,6 +140,9 @@ def build_context(settings: Settings) -> AppContext:
     from dgxmm.downloads import DownloadService
     ctx.downloads = DownloadService(settings, db, inventory, hub, events, token=hf_token)
 
+    async def _recover_downloads():
+        ctx.downloads.recover()
+
     from dgxmm.metrics.scraper import MetricsScraper
     from dgxmm.metrics.store import MetricsStore
     store = MetricsStore(db)
@@ -149,6 +160,6 @@ def build_context(settings: Settings) -> AppContext:
     ctx.advisor = AdvisorService(deployer, inventory, store, db)
     ctx.benchmarks = BenchmarkRunner(db, events)
 
-    ctx.startup += [_bootstrap, _inventory, _reconcile]
+    ctx.startup += [_bootstrap, _recover_downloads, _inventory, _reconcile]
     ctx.background += [_budget_loop, _inventory_loop]
     return ctx

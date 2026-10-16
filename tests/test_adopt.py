@@ -46,3 +46,36 @@ async def test_adopt_creates_stopped_row_and_leaves_container(stack):
     assert list_adoptable(stack.deployer)[0]["adopted_as"] == "qwen-tiny"
     with pytest.raises(DeployError):
         await adopt(stack.deployer, "litellm-proxy", "x", 1)
+
+
+def test_list_adoptable_marks_non_llm_and_unparseable(stack):
+    """M3: only containers whose command parses and whose model is a downloaded LLM are adoptable."""
+    stack.sdk.add_unmanaged("vllm-qwen", command=["--model", "Qwen/Qwen3-Tiny"])
+    stack.sdk.add_unmanaged("whisper", command=["--model", "openai/whisper-large-v3", "--task", "transcription"])
+    stack.sdk.add_unmanaged("whisper2", command=["--model", "openai/whisper-large-v3"])
+    stack.sdk.add_unmanaged("weird", command=["--max-model-len", "32k"])
+    rows = {r["name"]: r for r in list_adoptable(stack.deployer)}
+    assert rows["vllm-qwen"]["adoptable"] is True and rows["vllm-qwen"]["reason"] is None
+    assert rows["whisper"]["adoptable"] is False and "--task" in rows["whisper"]["reason"]
+    assert rows["whisper2"]["adoptable"] is False and "not a downloaded LLM" in rows["whisper2"]["reason"]
+    assert rows["weird"]["adoptable"] is False and "--model" in rows["weird"]["reason"]
+
+
+def test_parse_human_readable_ints_and_bad_values():
+    """M5: vLLM accepts 32k (decimal) / 32K (binary); garbage is a 422, not a 500."""
+    _, cfg, _ = parse_vllm_command(["--model", "a/b", "--max-model-len", "32k", "--max-num-batched-tokens=16K"])
+    assert cfg["max_model_len"] == 32000 and cfg["max_num_batched_tokens"] == 16384
+    for bad in (["--model", "a/b", "--max-model-len", "lots"], ["--model", "a/b", "--max-num-seqs"],
+                ["--model", "a/b", "--speculative-config", "{not json"],
+                ["--model", "a/b", "--speculative-config", "[1, 2]"]):
+        with pytest.raises(DeployError) as e:
+            parse_vllm_command(bad)
+        assert e.value.status == 422 and e.value.code == "invalid_value", bad
+
+
+async def test_adopt_route_422_on_bad_args(api_stack):
+    from tests.test_api_deployments import admin
+    h = admin(api_stack)
+    api_stack.stack.sdk.add_unmanaged("vllm-bad", command=["--model", "Qwen/Qwen3-Tiny", "--max-model-len", "huge"])
+    r = api_stack.post("/dgxmm/api/containers/vllm-bad/adopt", json={"name": "bad"}, headers=h)
+    assert r.status_code == 422 and r.json()["detail"]["code"] == "invalid_value"

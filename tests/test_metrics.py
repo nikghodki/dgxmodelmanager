@@ -67,3 +67,23 @@ async def test_scraper_reads_ready_deployments(stack):
     topics = [q.get_nowait()[0] for _ in range(q.qsize())]
     assert "metrics" in topics
     assert sc.store.series("host")[-1]["used"] > 0
+
+
+def test_non_finite_values_become_none(db):
+    """M12: NaN/Inf from engines (e.g. 0/0 gauges) or NVML must not reach JSON (500)."""
+    import json
+    from types import SimpleNamespace
+    s = MetricsStore(db)
+    bad = EngineMetrics(gauges={"running": float("nan"), "waiting": float("inf"), "kv_usage": 0.5},
+                        counters={"generation_tokens": 10.0, "prompt_tokens": float("nan")})
+    a = s.add(1, 100.0, bad)
+    b = s.add(1, 105.0, EngineMetrics(gauges={"kv_usage": float("-inf")},
+                                      counters={"generation_tokens": float("inf"), "prompt_tokens": 20.0}))
+    assert a["running"] is None and a["waiting"] is None and a["kv_usage"] == 0.5
+    assert b["kv_usage"] is None and b["gen_tps"] is None
+    budget = SimpleNamespace(total=10, available=5, free_for_new=1, external=2, committed=3)
+    h = s.add_host(100.0, budget, {"util": float("nan"), "temp_c": 40, "power_w": float("inf")})
+    assert h["gpu_util"] is None and h["power_w"] is None and h["temp_c"] == 40
+    json.dumps(s.series(1) + s.series("host"), allow_nan=False)  # strict JSON must succeed
+    s.rollup(now=10_000.0)
+    json.dumps(s.history(1, 10_000_000), allow_nan=False)
