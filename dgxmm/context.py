@@ -40,6 +40,12 @@ class AppContext:
     startup: list = field(default_factory=list)          # awaited once, in order, before serving
     background: list = field(default_factory=list)       # long-running coroutines
     budget_listeners: list = field(default_factory=list)  # async fn(budget) after each refresh
+    settings_store: Any = None  # SettingsStore; created from db + settings when not given
+
+    def __post_init__(self) -> None:
+        if self.settings_store is None:
+            from dgxmm.settings_store import SettingsStore
+            self.settings_store = SettingsStore(self.db, self.settings)
 
 
 async def budget_loop(ctx: AppContext) -> None:
