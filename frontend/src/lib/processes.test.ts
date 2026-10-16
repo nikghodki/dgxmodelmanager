@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { containerLabel, filterScope, groupByContainer, processSearchText } from "@/lib/processes";
+import { containerLabel, filterScope, groupByContainer, processSearchText, userLabel } from "@/lib/processes";
 import type { ProcessInfo } from "@/types";
 
 const P = (pid: number, over: Partial<ProcessInfo> = {}): ProcessInfo => ({
-  pid, ppid: 1, uid: 0, user: "root", name: "python3", exe: "python3", command: `python3 app.py --id ${pid}`,
+  pid, ppid: 1, uid: 0, user: "root", user_scope: "host", name: "python3", exe: "python3", command: `python3 app.py --id ${pid}`,
   command_truncated: false, container: null, managed: null, rss: 100, gpu: 0, ...over,
 });
 const LITE = { id: "bbbbbbbbbbbb", name: "litellm-proxy", image: "ghcr.io/berriai/litellm:main-latest" };
@@ -40,5 +40,12 @@ describe("processes", () => {
     const t = processSearchText(procs[3]);
     for (const s of ["--id 200", "litellm-proxy", "berriai", "root", "200"]) expect(t).toContain(s);
     expect(processSearchText(procs[2])).toContain("host");
+  });
+
+  it("labels container uids as not host accounts", () => {
+    expect(userLabel("nik", "host")).toEqual({ text: "nik", title: undefined });
+    expect(userLabel("uid 1000", "container")).toEqual({ text: "uid 1000 (in container)", title: "uid as seen inside the container; not a host account" });
+    expect(userLabel("root", "container").text).toBe("root (in container)");
+    expect(userLabel("x", undefined)).toEqual({ text: "x", title: undefined }); // older servers
   });
 });

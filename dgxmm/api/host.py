@@ -16,7 +16,7 @@ def host_payload(ctx: AppContext, budget) -> dict:
     out = {"budget": budget.as_dict(),
            # `command` is redacted by the probe (dgxmm.memory.redact); viewers see the same data.
            "external_top": [{"pid": p.pid, "name": p.name, "rss": p.rss, "gpu": p.gpu, "command": p.command,
-                             "user": p.user, "container": p.container}
+                             "user": p.user, "user_scope": p.user_scope, "container": p.container}
                             for p in sample.external_top] if sample else [],
            "gpu": sample.gpu if sample else {},
            "alert": ctx.watchdog.state() if ctx.watchdog else {"level": "ok"}}
@@ -37,6 +37,14 @@ async def host(p: Principal = Depends(current_principal), ctx: AppContext = Depe
 def _managed_map(ctx: AppContext) -> dict[str, dict]:
     rows = ctx.deployer.usage_rows() if ctx.deployer is not None else []
     return {cid: {"deployment_id": dep_id, "name": name} for (dep_id, name, _state, _res, cid) in rows if cid}
+
+
+def _deployment_names(ctx: AppContext) -> dict[int, str]:
+    from sqlalchemy import select
+
+    from dgxmm.db import Deployment
+    with ctx.db.session() as s:
+        return {i: n for i, n in s.execute(select(Deployment.id, Deployment.name))}
 
 
 def processes_payload(procs: list, scope: str, limit: int) -> dict:
@@ -68,7 +76,7 @@ async def processes(scope: Literal["all", "external", "managed"] = "all", limit:
     t0 = time.perf_counter()
 
     def _collect():
-        return ctx.probe.processes(_managed_map(ctx))
+        return ctx.probe.processes(_managed_map(ctx), _deployment_names(ctx))
     procs = await asyncio.to_thread(_collect)
     out = processes_payload(procs, scope, limit)
     out["duration_ms"] = round((time.perf_counter() - t0) * 1000, 1)
