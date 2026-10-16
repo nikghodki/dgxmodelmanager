@@ -4,8 +4,8 @@ DGXMM is a self-hosted web app for serving local LLMs on an NVIDIA DGX Spark (GB
 memory) or a similar single-GPU Linux box. It shows what is on disk and deploys models as vLLM or
 llama.cpp containers. Before anything starts, a memory check estimates what the model needs and makes
 sure it fits next to everything already running. You get live throughput, latency and KV-cache metrics,
-tuning advice and benchmarks, and can register running models with a LiteLLM proxy. It runs in a single
-container and installs with one command.
+tuning advice and benchmarks, and every running model is served through one LiteLLM endpoint with
+virtual keys. It runs in a single container and installs with one command.
 
 ![DGXMM dashboard](docs/images/dashboard-light.png)
 
@@ -26,8 +26,16 @@ container and installs with one command.
   measures throughput and latency at several concurrency levels.
 - **Switch and reconfigure with rollback.** Replace a running model or change its settings. If the new
   one does not become ready, the old one is restored.
-- **LiteLLM auto-registration.** Ready deployments (and their aliases) are added to and removed from a
-  LiteLLM proxy automatically.
+- **One LiteLLM endpoint for every model.** Each ready deployment is registered once in LiteLLM under
+  its model name, so clients call a single OpenAI-compatible `/v1` endpoint and pick the deployment
+  with `"model"`. The LiteLLM page sets the internal and public URLs and the master key, and manages
+  virtual keys (models, budgets, rate limits). Each deployment has a LiteLLM tab with its endpoint,
+  model name, code snippets and the keys that can call it.
+- **Disk cleanup.** Delete downloaded weights (Hugging Face repos or GGUF files) and clean up
+  interrupted downloads from the Models page. Models in use cannot be deleted, and files owned by
+  root are removed by a short-lived, locked-down helper container.
+- **Processes.** See exactly what runs on the box: every process using memory, its container, user and
+  command line, with passwords, tokens and keys masked.
 - **Users, roles and audit.** Admin and viewer roles. Every action is written to an audit log.
 - **Modern UI.** Light and dark themes, responsive down to phone size, and a command palette
   (<kbd>⌘K</kbd> / <kbd>Ctrl K</kbd>).
@@ -68,8 +76,9 @@ printed password, then choose a new one of at least 12 characters. Next, deploy 
 
 **Need a LiteLLM endpoint too?** On a fresh box, `./install.sh --with-litellm` also starts a bundled
 LiteLLM proxy with its own Postgres and prints one OpenAI-compatible endpoint
-(`http://<host>:4000/v1`) that serves every DGXMM deployment by `model` name. See
-[Bundled LiteLLM](docs/configuration.md#bundled-litellm).
+(`http://<host>:4000/v1`) that serves every DGXMM deployment by `model` name. DGXMM is wired to it
+with nothing to configure. See [Bundled LiteLLM](docs/configuration.md#bundled-litellm). If you already
+run LiteLLM, point DGXMM at it instead (see [LiteLLM integration](docs/configuration.md#litellm-integration)).
 
 > The first start runs a short one-off vLLM container to read which model architectures vLLM supports,
 > so the vLLM image (several GB) is pulled in the background. Set `DGXMM_PULL_ENGINES=1` to pull both
@@ -109,9 +118,9 @@ are never deleted.
 
 | Guide | What it covers |
 |---|---|
-| [Usage](docs/usage.md) | Walkthrough of the UI: deploying, metrics, catalog, planner, users, calling your models |
+| [Usage](docs/usage.md) | Walkthrough of the UI: deploying, metrics, models on disk, catalog, planner, processes, LiteLLM and virtual keys, users, calling your models |
 | [Configuration](docs/configuration.md) | Every `config.yaml` key, `.env`, secrets, model directories, reverse proxy, LiteLLM |
-| [Operations](docs/operations.md) | What the installer does, upgrades, backups, logs, troubleshooting, password reset |
+| [Operations](docs/operations.md) | What the installer does, upgrades, backups, logs, deleting weights, troubleshooting, password reset |
 | [Architecture](docs/architecture.md) | Components, deploy flow, memory model, state machine, data model, security model |
 | [Contributing](CONTRIBUTING.md) | Development setup, tests, code layout |
 
@@ -122,8 +131,10 @@ are never deleted.
 - The default bind is `0.0.0.0` (your LAN). Do not expose that port to the internet. For remote access,
   install with `DGXMM_BIND=127.0.0.1` and put an HTTPS reverse proxy in front (see
   [configuration](docs/configuration.md#reverse-proxy)), or use a VPN.
-- DGXMM only stops or removes containers labelled `dgxmm.managed=true`. Engine ports are published on
-  `127.0.0.1` only.
+- DGXMM only stops or removes containers labelled `dgxmm.managed=true`, plus the short-lived delete
+  helpers it starts itself (`dgxmm.helper=true`). Engine ports are published on `127.0.0.1` only.
+- The LiteLLM master key is write-only: DGXMM never shows it again or logs it, and only sends it to the
+  LiteLLM URL it was entered for. A full virtual key is shown once, when it is created.
 - Logins use argon2id password hashes, HTTP-only SameSite=Strict cookies, CSRF tokens and rate limiting.
   See [operations](docs/operations.md#security-hardening) for hardening steps.
 
