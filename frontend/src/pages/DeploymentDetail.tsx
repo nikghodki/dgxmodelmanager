@@ -30,6 +30,7 @@ import type { Deployment } from "@/types";
 import { SwitchDialog } from "@/components/app/switch-dialog";
 
 const WINDOWS = ["live", "24h", "7d"] as const;
+const TABS = ["overview", "litellm", "performance", "advice", "benchmarks", "events"];
 
 function WindowPicker({ value, onChange }: { value: string; onChange: (w: string) => void }) {
   return (
@@ -160,7 +161,7 @@ function LogsSheet({ id, open, onOpenChange }: { id: number; open: boolean; onOp
 export function DeploymentDetail() {
   const id = Number(useParams().id);
   const [params, setParams] = useSearchParams();
-  const tab = params.get("tab") ?? "overview";
+  const tab = TABS.includes(params.get("tab") ?? "") ? params.get("tab")! : "overview";
   const admin = useIsAdmin();
   const nav = useNavigate();
   const dep = useQuery({ queryKey: ["deployment", id], queryFn: () => api<Deployment>(`/deployments/${id}`) });
@@ -174,6 +175,10 @@ export function DeploymentDetail() {
   const remove = useActionMutation(() => api(`/deployments/${id}`, { method: "DELETE" }), {
     success: "Deployment removed", invalidate: [["deployments"]], onSuccess: () => nav("/deployments"),
   });
+
+  // A start/wake model-name conflict notice is stale once the user moves on (e.g. follows its fix link).
+  const resetAct = act.reset;
+  useEffect(() => { resetAct(); }, [tab]); // eslint-disable-line react-hooks/exhaustive-deps
 
   if (dep.isLoading) return <PageSkeleton />;
   const d = dep.data;
@@ -243,7 +248,7 @@ export function DeploymentDetail() {
           </Card>
         </TabsContent>
 
-        <TabsContent value="litellm" className="mt-4"><LiteLLMTab d={d} info={litellm.data} loading={litellm.isLoading} error={litellm.error} admin={admin} suggested={params.get("alias")} /></TabsContent>
+        <TabsContent value="litellm" className="mt-4"><LiteLLMTab d={d} info={litellm.data} loading={litellm.isLoading} error={litellm.error} admin={admin} suggested={params.get("alias")} onRenamed={() => act.reset()} /></TabsContent>
         <TabsContent value="performance" className="mt-4"><Performance id={id} /></TabsContent>
         <TabsContent value="advice" className="mt-4"><Advice d={d} onApply={(patch) => setDialog({ mode: "reconfigure", patch })} /></TabsContent>
         <TabsContent value="benchmarks" className="mt-4"><Benchmarks d={d} /></TabsContent>

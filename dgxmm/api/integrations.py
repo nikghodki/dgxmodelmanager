@@ -86,7 +86,7 @@ def settings_out(ctx: AppContext, status: dict) -> dict:
     cfg = ctx.settings_store.litellm()
     return {"enabled": cfg.enabled, "url": cfg.url, "public_url": cfg.public_url, "endpoint": cfg.endpoint,
             "master_key_set": bool(cfg.master_key), "master_key_source": cfg.master_key_source,
-            "master_key_hint": cfg.master_key_hint, "status": status}
+            "master_key_hint": cfg.master_key_hint, "default_url": ctx.settings.litellm_url.rstrip("/"), "status": status}
 
 
 async def _status(ctx: AppContext, force: bool = False) -> dict:

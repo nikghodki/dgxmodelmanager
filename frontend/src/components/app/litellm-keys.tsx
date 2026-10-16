@@ -84,7 +84,7 @@ export function KeyFormDialog({ open, onOpenChange, editing, modelOptions, prese
   useEffect(() => {
     if (open) { setForm(editing ? keyFormFromKey(editing) : emptyKeyForm(preselect)); setTouched(false); }
   }, [open, editing]); // eslint-disable-line react-hooks/exhaustive-deps
-  const problems = keyFormProblems(form, mode);
+  const problems = keyFormProblems(form, mode, editing);
   const show = (k: keyof KeyForm) => (touched || (form[k] as unknown) !== "" ? problems[k] : undefined);
   const patch = editing ? buildKeyPatchBody(editing, form) : null;
   const cleared = editing ? clearedLimits(editing, form) : [];
@@ -149,11 +149,16 @@ export function KeyFormDialog({ open, onOpenChange, editing, modelOptions, prese
 /** Shows a newly created key exactly once. The parent drops the key from memory when this closes. */
 export function CreatedKeyDialog({ created, endpoint, onClose }: { created: LiteLLMCreatedKey | null; endpoint: string; onClose: () => void }) {
   const model = created && !isAllModels(created.models) ? created.models[0] : "<model name>";
+  const [copied, setCopied] = useState(false);
+  const [confirming, setConfirming] = useState(false);
+  useEffect(() => { setCopied(false); setConfirming(false); }, [created]);
+  // Closing loses the key for good: only Done / the close button close it, and only after a copy or a confirmation.
+  const requestClose = () => (copied ? onClose() : setConfirming(true));
   return (
-    <ResponsiveDialog open={!!created} onOpenChange={(o) => !o && onClose()} className="max-w-2xl"
+    <ResponsiveDialog open={!!created} onOpenChange={(o) => !o && requestClose()} onDismissAttempt={requestClose} className="max-w-2xl"
       title={`Key created${created?.key_alias ? `: ${created.key_alias}` : ""}`} description="Copy the key now and store it somewhere safe.">
       {created && (
-        <div className="space-y-4">
+        <div className="min-w-0 space-y-4">
           <p role="alert" className="flex items-start gap-2 rounded-md border border-status-warning/30 bg-status-warning-bg px-3 py-2 text-sm text-status-warning">
             <AlertTriangle aria-hidden className="mt-0.5 h-4 w-4 shrink-0" />This is the only time the full key is shown. Neither DGXMM nor LiteLLM can show it again.
           </p>
@@ -161,14 +166,22 @@ export function CreatedKeyDialog({ created, endpoint, onClose }: { created: Lite
             <Label htmlFor="created-key">Virtual key</Label>
             <div className="flex items-center gap-1">
               <Input id="created-key" readOnly value={created.key} className="font-mono text-xs" onFocus={(e) => e.target.select()} />
-              <CopyButton value={created.key} label="Copy key" />
+              <CopyButton value={created.key} label="Copy key" onCopied={() => { setCopied(true); setConfirming(false); }} />
             </div>
           </div>
           <div className="space-y-1.5">
             <p className="text-sm font-medium">Try it</p>
             <CodeBlock code={curlSnippet(endpoint, model, created.key)} label="curl example" />
           </div>
-          <div className="flex justify-end"><Button onClick={onClose}>Done</Button></div>
+          {confirming ? (
+            <div role="alertdialog" aria-label="Close without copying?" className="flex flex-col gap-2 rounded-md border border-status-warning/30 p-3 sm:flex-row sm:items-center sm:justify-between">
+              <p className="text-sm">Close without copying? The key cannot be shown again.</p>
+              <div className="flex gap-2">
+                <Button variant="outline" size="sm" onClick={() => setConfirming(false)}>Keep open</Button>
+                <Button variant="destructive" size="sm" onClick={onClose}>Close anyway</Button>
+              </div>
+            </div>
+          ) : <div className="flex justify-end"><Button onClick={requestClose}>Done</Button></div>}
         </div>
       )}
     </ResponsiveDialog>
@@ -210,8 +223,10 @@ export function KeysTable({ keys, loading, empty, onEdit, onRevoke }: {
  * Keys table plus the create / created / edit / revoke dialogs. Admin-only: callers render it only for admins.
  * The full key from a create lives only in `created` (and the mutation result, reset on close).
  */
-export function KeyManager({ keys, loading, empty, modelOptions, endpoint, preselect, createLabel = "Create key" }: {
+export function KeyManager({ keys, loading, empty, modelOptions, endpoint, preselect, createLabel = "Create key", problem }: {
   keys: LiteLLMKey[]; loading?: boolean; empty?: ReactNode; modelOptions: string[]; endpoint: string; preselect?: string[]; createLabel?: string;
+  /** Shown instead of the table (and the create button) when keys cannot be listed; the dialogs stay mounted. */
+  problem?: ReactNode;
 }) {
   const [formOpen, setFormOpen] = useState(false);
   const [editing, setEditing] = useState<LiteLLMKey | null>(null);
@@ -232,8 +247,12 @@ export function KeyManager({ keys, loading, empty, modelOptions, endpoint, prese
   const closeCreated = () => { setCreated(null); create.reset(); };
   return (
     <div className="space-y-3">
-      <div className="flex justify-end"><Button size="sm" onClick={() => openForm(null)}><Plus className="mr-1 h-4 w-4" />{createLabel}</Button></div>
-      <KeysTable keys={keys} loading={loading} empty={empty} onEdit={(k) => openForm(k)} onRevoke={setRevoking} />
+      {problem ?? (
+        <>
+          <div className="flex justify-end"><Button size="sm" onClick={() => openForm(null)}><Plus className="mr-1 h-4 w-4" />{createLabel}</Button></div>
+          <KeysTable keys={keys} loading={loading} empty={empty} onEdit={(k) => openForm(k)} onRevoke={setRevoking} />
+        </>
+      )}
       <KeyFormDialog open={formOpen} onOpenChange={(o) => { setFormOpen(o); if (!o) setEditing(null); }} editing={editing}
         modelOptions={modelOptions} preselect={preselect} pending={create.isPending || update.isPending} error={editing ? update.error : create.error}
         onSubmit={(body) => (editing ? update.mutate({ token: editing.token, body }) : create.mutate(body))} />

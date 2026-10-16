@@ -175,7 +175,7 @@ describe("DeployWizard", () => {
     await waitFor(() => expect(screen.getAllByText("Fits").length).toBeGreaterThan(0));
     await userEvent.click(screen.getAllByRole("button", { name: "Deploy" })[0]);
     expect((await screen.findAllByRole("link", { name: "Open other" }))[0]).toHaveAttribute("href", "/deployments/7");
-    expect(screen.getAllByText(/load-balance/).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/load-balance/)).toHaveLength(1);
     await userEvent.click(screen.getAllByRole("button", { name: "Use model-a-model-a" })[0]);
     expect(screen.getByLabelText("Model name (LiteLLM)")).toHaveValue("model-a-model-a");
     expect(screen.getByLabelText("Model name (LiteLLM)")).toHaveFocus();
