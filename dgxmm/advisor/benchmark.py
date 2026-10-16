@@ -11,7 +11,7 @@ from typing import Callable
 
 import httpx
 
-from dgxmm.db import Benchmark, Database
+from dgxmm.db import Benchmark, BenchmarkRun, Database, utcnow
 
 WORDS = ("memory token cache batch speed latency model server context window prompt decode prefill expert layer "
          "tensor kernel stream request response quality").split()
@@ -112,20 +112,46 @@ class BenchmarkRunner:
             raise BenchmarkBusy(f"a benchmark is already running (deployment {self._running})")
         async with self._lock:
             self._running = deployment_id
-            results = []
+            h = config_hash(config)
+            with self.db.session() as s:
+                run = BenchmarkRun(deployment_id=deployment_id, engine=engine, model_ref=model_ref, config_hash=h,
+                                   levels=list(levels), status="running")
+                s.add(run)
+                s.flush()
+                run_id = run.id
+            results: list[dict] = []
+            status, failed_at, error = "done", None, None
             try:
                 async with self.http_factory() as http:
                     for conc in levels:
                         r = await self._level(http, base_url, served_name, conc, input_len, output_len, duration_s, max_requests)
+                        if r["requests"] == 0:
+                            # Every request failed: not a measurement. Record the failure on the run instead of
+                            # storing a tps=0 row, and stop - higher concurrency against a broken endpoint is moot.
+                            status, failed_at = "failed", conc
+                            error = f"no successful requests at concurrency {conc} ({r['errors']} failed)"
+                            r["failed"] = True
+                            results.append(r)
+                            self.events.publish("benchmark", {"deployment_id": deployment_id, "level": r, "done": True,
+                                                              "failed": True, "error": error})
+                            break
                         with self.db.session() as s:
                             s.add(Benchmark(deployment_id=deployment_id, engine=engine, model_ref=model_ref,
-                                            config_hash=config_hash(config), config=config, concurrency=conc,
+                                            config_hash=h, config=config, concurrency=conc,
                                             input_len=input_len, output_len=output_len, requests=r["requests"],
                                             ttft_p50=r["ttft_p50"], ttft_p95=r["ttft_p95"], itl_p50=r["itl_p50"],
                                             tps_total=r["tps_total"], tps_per_req=r["tps_per_req"]))
                         results.append(r)
                         self.events.publish("benchmark", {"deployment_id": deployment_id, "level": r,
                                                           "done": conc == levels[-1]})
+            except BaseException as e:
+                status, error = "failed", f"benchmark aborted: {e.__class__.__name__}: {e}"[:500]
+                raise
             finally:
                 self._running = None
+                with self.db.session() as s:
+                    run = s.get(BenchmarkRun, run_id)
+                    if run is not None:
+                        run.status, run.failed_concurrency, run.error = status, failed_at, error
+                        run.finished_at = utcnow()
             return results

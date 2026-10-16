@@ -107,6 +107,23 @@ class Benchmark(Base):
     ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
+class BenchmarkRun(Base):
+    """One benchmark invocation. Levels with zero successful requests are NOT stored as `Benchmark` rows
+    (they would read as tps=0 results); the failure is recorded here so the UI can say where it failed."""
+    __tablename__ = "benchmark_runs"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    deployment_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    engine: Mapped[str] = mapped_column(String(16))
+    model_ref: Mapped[str] = mapped_column(String(512), index=True)
+    config_hash: Mapped[str] = mapped_column(String(32))
+    levels: Mapped[list] = mapped_column(JSON, default=list)
+    status: Mapped[str] = mapped_column(String(16), default="running")  # running | done | failed
+    failed_concurrency: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
 class MetricRollup(Base):
     __tablename__ = "metric_rollups"
     id: Mapped[int] = mapped_column(primary_key=True)

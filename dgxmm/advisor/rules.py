@@ -253,7 +253,9 @@ def _with_measurements(a: Advice, i: AdviceInput) -> Advice:
     cur_h, new_h = config_hash(i.cfg), config_hash({**i.cfg, **a.patch})
 
     def tps(h):
-        rows = [b for b in i.benchmarks if b["config_hash"] == h and b["concurrency"] == 1]
+        # Skip failed levels (legacy rows stored with zero successful requests / zero throughput).
+        rows = [b for b in i.benchmarks if b["config_hash"] == h and b["concurrency"] == 1
+                and b.get("requests", 1) > 0 and (b.get("tps_per_req") or 0) > 0]
         return rows[0]["tps_per_req"] if rows else None
 
     cur, new = tps(cur_h), tps(new_h)
@@ -291,9 +293,10 @@ class AdvisorService:
         variants = [a for a in others if a.kind == "llm" and base_model_name(a.ref) == base]
         drafts = [a for a in others if a.kind == "draft" and base_model_name(a.ref).startswith(base)]
         with self.db.session() as s:
-            rows = s.scalars(select(Benchmark).where(Benchmark.model_ref == v["model_ref"]).order_by(Benchmark.id.desc()))
+            rows = s.scalars(select(Benchmark).where(Benchmark.model_ref == v["model_ref"], Benchmark.requests > 0)
+                             .order_by(Benchmark.id.desc()))
             benches = [{"config_hash": b.config_hash, "concurrency": b.concurrency, "tps_per_req": b.tps_per_req,
-                        "tps_total": b.tps_total} for b in rows]
+                        "tps_total": b.tps_total, "requests": b.requests} for b in rows]
         inp = AdviceInput(engine=v["engine"], cfg=v["config"], artifact=artifact, samples=self.store.series(dep_id)[-180:],
                           day=self.store.history(dep_id, 24), variants=variants, drafts=drafts, benchmarks=benches,
                           estimate=v["estimate"] or {}, reserved=v["reserved_bytes"])

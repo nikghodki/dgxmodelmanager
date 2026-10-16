@@ -6,7 +6,7 @@ import pytest
 from sqlalchemy import select
 
 from dgxmm.advisor.benchmark import BenchmarkBusy, BenchmarkRunner, percentile
-from dgxmm.db import Benchmark
+from dgxmm.db import Benchmark, BenchmarkRun
 from dgxmm.events import EventBroker
 
 
@@ -54,3 +54,52 @@ def test_percentile():
     assert percentile([], 50) is None
     assert percentile([1, 2, 3, 4], 50) == 2.5
     assert percentile([5], 95) == 5
+
+
+
+def failing_handler(req: httpx.Request):
+    return httpx.Response(500, json={"error": "engine crashed"})
+
+
+async def test_level_with_zero_successful_requests_is_not_stored(db):
+    """Bug B: a level where every request failed must not become a tps=0 benchmark row."""
+    r = BenchmarkRunner(db, EventBroker(), http_factory=lambda: httpx.AsyncClient(transport=httpx.MockTransport(failing_handler)))
+    rows = await r.run(deployment_id=7, engine="vllm", model_ref="m/m", config={"a": 1}, base_url="http://h:1",
+                       served_name="q", levels=(1, 4), input_len=8, output_len=5, duration_s=2, max_requests=3)
+    with db.session() as s:
+        assert s.scalars(select(Benchmark)).all() == []
+        run = s.scalars(select(BenchmarkRun)).one()
+        assert run.status == "failed" and run.failed_concurrency == 1 and run.deployment_id == 7
+        assert "concurrency 1" in run.error and run.model_ref == "m/m"
+    # stops at the first failed level (higher concurrency against a broken endpoint is pointless)
+    assert len(rows) == 1 and rows[0]["failed"] is True and rows[0]["requests"] == 0 and rows[0]["errors"] == 3
+
+
+async def test_partial_failure_keeps_good_levels_and_records_failed_level(db):
+    ok, level = sse_handler([]), {"conc": 1}
+
+    def handler(req):
+        return ok(req) if level["conc"] < 2 else httpx.Response(503, json={"error": "overloaded"})
+    r = BenchmarkRunner(db, EventBroker(), http_factory=lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    orig = r._level
+
+    async def tracking_level(http, base_url, model, conc, *a):
+        level["conc"] = conc
+        return await orig(http, base_url, model, conc, *a)
+    r._level = tracking_level
+    rows = await r.run(deployment_id=1, engine="vllm", model_ref="m/m", config={}, base_url="http://h:1",
+                       served_name="q", levels=(1, 2, 4), input_len=8, output_len=5, duration_s=2, max_requests=2)
+    assert [x["concurrency"] for x in rows] == [1, 2] and rows[1]["failed"] is True and not rows[0].get("failed")
+    with db.session() as s:
+        assert [b.concurrency for b in s.scalars(select(Benchmark))] == [1]
+        run = s.scalars(select(BenchmarkRun)).one()
+        assert run.status == "failed" and run.failed_concurrency == 2
+
+
+async def test_successful_run_is_recorded_done(db):
+    r = runner(db, [])
+    await r.run(deployment_id=3, engine="vllm", model_ref="m/m", config={}, base_url="http://h:1", served_name="q",
+                levels=(1,), input_len=8, output_len=5, duration_s=2, max_requests=2)
+    with db.session() as s:
+        run = s.scalars(select(BenchmarkRun)).one()
+        assert run.status == "done" and run.failed_concurrency is None and run.error is None

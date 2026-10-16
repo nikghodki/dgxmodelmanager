@@ -46,3 +46,24 @@ def test_metrics_advice_benchmark_routes(api_stack):
     bad = api_stack.post(f"/dgxmm/api/deployments/{d['id']}/benchmark", headers=h, json={"levels": [1000]})
     assert bad.status_code == 422
     assert api_stack.get("/dgxmm/api/host/metrics?window=live").status_code == 200
+
+
+def test_benchmarks_route_hides_failed_rows_and_reports_runs(api_stack):
+    """Bug B: legacy requests=0 rows are hidden from results/advice; failed runs are visible via benchmark-runs."""
+    from dgxmm.db import Benchmark, BenchmarkRun
+    h = admin(api_stack)
+    wire(api_stack)
+    api_stack.stack.http.all_healthy = True
+    d = api_stack.post("/dgxmm/api/deployments", headers=h, json={"name": "a", "engine": "vllm", "model_ref": "Qwen/Qwen3-Tiny",
+                                                                    "config": SMALL}).json()
+    common = dict(deployment_id=d["id"], engine="vllm", model_ref="Qwen/Qwen3-Tiny", config_hash="h", config={},
+                  input_len=8, output_len=5, ttft_p50=None, ttft_p95=None, itl_p50=None)
+    with api_stack.ctx.db.session() as s:
+        s.add(Benchmark(concurrency=1, requests=8, tps_total=50.0, tps_per_req=50.0, **common))
+        s.add(Benchmark(concurrency=4, requests=0, tps_total=0.0, tps_per_req=0.0, **common))  # legacy failed row
+        s.add(BenchmarkRun(deployment_id=d["id"], engine="vllm", model_ref="Qwen/Qwen3-Tiny", config_hash="h",
+                           levels=[1, 4], status="failed", failed_concurrency=4, error="no successful requests at concurrency 4"))
+    rows = api_stack.get(f"/dgxmm/api/deployments/{d['id']}/benchmarks").json()
+    assert [r["concurrency"] for r in rows] == [1]
+    runs = api_stack.get(f"/dgxmm/api/deployments/{d['id']}/benchmark-runs").json()
+    assert runs[0]["status"] == "failed" and runs[0]["failed_concurrency"] == 4 and "concurrency 4" in runs[0]["error"]
