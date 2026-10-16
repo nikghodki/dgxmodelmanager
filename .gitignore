@@ -3,7 +3,7 @@ __pycache__/
 *.pyc
 data/
 secrets/
-config.yaml
+/config.yaml
 .env
 frontend/node_modules/
 frontend/dist/

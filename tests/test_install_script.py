@@ -588,3 +588,245 @@ def test_trusted_proxies_existing_env_file_wins_over_environment(box):
     p = box.run("--dry-run", DGXMM_TRUSTED_PROXIES="10.0.0.1")
     assert p.returncode == 0, p.out
     assert "keeping .env" in p.out
+
+
+# --- bundled LiteLLM (--with-litellm) -----------------------------------------------------------
+
+LITELLM_SECRETS = ("litellm_master_key", "litellm_salt_key", "litellm_db_password")
+
+
+def _copy_litellm_files(box):
+    (box.repo / "deploy" / "litellm").mkdir(parents=True)
+    shutil.copy2(ROOT / "deploy" / "litellm" / "config.yaml", box.repo / "deploy" / "litellm" / "config.yaml")
+
+
+def test_help_documents_litellm(box):
+    p = box.run("--help")
+    assert p.returncode == 0
+    for word in ("--with-litellm", "DGXMM_WITH_LITELLM", "DGXMM_LITELLM_PORT", "--litellm-port"):
+        assert word in p.stdout
+
+
+def test_with_litellm_install_generates_secrets_env_and_uses_profile(box):
+    _copy_litellm_files(box)
+    p = box.run("--with-litellm", FAKE_LOGS=FIRST_RUN)
+    assert p.returncode == 0, p.out
+    repo, sec = box.repo, box.repo / "secrets"
+    for name in LITELLM_SECRETS:
+        assert mode(sec / name) == 0o600
+        value = (sec / name).read_text()
+        assert len(value) >= 32 and value not in p.out
+    master = (sec / "litellm_master_key").read_text()
+    assert master.startswith("sk-") and len(master) >= 35 and master.isascii()
+    assert len(set((sec / n).read_text() for n in LITELLM_SECRETS)) == 3
+    env = (repo / ".env").read_text()
+    assert "DGXMM_WITH_LITELLM=1" in env and "DGXMM_LITELLM_PORT=4000" in env and "COMPOSE_PROFILES=litellm" in env
+    assert "litellm_url: http://dgxmm-litellm:4000" in (repo / "config.yaml").read_text()
+    db = repo / "data" / "litellm-db"
+    assert db.is_dir() and mode(db) == 0o700
+    calls = box.calls()
+    assert "docker compose --profile litellm up -d --build" in calls
+    # LiteLLM health is checked after DGXMM's, and the single endpoint is printed.
+    assert "http://192.168.10.20:4000/v1" in p.out and "LiteLLM is running" in p.out
+    assert "secrets/litellm_master_key" in p.out and "LiteLLM page" in p.out
+    assert p.out.index("DGXMM is running") < p.out.index("LiteLLM is running")
+
+
+def test_with_litellm_profile_remembered_and_secrets_kept(box):
+    _copy_litellm_files(box)
+    assert box.run("--with-litellm").returncode == 0
+    sec = box.repo / "secrets"
+    before = {n: (sec / n).read_text() for n in LITELLM_SECRETS}
+    p = box.run(FAKE_NETWORK="exists", FAKE_DGXMM_STATE="running", FAKE_DGXMM_WORKDIR=str(box.repo.resolve()))
+    assert p.returncode == 0, p.out
+    assert {n: (sec / n).read_text() for n in LITELLM_SECRETS} == before
+    assert box.calls().count("docker compose --profile litellm up -d --build") == 2
+    assert "port 4000 (in use by this DGXMM's LiteLLM" in p.out
+
+
+def test_with_litellm_keeps_existing_secrets_and_master_key(box):
+    _copy_litellm_files(box)
+    sec = box.repo / "secrets"
+    sec.mkdir()
+    (sec / "litellm_master_key").write_text("sk-existing-master-key-value")
+    (sec / "litellm_salt_key").write_text("sk-existing-salt")
+    p = box.run("--with-litellm")
+    assert p.returncode == 0, p.out
+    assert (sec / "litellm_master_key").read_text() == "sk-existing-master-key-value"
+    assert (sec / "litellm_salt_key").read_text() == "sk-existing-salt"
+    assert len((sec / "litellm_db_password").read_text()) >= 32
+    assert "sk-existing" not in p.out
+    assert "exec litellm-proxy" not in box.calls()  # bundled mode never reads the external key
+
+
+def test_with_litellm_from_env_var_and_custom_port(box):
+    _copy_litellm_files(box)
+    p = box.run(DGXMM_WITH_LITELLM="1", DGXMM_LITELLM_PORT="4100")
+    assert p.returncode == 0, p.out
+    env = (box.repo / ".env").read_text()
+    assert "DGXMM_WITH_LITELLM=1" in env and "DGXMM_LITELLM_PORT=4100" in env
+    assert "http://192.168.10.20:4100/v1" in p.out
+
+
+def test_without_litellm_nothing_changes(box):
+    p = box.run()
+    assert p.returncode == 0, p.out
+    env = (box.repo / ".env").read_text()
+    assert "LITELLM" not in env and "COMPOSE_PROFILES" not in env
+    assert "--profile" not in box.calls()
+    assert not (box.repo / "secrets" / "litellm_salt_key").exists()
+    assert not (box.repo / "data" / "litellm-db").exists()
+    assert "litellm_url: http://litellm-proxy:4000" in (box.repo / "config.yaml").read_text()
+
+
+def test_with_litellm_dry_run_writes_nothing(box):
+    _copy_litellm_files(box)
+    before = box.snapshot()
+    p = box.run("--with-litellm", "--dry-run")
+    assert p.returncode == 0, p.out
+    assert box.snapshot() == before
+    assert "DGXMM_WITH_LITELLM=1" in p.out and "COMPOSE_PROFILES=litellm" in p.out
+    assert "litellm_url: http://dgxmm-litellm:4000" in p.out
+    assert "would write secrets/litellm_salt_key" in p.out
+    assert "--profile litellm up -d --build" in p.out
+    assert " up -d" not in box.calls() and "network create" not in box.calls()
+
+
+def test_with_litellm_existing_config_pointing_elsewhere_is_kept(box):
+    _copy_litellm_files(box)
+    cfg = "docker_network: dgxmm\nlitellm_url: http://litellm-proxy:4000\n"
+    (box.repo / "config.yaml").write_text(cfg)
+    p = box.run("--with-litellm")
+    assert p.returncode == 0, p.out
+    assert (box.repo / "config.yaml").read_text() == cfg
+    assert "keeps litellm_url: http://litellm-proxy:4000" in p.out
+
+
+def test_with_litellm_port_conflict(box):
+    p = box.run("--with-litellm", "--dry-run", FAKE_PORT_BUSY="4000")
+    assert p.returncode != 0
+    assert "port 4000 (LiteLLM) is already in use" in p.out and "DGXMM_LITELLM_PORT" in p.out
+
+
+def test_with_litellm_same_port_as_ui_rejected(box):
+    p = box.run("--with-litellm", "--dry-run", "--litellm-port", "8090")
+    assert p.returncode != 0 and "must differ" in p.out
+
+
+def test_with_litellm_bad_port_rejected(box):
+    p = box.run("--with-litellm", "--dry-run", DGXMM_LITELLM_PORT="70000")
+    assert p.returncode != 0 and "DGXMM_LITELLM_PORT" in p.out
+
+
+def test_with_litellm_warns_about_external_litellm_proxy(box):
+    _copy_litellm_files(box)
+    p = box.run("--with-litellm", "--dry-run", FAKE_LITELLM="1")
+    assert p.returncode == 0, p.out
+    assert "litellm-proxy is already running" in p.out and "second" in p.out
+    p = box.run("--with-litellm", "--dry-run", FAKE_LITELLM="1", FAKE_PORT_BUSY="4000")
+    assert p.returncode != 0 and "port 4000 (LiteLLM) is already in use" in p.out
+
+
+def test_with_litellm_requires_litellm_config_file(box):
+    p = box.run("--with-litellm", "--dry-run")
+    assert p.returncode != 0 and "deploy/litellm/config.yaml" in p.out
+
+
+def test_with_litellm_unhealthy_fails_with_hint(box):
+    _copy_litellm_files(box)
+    p = box.run("--with-litellm", FAKE_LITELLM_HEALTH="running/unhealthy",
+                FAKE_LITELLM_LOGS="boom sk-leakedkeyvalue123")
+    assert p.returncode != 0
+    assert "unhealthy" in p.out and "DGXMM itself is running" in p.out
+    assert "sk-leakedkeyvalue123" not in p.out
+
+
+def test_status_shows_litellm_containers(box):
+    (box.repo / ".env").write_text("DGXMM_WITH_LITELLM=1\nDGXMM_LITELLM_PORT=4000\n")
+    p = box.run("status", FAKE_DGXMM_STATE="running", FAKE_DGXMM_WORKDIR=str(box.repo.resolve()), FAKE_BUNDLED="1")
+    assert p.returncode == 0, p.out
+    assert "repo-dgxmm-litellm-1" in p.out and "repo-dgxmm-litellm-db-1" in p.out
+    assert ":4000/v1" in p.out
+
+
+def test_status_flags_unhealthy_litellm(box):
+    (box.repo / ".env").write_text("DGXMM_WITH_LITELLM=1\n")
+    p = box.run("status", FAKE_DGXMM_STATE="running", FAKE_DGXMM_WORKDIR=str(box.repo.resolve()),
+                FAKE_BUNDLED="1", FAKE_LITELLM_HEALTH="exited/")
+    assert p.returncode != 0
+
+
+def _installed_with_litellm(box):
+    fake = _installed(box)
+    (box.repo / "data" / "litellm-db").mkdir()
+    (box.repo / "data" / "litellm-db" / "PG_VERSION").write_text("16")
+    (box.repo / "secrets" / "litellm_salt_key").write_text("s")
+    fake["FAKE_BUNDLED"] = "1"
+    return fake
+
+
+def test_uninstall_removes_litellm_containers_keeps_db(box):
+    fake = _installed_with_litellm(box)
+    p = box.run("uninstall", **fake)
+    assert p.returncode == 0, p.out
+    calls = box.calls()
+    assert "docker stop -t 30 id-dgxmm-litellm id-dgxmm-litellm-db" in calls
+    assert "docker rm id-dgxmm-litellm id-dgxmm-litellm-db" in calls
+    assert (box.repo / "data" / "litellm-db" / "PG_VERSION").exists()
+    assert (box.repo / "secrets" / "litellm_salt_key").exists()
+    assert "data/litellm-db" in p.out
+
+
+def test_uninstall_purge_removes_litellm_db(box):
+    fake = _installed_with_litellm(box)
+    p = box.run("uninstall", "--purge", **fake)
+    assert p.returncode == 0, p.out
+    assert not (box.repo / "data").exists() and not (box.repo / "secrets").exists()
+    assert "docker rm id-dgxmm-litellm id-dgxmm-litellm-db" in box.calls()
+
+
+def test_uninstall_purge_dry_run_keeps_litellm_db(box):
+    fake = _installed_with_litellm(box)
+    before = box.snapshot()
+    p = box.run("uninstall", "--purge", "--dry-run", **fake)
+    assert p.returncode == 0, p.out
+    assert box.snapshot() == before
+    assert "docker rm" not in box.calls() and "docker stop" not in box.calls()
+
+
+def test_compose_litellm_profile_is_pinned_and_parameterised():
+    text = (ROOT / "docker-compose.yaml").read_text()
+    assert "profiles: [litellm]" in text
+    assert "dgxmm-litellm:" in text and "dgxmm-litellm-db:" in text
+    assert "ghcr.io/berriai/litellm:v1." in text and "@sha256:" in text and "main-latest" not in text
+    assert "image: postgres:16" in text
+    assert "${DGXMM_BIND:-0.0.0.0}:${DGXMM_LITELLM_PORT:-4000}:4000" in text
+    assert "./data/litellm-db:/var/lib/postgresql/data" in text
+    # Only the dgxmm service has a fixed container name; profile services derive theirs from the project.
+    assert text.count("container_name:") == 1
+    cfg = (ROOT / "deploy" / "litellm" / "config.yaml").read_text()
+    assert "store_model_in_db: true" in cfg and "os.environ/LITELLM_MASTER_KEY" in cfg
+    assert "os.environ/DATABASE_URL" in cfg
+
+
+def _compose_available() -> bool:
+    if not shutil.which("docker"):
+        return False
+    return subprocess.run(["docker", "compose", "version"], capture_output=True).returncode == 0
+
+
+@pytest.mark.skipif(not _compose_available(), reason="docker compose not available")
+@pytest.mark.parametrize("profile", [[], ["--profile", "litellm"]])
+def test_compose_file_validates(tmp_path, profile):
+    shutil.copy2(ROOT / "docker-compose.yaml", tmp_path / "docker-compose.yaml")
+    (tmp_path / ".env").write_text(
+        "DGXMM_UID=1000\nDGXMM_GID=1000\nDOCKER_GID=988\nDGXMM_HOST_HOME=/tmp\nDGXMM_HF_CACHE=/tmp/hf\n"
+        "DGXMM_MODELS_DIR=/tmp/models\nDGXMM_NETWORK=dgxmmtest\nDGXMM_LITELLM_PORT=14000\nDGXMM_BIND=127.0.0.1\n")
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("DGXMM_", "COMPOSE_"))}
+    p = subprocess.run(["docker", "compose", *profile, "config", "-q"], cwd=tmp_path, env=env,
+                       capture_output=True, text=True)
+    assert p.returncode == 0, p.stderr
+    services = subprocess.run(["docker", "compose", *profile, "config", "--services"], cwd=tmp_path, env=env,
+                              capture_output=True, text=True, check=True).stdout.split()
+    expected = {"dgxmm", "dgxmm-litellm", "dgxmm-litellm-db"} if profile else {"dgxmm"}
+    assert set(services) == expected
