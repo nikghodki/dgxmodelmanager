@@ -97,6 +97,7 @@ class Settings(BaseModel):
     hf_token_file: str = "/run/secrets/hf_token"
     session_ttl_s: int = 12 * 3600
     secure_cookies: str = "auto"  # auto | always | never
+    trusted_proxies: str = "127.0.0.1,::1"  # IPs/CIDRs that may set X-Forwarded-For
     min_free_disk_gib: float = 50.0
     vllm_runtime_fixed_gib: float = 3.0
     vllm_cuda_graph_gib: float = 1.5
@@ -146,3 +147,4 @@ def load_settings(path: str | None = None) -> Settings:
         if raw is not None:
             data[name] = yaml.safe_load(raw)
     return Settings(**data)
+

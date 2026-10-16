@@ -313,11 +313,12 @@ uninstall it first.
   [configuration](configuration.md#reverse-proxy)) and set `secure_cookies: always`.
 - **Firewalls:** ports published by Docker bypass host firewall rules such as `ufw`. Restrict access
   with `DGXMM_BIND`, not only with the firewall.
-- **Client IPs behind a proxy:** DGXMM trusts `X-Forwarded-For` and `X-Forwarded-Proto` from any client
-  (Uvicorn runs with `forwarded_allow_ips="*"`). The IP-based login limit and the IPs in the audit log
-  can therefore be spoofed. Binding to loopback behind a proxy means only the proxy can connect. Have
-  the proxy overwrite the header (`proxy_set_header X-Forwarded-For $remote_addr;` in nginx) rather
-  than append to it. The per-username login limit applies either way.
+- **Client IPs behind a proxy:** DGXMM only trusts `X-Forwarded-For` from IPs/subnets configured in
+  `trusted_proxies` (default: `127.0.0.1,::1`, loopback-only). Behind a reverse proxy, set this to the
+  proxy's IP or docker network subnet (e.g., `DGXMM_TRUSTED_PROXIES=172.23.0.0/16` in `.env` for a
+  dockerized proxy on the `gateway` network) to ensure correct client IPs in logs and rate limiting. Have
+  the proxy overwrite the header (`proxy_set_header X-Forwarded-For $remote_addr;` in nginx) rather than
+  append to it. The per-username login limit applies either way.
 - **Engine endpoints have no authentication.** Keep `publish_bind: 127.0.0.1` and give other machines
   access through LiteLLM with its own API keys.
 - **Delete `secrets/admin_password`** after you have changed the first password. It is not needed

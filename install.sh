@@ -59,7 +59,9 @@ Environment (all optional; non-interactive, nothing is prompted):
   LITELLM_URL          LiteLLM proxy URL for model registration (default http://litellm-proxy:4000).
   LITELLM_MASTER_KEY   LiteLLM master key, written to secrets/litellm_master_key. If unset and a
                        running container named litellm-proxy exists, the key is read from it.
-  DGXMM_PULL_ENGINES=1 Pre-pull the vLLM and llama.cpp engine images (large; default off).
+  DGXMM_TRUSTED_PROXIES  Comma-separated IPs/CIDRs trusted to set X-Forwarded-For (default 127.0.0.1,::1).
+                       Behind a reverse proxy, set to the proxy's IP or docker network subnet.
+    DGXMM_PULL_ENGINES=1 Pre-pull the vLLM and llama.cpp engine images (large; default off).
   DGXMM_HEALTH_TIMEOUT Seconds to wait for the container to become healthy (default 300).
 
 Settings are written once to .env; when .env exists its values win (edit .env to change them).

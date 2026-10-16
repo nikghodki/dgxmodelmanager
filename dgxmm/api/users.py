@@ -29,7 +29,7 @@ class UserPatch(BaseModel):
 
 
 @router.get("")
-def list_users(p: Principal = Depends(current_principal), ctx: AppContext = Depends(get_ctx)):
+def list_users(p: Principal = Depends(require_admin), ctx: AppContext = Depends(get_ctx)):
     with ctx.db.session() as s:
         return [user_out(u) for u in s.scalars(select(User).order_by(User.username))]
 
