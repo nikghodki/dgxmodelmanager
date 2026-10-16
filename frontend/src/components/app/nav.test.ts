@@ -9,6 +9,10 @@ describe("nav", () => {
     expect(visibleGroups(false).flatMap((g) => g.items.map((i) => i.to))).not.toContain("/litellm");
     expect(visibleGroups(true).find((g) => g.label === "Integrations")!.items.map((i) => i.to)).toEqual(["/litellm"]);
   });
+  it("lists Processes under Operate for everyone", () => {
+    const operate = visibleGroups(false).find((g) => g.label === "Operate")!;
+    expect(operate.items.map((i) => i.to)).toContain("/processes");
+  });
   it.each([
     ["/", { section: "Dashboard" }],
     ["/deployments", { section: "Deployments" }],
@@ -17,6 +21,7 @@ describe("nav", () => {
     ["/catalog", { section: "Catalog" }],
     ["/models", { section: "On disk" }],
     ["/litellm", { section: "LiteLLM" }],
+    ["/processes", { section: "Processes" }],
     ["/change-password", { section: "Account", item: "Change password" }],
     ["/nope", { section: "DGXMM" }],
   ])("titleFor(%s)", (path, want) => expect(titleFor(path)).toEqual(want));

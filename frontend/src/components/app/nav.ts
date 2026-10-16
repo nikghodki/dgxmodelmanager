@@ -1,5 +1,5 @@
 import type { LucideIcon } from "lucide-react";
-import { Download, HardDrive, LayoutDashboard, Network, Puzzle, ScrollText, Search, Server, Users } from "lucide-react";
+import { Activity, Download, HardDrive, LayoutDashboard, Network, Puzzle, ScrollText, Search, Server, Users } from "lucide-react";
 
 export interface NavItem { to: string; label: string; icon: LucideIcon; end?: boolean; /** Extra ⌘K search words. */ keywords?: string }
 export interface NavGroup { label: string; admin?: boolean; items: NavItem[] }
@@ -9,6 +9,7 @@ export const NAV_GROUPS: NavGroup[] = [
     { to: "/", label: "Dashboard", icon: LayoutDashboard, end: true },
     { to: "/deployments", label: "Deployments", icon: Server },
     { to: "/planner", label: "Planner", icon: Puzzle },
+    { to: "/processes", label: "Processes", icon: Activity },
   ] },
   { label: "Models", items: [
     { to: "/models", label: "On disk", icon: HardDrive },

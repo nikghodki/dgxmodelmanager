@@ -77,7 +77,7 @@ class FakeContainers:
     def __init__(self, client):
         self.client = client
 
-    def list(self, all=False, filters=None):
+    def list(self, all=False, filters=None, sparse=False):
         items = list(self.client._containers.values())
         if filters and "label" in filters:
             k, _, v = filters["label"].partition("=")
@@ -179,6 +179,9 @@ class FakeProbe:
     def sample(self, ids):
         return HostSample(mem=self.meminfo(), managed={c: self.managed_actual.get(c, 0) for c in ids},
                           external_top=[], gpu={})
+
+    def processes(self, managed=None, names=None):
+        return []
 
 
 class FakeEngines:
