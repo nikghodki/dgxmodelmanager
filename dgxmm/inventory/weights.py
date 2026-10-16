@@ -101,6 +101,7 @@ class WeightsDeleter:
         self.settings, self.db, self.inventory, self.docker = settings, db, inventory, docker
         self._lock = threading.Lock()
         self.deleting: set[str] = set()  # refs and target paths of the deletion in progress
+        self.deployer = deployer
         for svc in (deployer, downloads):
             if svc is not None:
                 svc.delete_guard = self.is_being_deleted
@@ -200,7 +201,10 @@ class WeightsDeleter:
                 if not hit:
                     continue
                 row = {"id": d.id, "name": d.name, "state": d.state}
-                (affected if d.state in TERMINAL_STATES else blocking).append(row)
+                launching = self.deployer is not None and d.id in dict(getattr(self.deployer, "launching", {}))
+                if launching:
+                    row["state"] = "launching"  # container being (re)started; DB row may still say stopped
+                (affected if d.state in TERMINAL_STATES and not launching else blocking).append(row)
         return blocking, affected
 
     def _download_active(self, repo: str | None) -> bool:
@@ -365,9 +369,12 @@ class WeightsDeleter:
             p, e = errors[0]
             host = self._host_or_local(p)
             hint = f"sudo chown -R {os.getuid()}:{os.getgid()} {host}"
+            failed = {x for x, _ in errors}
             raise DeleteError("delete_failed", f"could not delete {host}: {e.strerror or e}. "
                               f"The files are probably owned by root. Fix on the host: {hint}", 500,
-                              hint=hint, paths=[self._host_or_local(x) for x, _ in errors])
+                              hint=hint, paths=[self._host_or_local(x) for x in failed],
+                              removed=[self._host_or_local(t.path) for t in plan.targets
+                                       if t.path not in failed and not os.path.lexists(t.path)])
         if plan.rmdir_if_empty is not None:
             try:
                 self._check(plan.rmdir_if_empty)
@@ -417,7 +424,9 @@ class WeightsDeleter:
 
     def _audit_error(self, user_id, ref: str, e: DeleteError) -> None:
         if e.code == "delete_failed":
-            self._audit(user_id, "model_delete_failed", ref, {"error": e.message[:500]})
+            self._audit(user_id, "model_delete_failed", ref, {"error": e.message[:500],
+                                                               "removed": e.extra.get("removed", []),
+                                                               "failed": e.extra.get("paths", [])})
         else:
             self._audit(user_id, "model_delete_refused", ref, {"reason": e.code, "message": e.message[:500]})
 
@@ -436,6 +445,12 @@ class WeightsDeleter:
                 if e.code == "delete_failed":
                     self._refresh()
                 raise
+            except Exception as e:  # unexpected: still audit, rescan what is left, and report cleanly
+                log.exception("deleting %s failed", ref)
+                err = DeleteError("delete_failed", f"deleting {ref} failed: {type(e).__name__}: {e}", 500)
+                self._audit_error(user_id, ref, err)
+                self._refresh()
+                raise err from e
             self._audit_result(user_id, out)
             self._refresh()
             return out
@@ -490,7 +505,9 @@ class WeightsDeleter:
                     continue
                 except Exception as e:  # never abort the batch half-way
                     log.exception("cleanup of %s failed", ref)
-                    failed.append({"ref": ref, "code": "error", "message": f"{type(e).__name__}: {e}"})
+                    msg = f"{type(e).__name__}: {e}"
+                    self._audit_error(user_id, ref, DeleteError("delete_failed", msg, 500))
+                    failed.append({"ref": ref, "code": "error", "message": msg})
                     continue
                 self._audit_result(user_id, out, cleanup=True)  # audit as it happens
                 deleted.append(out)

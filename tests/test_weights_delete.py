@@ -634,6 +634,8 @@ def test_launch_rechecks_guard_after_row_is_created(stack):
                                                         config={"max_model_len": 4096}), None))
     assert e.value.code == "model_being_deleted" and e.value.status == 409
     assert stack.sdk.run_calls == []
+    with stack.db.session() as s:   # the refused deploy must not keep a row holding the name
+        assert s.query(Deployment).filter(Deployment.name == "t").count() == 0
 
 
 def test_helper_missing_image_falls_back_without_pull(settings, fake_hf_repo, make):
@@ -657,3 +659,130 @@ def test_self_image_prefers_container_id_from_proc(tmp_path):
     cg.write_text(f"0::/system.slice/docker-{me.id}.scope\n")
     assert d.self_image(mountinfo=str(tmp_path / "nope"), cgroup=str(cg)) == "dgxmm:from-id"
     assert d.self_image(mountinfo=str(tmp_path / "nope"), cgroup=str(tmp_path / "nope")) == "dgxmm:from-hostname"
+
+
+# ---------------------------------------------------------------- review fixes (round 2): races
+
+def _stopped_dep(db, ref="Qwen/Qwen3-Tiny", name="old"):
+    with db.session() as s:
+        d = Deployment(name=name, engine="vllm", model_ref=ref, state="stopped", port=8150,
+                       config={"max_model_len": 4096})
+        s.add(d)
+        s.flush()
+        return d.id
+
+
+def test_restart_launch_window_is_blocking_for_the_deleter(settings, db, stack, monkeypatch):
+    """A deleter re-planning while a stopped deployment is being (re)launched must see it as blocking."""
+    import asyncio
+    dep_id = _stopped_dep(db)
+    d = WeightsDeleter(settings, db, stack.inv, deployer=stack.deployer)
+    seen = {}
+    real_run = stack.deployer.docker.run
+
+    def run(spec):                       # the deleter wakes up exactly while docker.run is in flight
+        seen["preview"] = d.preview("Qwen/Qwen3-Tiny")
+        try:
+            d.delete("Qwen/Qwen3-Tiny")
+        except DeleteError as e:
+            seen["code"] = e.code
+        return real_run(spec)
+    monkeypatch.setattr(stack.deployer.docker, "run", run)
+    asyncio.run(stack.deployer.restart(dep_id))
+    assert [x["name"] for x in seen["preview"]["deployments_blocking"]] == ["old"]
+    assert seen["code"] == "model_in_use"
+    assert (hub(settings) / "models--Qwen--Qwen3-Tiny").is_dir()
+    assert stack.deployer.launching == {}
+
+
+def test_restart_refused_at_launch_keeps_the_row_state(settings, db, stack):
+    import asyncio
+    from dgxmm.deployer.service import DeployError
+    dep_id = _stopped_dep(db)
+    calls = []
+    stack.deployer.delete_guard = lambda ref: calls.append(ref) or len(calls) > 1
+    with pytest.raises(DeployError) as e:
+        asyncio.run(stack.deployer.restart(dep_id))
+    assert e.value.code == "model_being_deleted"
+    with db.session() as s:
+        assert s.get(Deployment, dep_id).state == "stopped"
+    assert stack.sdk.run_calls == [] and stack.deployer.launching == {}
+
+
+def test_download_guard_rechecked_after_row_insert(settings, db, stack):
+    from types import SimpleNamespace
+    from dgxmm.downloads import DownloadError, DownloadService
+    files = [SimpleNamespace(name="model.safetensors", size=10), SimpleNamespace(name="config.json", size=1)]
+    hub_client = SimpleNamespace(details=lambda repo: SimpleNamespace(files=files, sha="a" * 40))
+    dls = DownloadService(settings, db, stack.inv, hub=hub_client, events=stack.events,
+                          disk_usage=lambda p: SimpleNamespace(free=10**15))
+    state = {"deleting": False}
+    dls.delete_guard = lambda ref: state["deleting"]
+    real_details = hub_client.details
+
+    def details(repo):                    # deletion starts while we talk to the Hub
+        state["deleting"] = True
+        return real_details(repo)
+    hub_client.details = details
+    with pytest.raises(DownloadError) as e:
+        dls.start("org/new-model")
+    assert e.value.code == "model_being_deleted" and e.value.status == 409
+    with db.session() as s:
+        assert s.query(Download).count() == 0
+
+
+def test_download_row_inserted_before_final_guard_check(settings, db, stack):
+    """Ordering: the queued row exists by the time the guard is consulted the last time."""
+    from types import SimpleNamespace
+    from dgxmm.downloads import DownloadService
+    files = [SimpleNamespace(name="model.safetensors", size=10)]
+    hub_client = SimpleNamespace(details=lambda repo: SimpleNamespace(files=files, sha="a" * 40))
+    dls = DownloadService(settings, db, stack.inv, hub=hub_client, events=stack.events,
+                          disk_usage=lambda p: SimpleNamespace(free=10**15))
+    rows_at_check = []
+
+    def guard(ref):
+        with db.session() as s:
+            rows_at_check.append(s.query(Download).filter(Download.state == "queued").count())
+        return False
+    dls.delete_guard = guard
+    dls.start("org/new-model")
+    assert rows_at_check[-1] == 1
+
+
+def test_unexpected_error_during_delete_is_audited_and_refreshes(settings, db, fake_hf_repo, make, monkeypatch):
+    from dgxmm.db import AuditLog
+    fake_hf_repo("Qwen/Qwen3-Tiny", config=QWEN_TINY)
+    d, inv = make()
+    refreshed = []
+    monkeypatch.setattr(inv, "refresh", lambda: refreshed.append(1))
+    monkeypatch.setattr(d, "_execute", lambda plan: (_ for _ in ()).throw(KeyError("weird")))
+    with pytest.raises(DeleteError) as e:
+        d.delete("Qwen/Qwen3-Tiny")
+    assert e.value.code == "delete_failed" and e.value.status == 500
+    assert refreshed and d.deleting == set()
+    with db.session() as s:
+        [row] = s.query(AuditLog).filter(AuditLog.action == "model_delete_failed").all()
+        assert "KeyError" in row.detail["error"]
+
+
+def test_delete_failed_audit_lists_removed_targets(settings, db, fake_hf_repo, make, monkeypatch):
+    from dgxmm.db import AuditLog
+    fake_hf_repo("Qwen/Qwen3-Tiny", config=QWEN_TINY)
+    (hub(settings) / ".locks" / "models--Qwen--Qwen3-Tiny").mkdir(parents=True)
+    import dgxmm.inventory.weights as w
+    real = w.shutil.rmtree
+
+    def rmtree(path, *a, **kw):
+        if ".locks" in str(path):
+            return real(path, *a, **kw)
+        raise PermissionError(13, "Permission denied", str(path))
+    monkeypatch.setattr(w.shutil, "rmtree", rmtree)
+    d, _ = make()
+    with pytest.raises(DeleteError) as e:
+        d.delete("Qwen/Qwen3-Tiny")
+    assert e.value.extra["removed"] == ["/host/hf/hub/.locks/models--Qwen--Qwen3-Tiny"]
+    with db.session() as s:
+        [row] = s.query(AuditLog).filter(AuditLog.action == "model_delete_failed").all()
+        assert row.detail["removed"] == ["/host/hf/hub/.locks/models--Qwen--Qwen3-Tiny"]
+        assert row.detail["failed"] == ["/host/hf/hub/models--Qwen--Qwen3-Tiny"]
