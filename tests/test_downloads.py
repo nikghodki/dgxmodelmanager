@@ -122,3 +122,47 @@ async def test_cancel_between_files(stack):
     await s.launch(v["id"])
     out = await wait_state(s, v["id"])
     assert out["state"] == "cancelled" and dl.calls == []
+
+
+def _row(stack, state, repo="org/stuck"):
+    from dgxmm.db import Download
+    with stack.db.session() as s:
+        d = Download(repo_id=repo, revision="abc", files=["config.json"], bytes_total=100, state=state)
+        s.add(d)
+        s.flush()
+        return d.id
+
+
+async def test_restart_marks_interrupted_downloads_failed(stack):
+    """I3: queued/running rows left by a previous process are failed at startup."""
+    q, r, done = _row(stack, "queued", "org/q"), _row(stack, "running", "org/r"), _row(stack, "done", "org/d")
+    s = svc(stack, fake_downloader())
+    s.recover()
+    assert s.view(q)["state"] == "failed" and "interrupted by dgxmm restart" in s.view(q)["error"]
+    assert s.view(r)["state"] == "failed" and s.view(done)["state"] == "done"
+    s.start("org/r")  # the repo can be downloaded again
+
+
+async def test_cancel_without_live_task_marks_cancelled(stack):
+    r = _row(stack, "running", "org/r")
+    s = svc(stack, fake_downloader())
+    assert s.cancel(r)["state"] == "cancelled"
+
+
+async def test_cancel_unknown_id_is_404(stack):
+    s = svc(stack, fake_downloader())
+    with pytest.raises(DownloadError) as e:
+        s.cancel(424242)
+    assert e.value.status == 404 and e.value.code == "not_found"
+
+
+def test_cancel_route_is_async_and_404s(api_stack):
+    """M7: the cancel route publishes events, so it must run on the event loop (async def)."""
+    import inspect
+    from dgxmm.api import downloads as api_downloads
+    from tests.test_api_deployments import admin
+    assert inspect.iscoroutinefunction(api_downloads.cancel)
+    h = admin(api_stack)
+    api_stack.ctx.downloads = svc(api_stack.stack, fake_downloader())
+    r = api_stack.post("/dgxmm/api/downloads/424242/cancel", headers=h)
+    assert r.status_code == 404 and r.json()["detail"]["code"] == "not_found"

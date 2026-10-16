@@ -32,8 +32,7 @@ class ProcMem:
     pid: int
     name: str
     rss: int
-    gpu: int
-    cmdline: str
+    gpu: int  # no command line: it can carry secrets and /api/host is visible to viewers
 
 
 @dataclass
@@ -141,11 +140,7 @@ class HostProbe:
             gpu = gpu_by_pid.get(pid, 0)
             if rss_kb == 0 and gpu == 0:
                 continue
-            try:
-                cmd = (d / "cmdline").read_bytes().replace(b"\0", b" ").decode(errors="replace").strip()[:200]
-            except OSError:
-                cmd = ""
-            external.append(ProcMem(pid=pid, name=fields.get("Name", "?").strip(), rss=rss_kb * 1024, gpu=gpu, cmdline=cmd))
+            external.append(ProcMem(pid=pid, name=fields.get("Name", "?").strip(), rss=rss_kb * 1024, gpu=gpu))
         external.sort(key=lambda p: p.rss + p.gpu, reverse=True)
         return HostSample(mem=mem, managed=managed, external_top=external[:top_n],
                           gpu=self.gpu.device_stats() if self.gpu else {})

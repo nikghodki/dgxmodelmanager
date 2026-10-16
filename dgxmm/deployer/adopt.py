@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 
 from sqlalchemy import select
 
@@ -11,8 +12,8 @@ from dgxmm.deployer.service import NAME_PATTERN, DeployError
 from dgxmm.engines.argguard import VLLM_EXTRA_FLAGS
 
 VALUE_FLAGS = {
-    "--served-model-name": ("served_model_name", str), "--max-model-len": ("max_model_len", int),
-    "--max-num-seqs": ("max_num_seqs", int), "--max-num-batched-tokens": ("max_num_batched_tokens", int),
+    "--served-model-name": ("served_model_name", str), "--max-model-len": ("max_model_len", "int"),
+    "--max-num-seqs": ("max_num_seqs", "int"), "--max-num-batched-tokens": ("max_num_batched_tokens", "int"),
     "--kv-cache-dtype": ("kv_cache_dtype", str), "--tool-call-parser": ("tool_call_parser", str),
     "--reasoning-parser": ("reasoning_parser", str), "--safetensors-load-strategy": ("safetensors_load_strategy", str),
 }
@@ -27,6 +28,25 @@ MANAGED = {"--host", "--port", "--gpu-memory-utilization", "--revision"}
 
 class AdoptError(DeployError):
     pass
+
+
+_DEC = {"k": 10**3, "m": 10**6, "g": 10**9, "t": 10**12}
+_BIN = {"K": 2**10, "M": 2**20, "G": 2**30, "T": 2**40}
+
+
+def human_int(flag: str, val: str) -> int:
+    """Parse an integer the way vLLM's CLI does: 32k = 32000 (decimal), 32K = 32768 (binary)."""
+    v = val.strip()
+    if re.fullmatch(r"\d+", v):
+        return int(v)
+    m = re.fullmatch(r"(\d+(?:\.\d+)?)([kmgtKMGT])", v)
+    if m:
+        num, suf = m.groups()
+        if suf in _DEC:
+            return int(float(num) * _DEC[suf])
+        if "." not in num:
+            return int(num) * _BIN[suf]
+    raise AdoptError("invalid_value", f"cannot adopt: {flag} has an unparseable value {val!r}", 422)
 
 
 def parse_vllm_command(cmd: list[str]) -> tuple[str, dict, list[str]]:
@@ -54,12 +74,18 @@ def parse_vllm_command(cmd: list[str]) -> tuple[str, dict, list[str]]:
             ignored.append(flag)
         elif flag in VALUE_FLAGS:
             key, typ = VALUE_FLAGS[flag]
-            cfg[key] = typ(val)
+            cfg[key] = human_int(flag, val) if typ == "int" else typ(val)
         elif flag in BOOL_FLAGS:
             key, value = BOOL_FLAGS[flag]
             cfg[key] = value
         elif flag == "--speculative-config":
-            cfg["speculative"] = json.loads(val)
+            try:
+                spec = json.loads(val)
+            except ValueError:
+                spec = None
+            if not isinstance(spec, dict):
+                raise AdoptError("invalid_value", "cannot adopt: --speculative-config is not a JSON object", 422)
+            cfg["speculative"] = spec
         elif flag in VLLM_EXTRA_FLAGS:
             extra += [flag] + ([val] if VLLM_EXTRA_FLAGS[flag] is not None else [])
         else:
@@ -80,12 +106,25 @@ def list_adoptable(deployer) -> list[dict]:
     for c in deployer.docker.list_all():
         if c.managed or "vllm" not in c.image:
             continue
-        out.append({**c.as_dict(), "adopted_as": adopted.get(c.name)})
+        reason = adopt_blocker(deployer, c.command)
+        out.append({**c.as_dict(), "adopted_as": adopted.get(c.name), "adoptable": reason is None, "reason": reason})
     return sorted(out, key=lambda c: c["name"])
 
 
+def adopt_blocker(deployer, command: list[str]) -> str | None:
+    """Why this container cannot be adopted (None if it can): its command must parse and its model must be
+    a downloaded LLM (excludes e.g. whisper / embedding servers that also use the vLLM image)."""
+    try:
+        ref, _, _ = parse_vllm_command(command)
+    except DeployError as e:
+        return e.message
+    art = deployer.inventory.get(ref)
+    if art is None or art.kind != "llm":
+        return f"{ref} is not a downloaded LLM"
+    return None
+
+
 async def adopt(deployer, container: str, name: str, user_id: int | None) -> dict:
-    import re
     if not re.fullmatch(NAME_PATTERN, name):
         raise AdoptError("invalid_name", "deployment name must be lowercase letters, digits and dashes", 422)
     info = await asyncio.to_thread(deployer.docker.get, container)
