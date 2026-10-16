@@ -75,6 +75,8 @@ class Images(BaseModel):
 
 class Settings(BaseModel):
     base_path: str = "/dgxmm"
+    # data_dir also holds data/litellm-db, the bundled LiteLLM's live Postgres (owned by Postgres, not
+    # DGXMM). DGXMM must never walk, size, clean up or delete anything under it.
     data_dir: str = "/app/data"
     static_dir: str = "/app/static"
     host_proc: str = "/host/proc"

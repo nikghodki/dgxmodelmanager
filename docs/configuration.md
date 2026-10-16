@@ -145,6 +145,9 @@ from an older `.env` are appended.
 | `DGXMM_HF_CACHE` | `--hf-cache` / `DGXMM_HF_CACHE` | `$HOME/.cache/huggingface` | HF cache, mounted at `/data/hf`. |
 | `DGXMM_MODELS_DIR` | `--models-dir` / `DGXMM_MODELS_DIR` | `$HOME/models` | GGUF directory, mounted at `/data/gguf/0`. |
 | `DGXMM_HOST_HOME` | `DGXMM_HOST_HOME` | `$HOME` | Home directory that `~` in `config.yaml` expands to. |
+| `DGXMM_WITH_LITELLM` | `--with-litellm` / `DGXMM_WITH_LITELLM=1` | `0` (key not written) | Run the [bundled LiteLLM](#bundled-litellm). Written only when enabled; set `0` to turn it off. |
+| `DGXMM_LITELLM_PORT` | `--litellm-port` / `DGXMM_LITELLM_PORT` | `4000` | Host port of the bundled LiteLLM, bound to `DGXMM_BIND`. |
+| `COMPOSE_PROFILES` | (written with `DGXMM_WITH_LITELLM=1`) | `litellm` | Makes a plain `docker compose up -d` start the bundled LiteLLM too. A stray shell value is never adopted. |
 
 Paths must be absolute and must not contain whitespace, a backtick, or any of `:` `"` `'` `\` `$` `#`.
 Binds must be IPv4.
@@ -158,6 +161,7 @@ Variables that only affect one installer run:
 | `LITELLM_MASTER_KEY` | Written to `secrets/litellm_master_key` when that file is missing or empty. |
 | `DGXMM_PULL_ENGINES=1` | Pull the engine images listed in `config.yaml` before starting. |
 | `DGXMM_HEALTH_TIMEOUT` | Seconds to wait for the container to become healthy (default 300). |
+| `DGXMM_LITELLM_HEALTH_TIMEOUT` | Same for the bundled LiteLLM (default 300). `DGXMM_LITELLM_MAX_RESTARTS` (default 3) fails sooner on a crash loop. |
 | `DGXMM_LOG_LINES` | Lines shown by `./install.sh logs` (default 200). |
 
 When the installer generates `config.yaml`, it puts your HF cache, models directory, home directory
@@ -174,7 +178,10 @@ if the networks differ.
 | File | Meaning |
 |---|---|
 | `secrets/hf_token` | Hugging Face token (optional; needed for gated repos). |
-| `secrets/litellm_master_key` | LiteLLM master key (optional). |
+| `secrets/litellm_master_key` | Master key of the LiteLLM DGXMM registers models with (optional). |
+| `secrets/litellm_bundled_master_key` | Bundled LiteLLM only: its own master key. Mounted only into `dgxmm-litellm`. |
+| `secrets/litellm_salt_key` | Bundled LiteLLM only: encrypts credentials in its database. Never change it once set. |
+| `secrets/litellm_db_password` | Bundled LiteLLM only: Postgres password. |
 | `secrets/admin_password` | The first-run `admin` password, saved by the installer. DGXMM never reads it, and it goes stale once you change the password. |
 
 Secrets are read when DGXMM starts. After you change one, restart DGXMM with `docker restart dgxmm`.
@@ -326,6 +333,50 @@ Each deployment's LiteLLM status is `synced`, `pending` (DGXMM retries; see
 [troubleshooting](operations.md#litellm-status-stays-pending)), `disabled` (no key) or `none` (not
 ready). The **LiteLLM alias** field in the deploy wizard sets a stable name such as `default-chat`.
 Switching models moves the alias to the new deployment, so clients keep working.
+
+## Bundled LiteLLM
+
+For a fresh box without a LiteLLM, `./install.sh --with-litellm` (or `DGXMM_WITH_LITELLM=1`) enables the
+compose profile `litellm`, which has two more services:
+
+- `dgxmm-litellm`: LiteLLM pinned to a released, multi-arch image. It uses
+  `deploy/litellm/config.yaml` (`store_model_in_db: true`, so DGXMM's registrations persist) and
+  publishes `${DGXMM_BIND}:${DGXMM_LITELLM_PORT:-4000}`.
+- `dgxmm-litellm-db`: `postgres:16` with its data in `data/litellm-db`. It runs as `DGXMM_UID`, so the
+  files belong to you. It has no published port. Containers on the shared Docker network can reach
+  it, so it is password-protected (`secrets/litellm_db_password`).
+
+Neither has a fixed container name: they are called `<compose project>-dgxmm-litellm-1` and so on.
+DGXMM and engines reach LiteLLM as `http://dgxmm-litellm:4000` on `DGXMM_NETWORK`.
+
+Keys. The bundled LiteLLM always gets its **own** master key, `secrets/litellm_bundled_master_key`,
+generated once and never overwritten. It is never the key of another LiteLLM.
+
+- Fresh install: `config.yaml` is generated with `litellm_url: http://dgxmm-litellm:4000`. If
+  `secrets/litellm_master_key` is empty, the installer writes the same key there too, so registration
+  works with nothing to configure.
+- Existing install that uses another LiteLLM: `config.yaml` and `secrets/litellm_master_key` are kept
+  and the installer prints a note. To switch DGXMM to the bundled LiteLLM, set `litellm_url` to
+  `http://dgxmm-litellm:4000` and the master key from `secrets/litellm_bundled_master_key` on DGXMM's
+  LiteLLM page (Integrations > LiteLLM). If a container named `litellm-proxy` runs, the installer
+  warns that a second LiteLLM will run and needs a free port.
+
+At the end the installer prints the single endpoint, `http://<host>:<port>/v1`. Clients pass the DGXMM
+model name as `model`. Create virtual keys on DGXMM's LiteLLM page, or call `POST /key/generate` on
+the endpoint with the bundled master key. `./install.sh status` lists both containers.
+
+If the database or LiteLLM fails to start, the installer still finishes DGXMM's setup (and shows the
+first-run admin password). It then prints the redacted LiteLLM and database logs and exits non-zero.
+
+**Turning it off:** set `DGXMM_WITH_LITELLM=0` in `.env` and run `./install.sh`. It stops and removes
+the two containers and leaves `litellm` out of `COMPOSE_PROFILES` for that run. `data/litellm-db` and
+the secrets are kept; remove `litellm` from `COMPOSE_PROFILES` in `.env` too, so a manual
+`docker compose up -d` does not start it again. `uninstall --purge` deletes `data/litellm-db` but leaves
+the images. Remove them with `docker image rm postgres:16 ghcr.io/berriai/litellm:<tag>` (see
+`docker-compose.yaml` for the exact tag).
+
+For backups of the LiteLLM database (virtual keys, budgets, spend), see
+[backup and restore](operations.md#backup-and-restore).
 
 ## Hugging Face token
 

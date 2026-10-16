@@ -87,7 +87,8 @@ What to keep:
 | Path | Contains |
 |---|---|
 | `data/` | `dgxmm.sqlite3`: users, deployments and their configs, events, calibration, benchmarks, 30-day metrics, audit log. Also cached vLLM architecture lists. |
-| `secrets/` | HF token, LiteLLM key, first admin password |
+| `data/litellm-db/` | Bundled LiteLLM only: its Postgres database (virtual keys, budgets, spend, registered models) |
+| `secrets/` | HF token, LiteLLM keys (incl. the bundled LiteLLM's master/salt key and DB password), first admin password |
 | `config.yaml`, `.env` | your configuration |
 | `docker-compose.override.yaml` | only if you created one |
 
@@ -100,6 +101,23 @@ download them again.
 docker stop dgxmm
 tar czf dgxmm-backup-$(date +%F).tgz data secrets config.yaml .env
 docker start dgxmm
+```
+
+With the bundled LiteLLM (`DGXMM_WITH_LITELLM=1`), `data/` also holds a live Postgres
+(`data/litellm-db`). Copying a running database's files gives a corrupt backup, so stop the bundled
+containers too, and start the database first when you are done:
+
+```bash
+docker compose --profile litellm stop dgxmm dgxmm-litellm dgxmm-litellm-db
+tar czf dgxmm-backup-$(date +%F).tgz data secrets config.yaml .env
+docker compose --profile litellm up -d
+```
+
+Or keep LiteLLM running and take a logical dump of its database. Back it up together with `secrets/`:
+`litellm_salt_key` must match, or the stored credentials cannot be decrypted.
+
+```bash
+docker compose --profile litellm exec -T dgxmm-litellm-db pg_dump -U litellm -d litellm -Fc > litellm-$(date +%F).dump
 ```
 
 Stopping `dgxmm` does not stop the engines. To back up the database without stopping DGXMM, use
@@ -117,6 +135,18 @@ git clone https://github.com/nikghodki/dgxmodelmanager.git && cd dgxmodelmanager
 tar xzf /path/to/dgxmm-backup-YYYY-MM-DD.tgz        # data/, secrets/, config.yaml, .env
 ./install.sh
 ```
+
+With the bundled LiteLLM, the tarball's `data/litellm-db` and `secrets/` come back as they were and
+`./install.sh` starts the database before LiteLLM. To restore a `pg_dump` instead: run `./install.sh`
+first (this creates an empty database), then stop LiteLLM, load the dump and start it again:
+
+```bash
+docker compose --profile litellm stop dgxmm-litellm
+docker compose --profile litellm exec -T dgxmm-litellm-db pg_restore -U litellm -d litellm --clean --if-exists < litellm-YYYY-MM-DD.dump
+docker compose --profile litellm start dgxmm-litellm
+```
+
+Keep the original `secrets/litellm_salt_key` (and `litellm_bundled_master_key`) when you restore a dump.
 
 On a different host, check `.env` first: `DGXMM_UID`/`DGXMM_GID`, `DOCKER_GID` (`stat -c %g
 /var/run/docker.sock`) and the paths must fit the new machine. The installer warns when the uid or
@@ -136,7 +166,9 @@ containers do not exist on the new host are marked `failed` at startup. Start th
 | `dgxmm` container and image | removed | removed |
 | Engine containers (`dgxmm.managed=true`) | left running (a reinstall picks them up again) | removed |
 | Docker network | kept | removed if the installer created it |
-| `data/`, `secrets/`, `config.yaml`, `.env` | kept | deleted |
+| Bundled LiteLLM containers (`dgxmm-litellm`, `dgxmm-litellm-db`) | removed | removed |
+| `data/` (incl. the LiteLLM database `data/litellm-db`), `secrets/`, `config.yaml`, `.env` | kept | deleted |
+| LiteLLM / `postgres:16` images | kept | kept (`docker image rm` them by hand) |
 | HF cache, models directory | kept | **kept** |
 
 Uninstall refuses to touch a `dgxmm` container that belongs to another checkout. Add `--dry-run` to
