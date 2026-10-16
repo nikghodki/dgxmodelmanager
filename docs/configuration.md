@@ -80,7 +80,7 @@ the container.
 | `base_path` | string | `/dgxmm` | URL prefix of the UI and API. The frontend is built for `/dgxmm`, so leave this alone. |
 | `session_ttl_s` | int | `43200` (12 h) | Login session lifetime. It is extended on every request. |
 | `secure_cookies` | `auto` / `always` / `never` | `auto` | `auto`: the cookie is `Secure` when the request is HTTPS (directly or via `X-Forwarded-Proto`). Use `always` behind an HTTPS proxy. |
-| `trusted_proxies` | comma-separated IPs/CIDRs | `127.0.0.1,::1` | IPs/subnets trusted to set `X-Forwarded-For` (for correct client IPs in logs and rate limiting). Default is loopback-only. Behind a reverse proxy, set this to the proxy's IP or docker network subnet (e.g., `172.23.0.0/16`). |
+| `trusted_proxies` | comma-separated IPs/CIDRs | `127.0.0.1,::1` | IPs/subnets trusted to set `X-Forwarded-For` (for correct client IPs in logs and rate limiting). Default is loopback-only. Set to your proxy's IP or docker network subnet (e.g., `<proxy-ip>` or `<network-subnet>`). |
 
 ### Polling intervals
 
@@ -252,9 +252,14 @@ DGXMM_BIND=127.0.0.1 ./install.sh
 Set `secure_cookies: always` in `config.yaml` when the proxy terminates HTTPS. The proxy must disable
 response buffering for the event stream, allow long-lived connections, and pass `X-Forwarded-Proto`.
 
+**Important**: Configure `trusted_proxies` to match your proxy's IP or network:
+- **Proxy container on the DGXMM network**: set to the proxy container's IP or the docker network subnet (e.g., `DGXMM_TRUSTED_PROXIES=<network-subnet>`)
+- **Proxy on the host** (docker port publishing): set to the DGXMM network's gateway IP (find with `docker network inspect <network> -f '{{(index .IPAM.Config 0).Gateway}}'`) The proxy must disable
+
+
 **nginx in a Docker container on the DGXMM network**: the shipped `deploy/nginx-dgxmm.conf`. It
 resolves `dgxmm` through Docker's DNS, so nginx still starts while DGXMM is down. Install with
-`DGXMM_NETWORK=<your proxy's network>` (or `docker network connect dgxmm <nginx-container>`) and include
+`DGXMM_NETWORK=<your proxy's network>` (or `docker network connect <network> <nginx-container>`) and include
 it in your `server { }` block:
 
 ```nginx
@@ -265,7 +270,7 @@ it in your `server { }` block:
         proxy_pass $dgxmm_upstream;
         proxy_http_version 1.1;
         proxy_set_header Host $host;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;  # DGXMM trusts this from trusted_proxies only
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
         proxy_buffering off;          # SSE
         proxy_read_timeout 1h;
@@ -274,7 +279,7 @@ it in your `server { }` block:
 ```
 
 **nginx on the host**: use the same block with `proxy_pass http://127.0.0.1:8090;` and without the
-`resolver` and `set` lines.
+`resolver` and `set` lines. Set `trusted_proxies` to the gateway IP.
 
 **Caddy on the host** (it gets certificates automatically):
 
