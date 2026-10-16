@@ -13,15 +13,18 @@ import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
 import { fmtBytes } from "@/format";
 import { useActionMutation } from "@/hooks/use-action-mutation";
-import { etaSeconds, fmtDuration, nextRate, type Rate } from "@/lib/progress";
+import { etaSeconds, fmtDuration, updateRates, type Rate } from "@/lib/progress";
 
 export function Downloads() {
   const admin = useIsAdmin();
   const q = useQuery({ queryKey: ["downloads"], queryFn: () => api<any[]>("/downloads") });
   const cancel = useActionMutation((id: number) => api(`/downloads/${id}/cancel`, { method: "POST" }), { success: "Cancel requested", invalidate: [["downloads"]] });
   const rates = useRef(new Map<number, Rate>());
-  const now = Date.now() / 1000;
-  for (const d of q.data ?? []) if (d.state === "running") rates.current.set(d.id, nextRate(rates.current.get(d.id), d.bytes_done, now));
+  useMemo(() => {
+    if (q.data && q.dataUpdatedAt) {
+      updateRates(rates.current, q.data, q.dataUpdatedAt / 1000);
+    }
+  }, [q.data, q.dataUpdatedAt]);
   const columns = useMemo<ColumnDef<any, any>[]>(() => [
     { accessorKey: "repo_id", header: "Repository", cell: ({ row }) => <div className="min-w-0"><div className="max-w-[40ch] truncate font-medium" title={row.original.repo_id}>{row.original.repo_id}</div><div className="text-xs text-muted-foreground">{row.original.files.length} files</div></div> },
     { id: "progress", header: "Progress", enableSorting: false, cell: ({ row }) => {
