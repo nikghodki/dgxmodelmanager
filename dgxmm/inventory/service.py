@@ -17,7 +17,9 @@ class InventoryService:
     def __init__(self, settings: Settings, scanners: list[Callable[[], list[ModelArtifact]]] | None = None):
         self.settings = settings
         hub = Path(settings.hf_cache.local) / "hub"
-        self.scanners = scanners or [lambda: scan_hf_cache(hub)]
+        from dgxmm.inventory.gguf_scan import scan_gguf_roots
+        gguf_roots = [Path(m.local) for m in settings.gguf_roots] + [hub]
+        self.scanners = scanners or [lambda: scan_hf_cache(hub), lambda: scan_gguf_roots(gguf_roots)]
         self._items: dict[str, ModelArtifact] = {}
         self._lock = threading.Lock()
 
