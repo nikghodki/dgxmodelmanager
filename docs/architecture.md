@@ -405,7 +405,7 @@ Live metrics (about the last hour at the scrape interval) are kept in memory onl
 - **First login**: users created by bootstrap, by an admin or by a reset must change their password
   before any other API call.
 - **Roles**: `viewer` has read-only access. Viewers can see deployments, models, metrics, the catalog
-  and the planner, and can run memory previews. They cannot see container logs, the audit log or the
+  and the planner, and can run memory previews. They cannot see users, container logs, the audit log or the
   adoptable-container list, and the UI hides the admin pages. `admin` is needed for every change. The
   last admin cannot be deleted or demoted.
 - **Audit**: logins (also failed and rate-limited ones), password changes, deploy, start, stop, remove,

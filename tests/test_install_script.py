@@ -529,3 +529,18 @@ def test_trusted_proxies_env_accepted(box):
     """DGXMM_TRUSTED_PROXIES env var is accepted and doesn't break install."""
     p = box.run("--dry-run", DGXMM_TRUSTED_PROXIES="172.23.0.0/16")
     assert p.returncode == 0, p.out
+
+
+def test_trusted_proxies_written_to_env(box):
+    """DGXMM_TRUSTED_PROXIES is written to .env when provided."""
+    p = box.run("--dry-run", DGXMM_TRUSTED_PROXIES="10.0.0.1")
+    assert p.returncode == 0, p.out
+    assert "DGXMM_TRUSTED_PROXIES=10.0.0.1" in p.out
+
+
+def test_trusted_proxies_hint_when_bind_loopback(box):
+    """Installer prints hint when BIND=127.0.0.1 and TRUSTED_PROXIES unset."""
+    p = box.run("--dry-run", DGXMM_BIND="127.0.0.1")
+    assert p.returncode == 0, p.out
+    # Should warn about missing DGXMM_TRUSTED_PROXIES
+    assert "DGXMM_TRUSTED_PROXIES" in p.out or "proxy" in p.out.lower()

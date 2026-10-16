@@ -13,7 +13,7 @@ services:
     environment:
       DGXMM_CONFIG: /app/config.yaml
       DGXMM_HOST_HOME: "${DGXMM_HOST_HOME:?set DGXMM_HOST_HOME in .env (run ./install.sh)}"
-      DGXMM_TRUSTED_PROXIES: "${DGXMM_TRUSTED_PROXIES:-127.0.0.1,::1}"
+      DGXMM_TRUSTED_PROXIES: "${DGXMM_TRUSTED_PROXIES:-}"  # empty → config.yaml/default
       NVIDIA_VISIBLE_DEVICES: all
       NVIDIA_DRIVER_CAPABILITIES: utility
     ports:

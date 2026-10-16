@@ -5,6 +5,9 @@ import os
 from pathlib import Path
 
 import yaml
+import ipaddress
+import logging
+
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 GIB = 1024**3
@@ -98,6 +101,31 @@ class Settings(BaseModel):
     session_ttl_s: int = 12 * 3600
     secure_cookies: str = "auto"  # auto | always | never
     trusted_proxies: str = "127.0.0.1,::1"  # IPs/CIDRs that may set X-Forwarded-For
+
+    @field_validator("trusted_proxies", mode="before")
+    @classmethod
+    def _validate_trusted_proxies(cls, v: str | list[str]) -> str:
+        if isinstance(v, list):
+            v = ",".join(v)
+        v = v.strip()
+        if v == "*":
+            logging.warning("trusted_proxies='*' trusts X-Forwarded-For from any client (security risk)")
+            return v
+        if not v:
+            return "127.0.0.1,::1"
+        parts = [p.strip() for p in v.split(",") if p.strip()]
+        for part in parts:
+            if "/" in part:
+                try:
+                    ipaddress.ip_network(part, strict=False)
+                except ValueError:
+                    raise ValueError(f"Invalid IP/CIDR in trusted_proxies: {part}")
+            else:
+                try:
+                    ipaddress.ip_address(part)
+                except ValueError:
+                    raise ValueError(f"Invalid IP/CIDR in trusted_proxies: {part}")
+        return ",".join(parts)
     min_free_disk_gib: float = 50.0
     vllm_runtime_fixed_gib: float = 3.0
     vllm_cuda_graph_gib: float = 1.5
@@ -144,7 +172,6 @@ def load_settings(path: str | None = None) -> Settings:
         data = yaml.safe_load(p.read_text()) or {}
     for name in Settings.model_fields:
         raw = os.environ.get(f"DGXMM_{name.upper()}")
-        if raw is not None:
+        if raw is not None and raw.strip():  # treat empty as unset
             data[name] = yaml.safe_load(raw)
     return Settings(**data)
-
