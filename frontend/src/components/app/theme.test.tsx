@@ -43,4 +43,12 @@ describe("theme", () => {
     expect(document.documentElement.classList.contains("dark")).toBe(false);
     expect(screen.getByTestId("probe")).toHaveTextContent("light:light");
   });
+
+  it("normalizes invalid stored values to system (bootstrap parity)", () => {
+    mockMedia(true);
+    localStorage.setItem(THEME_KEY, "foo");
+    render(<ThemeProvider><Probe /></ThemeProvider>);
+    expect(screen.getByTestId("probe")).toHaveTextContent("system:dark");
+    expect(document.documentElement.classList.contains("dark")).toBe(true);
+  });
 });
