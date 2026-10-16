@@ -76,6 +76,7 @@ class MetricsStore:
         now = self.clock() if now is None else now
         current_minute = int(now // 60) * 60
         written = 0
+        rolled_keys = []
         with self.db.session() as sess:
             for key, ring in self._rings.items():
                 last = self._rolled.get(key, 0)
@@ -97,8 +98,11 @@ class MetricsStore:
                     sess.add(MetricRollup(deployment_id=None if key == "host" else int(key),
                                           minute=datetime.fromtimestamp(minute, timezone.utc), data=data))
                     written += 1
-                self._rolled[key] = current_minute
+                if groups:
+                    rolled_keys.append(key)
             sess.execute(delete(MetricRollup).where(MetricRollup.minute < datetime.now(timezone.utc) - RETENTION))
+        for key in rolled_keys:
+            self._rolled[key] = current_minute
         return written
 
     def history(self, key: int | str, hours: float) -> list[dict]:

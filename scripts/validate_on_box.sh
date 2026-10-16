@@ -13,8 +13,10 @@ CSRF=$(curl -sf -c "$J" -H 'content-type: application/json' \
 H=(-sf -b "$J" -H "X-CSRF-Token: $CSRF" -H 'content-type: application/json')
 pass "login"
 
-curl "${H[@]}" "$B/host" | py 'b=d["budget"]; assert b["total"]>100*2**30; print("free_for_new GiB", round(b["free_for_new"]/2**30,1))' && pass "host budget"
-curl "${H[@]}" "$B/inventory" | py 'assert any(a["ref"]=="Qwen/Qwen3-0.6B" and a["complete"] for a in d)' && pass "inventory has Qwen3-0.6B"
+curl "${H[@]}" "$B/host" | py 'b=d["budget"]; assert b["total"]>100*2**30; print("free_for_new GiB", round(b["free_for_new"]/2**30,1))' || fail "host budget"
+pass "host budget"
+curl "${H[@]}" "$B/inventory" | py 'assert any(a["ref"]=="Qwen/Qwen3-0.6B" and a["complete"] for a in d)' || fail "inventory missing Qwen3-0.6B"
+pass "inventory has Qwen3-0.6B"
 
 wait_state() {  # id wanted timeout_s
   for _ in $(seq 1 "$3"); do
@@ -31,13 +33,19 @@ run_one() {  # name engine ref config_json
   wait_state "$id" ready 600 || { curl "${H[@]}" "$B/deployments/$id" | py 'print(d["last_error"])'; fail "$1 ready"; }
   pass "$1 ready"
   sleep 20
-  curl "${H[@]}" "$B/deployments/$id" | py 'r,a=d["reserved_bytes"],d["actual_bytes"] or 0; print(f"reserved {r/2**30:.2f} GiB measured {a/2**30:.2f} GiB ratio {a/max(r,1):.2f}"); assert a<=r*1.15, "measured exceeds reservation by >15%"' && pass "$1 memory within reservation"
+  curl "${H[@]}" "$B/deployments/$id" | py 'r,a=d["reserved_bytes"],d["actual_bytes"] or 0; print("reserved %.2f GiB measured %.2f GiB ratio %.2f" % (r/2**30, a/2**30, a/max(r,1))); assert a<=r*1.15, "measured exceeds reservation by >15%"' || fail "$1 memory check"
+  pass "$1 memory within reservation"
   curl "${H[@]}" -d '{"levels":[1,4],"input_len":256,"output_len":64,"duration_s":20,"max_requests":8}' "$B/deployments/$id/benchmark" >/dev/null
   for _ in $(seq 1 120); do n=$(curl "${H[@]}" "$B/deployments/$id/benchmarks" | py 'print(len([b for b in d if b["current"]]))'); [ "$n" -ge 2 ] && break; sleep 1; done
-  curl "${H[@]}" "$B/deployments/$id/benchmarks" | py '[print(f"  c={b[\"concurrency\"]} total={b[\"tps_total\"]:.1f} tok/s ttft={b[\"ttft_p50\"]}") for b in d if b["current"]]' && pass "$1 benchmark"
-  curl "${H[@]}" "$B/deployments/$id/advice" | py 'print("  advice:", [a["id"] for a in d])' && pass "$1 advice"
-  curl "${H[@]}" "$B/deployments/$id" | py 'print("  litellm:", d["litellm_status"])'
-  curl "${H[@]}" -X POST "$B/deployments/$id/stop" >/dev/null && curl "${H[@]}" -X DELETE "$B/deployments/$id" >/dev/null && pass "$1 stopped and removed"
+  [ "$n" -ge 2 ] || fail "$1 benchmark timeout (got $n rows, need 2)"
+  curl "${H[@]}" "$B/deployments/$id/benchmarks" | py 'c=[b for b in d if b["current"]]; assert len(c)>=2, "need 2+ current rows"; assert all(b["tps_total"]>0 and b["requests"]>0 for b in c), "invalid benchmark data"; print("\n".join("  c=%d total=%.1f tok/s ttft=%.3f requests=%d" % (b["concurrency"], b["tps_total"], b.get("ttft_p50") or 0, b["requests"]) for b in c))' || fail "$1 benchmark verification"
+  pass "$1 benchmark"
+  curl "${H[@]}" "$B/deployments/$id/advice" | py 'print("  advice:", [a["id"] for a in d])' || fail "$1 advice fetch"
+  pass "$1 advice"
+  curl "${H[@]}" "$B/deployments/$id" | py 'print("  litellm:", d["litellm_status"])' || fail "$1 litellm status fetch"
+  curl "${H[@]}" -X POST "$B/deployments/$id/stop" >/dev/null || fail "$1 stop"
+  curl "${H[@]}" -X DELETE "$B/deployments/$id" >/dev/null || fail "$1 delete"
+  pass "$1 stopped and removed"
 }
 
 run_one val-vllm vllm Qwen/Qwen3-0.6B '{"max_model_len":8192,"max_num_seqs":4}'
