@@ -1,0 +1,16 @@
+(APIServer pid=1) INFO 10-12 09:14:02 [api_server.py:1896] vLLM API server version 0.11.1
+(APIServer pid=1) INFO 10-12 09:14:02 [utils.py:233] non-default args: {'model': 'Qwen/Qwen3-0.6B', 'max_model_len': 8192, 'gpu_memory_utilization': 0.06, 'max_num_seqs': 8}
+(APIServer pid=1) INFO 10-12 09:14:11 [model.py:547] Resolved architecture: Qwen3ForCausalLM
+(EngineCore pid=211) INFO 10-12 09:14:24 [gpu_model_runner.py:2602] Starting to load model Qwen/Qwen3-0.6B...
+(EngineCore pid=211) INFO 10-12 09:14:31 [weight_utils.py:858] Filesystem type for checkpoints: EXT4. Checkpoint size: 1.40 GiB. Available RAM: 96.12 GiB.
+(EngineCore pid=211) INFO 10-12 09:14:38 [model_runner.py:380] Model loading took 1.12 GiB memory and 6.204113 seconds
+(EngineCore pid=211) INFO 10-12 09:14:52 [gpu_worker.py:578] Available KV cache memory: 4.41 GiB
+(EngineCore pid=211) INFO 10-12 09:14:52 [kv_cache_utils.py:1869] GPU KV cache size: 41,280 tokens, Maximum concurrency for 8,192 tokens per request: 5.04x
+(EngineCore pid=211) Capturing CUDA graphs (PIECEWISE):   0%|          | 0/11 [00:00<?, ?it/s]Capturing CUDA graphs (PIECEWISE): 100%|██████████| 11/11 [00:02<00:00,  4.90it/s]
+(EngineCore pid=211) INFO 10-12 09:14:56 [model_runner.py:906] Graph capturing finished in 3 secs, took 0.21 GiB
+(EngineCore pid=211) INFO 10-12 09:14:56 [gpu_worker.py:804] Free memory on device (88.50/121.69 GiB) on startup. Desired GPU memory utilization is (0.06, 7.30 GiB). Actual usage is 2.31 GiB for consumed memory (weights + non-torch), 0.36 GiB for peak activation, and 0.21 GiB for CUDAGraph memory. Replace gpu_memory_utilization config with `--kv-cache-memory=4519282688` (4.21 GiB) to fit into requested memory, or `--kv-cache-memory=91906138112` (85.60 GiB) to fully utilize gpu memory. Current kv cache memory in use is 4.41 GiB.
+(EngineCore pid=211) INFO 10-12 09:14:56 [core.py:347] init engine (profile, create kv cache, warmup model) took 17.87 s (compilation: 6.02 s)
+(APIServer pid=1) INFO 10-12 09:14:58 [api_server.py:1971] Starting vLLM API server 0 on http://0.0.0.0:8000
+(APIServer pid=1) INFO:     Started server process [1]
+(APIServer pid=1) INFO:     Application startup complete.
+(APIServer pid=1) INFO 10-12 09:15:08 [loggers.py:310] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 0.0 tokens/s, Running: 0 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 0.0%

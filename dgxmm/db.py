@@ -85,6 +85,11 @@ class MemoryCalibration(Base):
     measured_bytes: Mapped[int] = mapped_column(BigInteger)  # 0 for OOM records
     oom: Mapped[bool] = mapped_column(Boolean, default=False)
     ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    # How `measured_bytes` was obtained. NULL = legacy row (cgroup + NVML: misses CUDA memory on GB10) and is
+    # ignored by calibration; "engine_log" = engine startup accounting (+ host-side cgroup memory); "oom".
+    method: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    quality: Mapped[str | None] = mapped_column(String(16), nullable=True)  # verified | disputed | unverified
+    detail: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
 
 class Benchmark(Base):
@@ -169,6 +174,29 @@ class AppSetting(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
 
+def add_missing_columns(engine) -> list[str]:
+    """Tiny idempotent schema upgrade (there is no migration framework): `create_all` creates new tables but
+    never alters existing ones, so add any nullable model column missing from an existing table."""
+    from sqlalchemy import inspect, text
+    added: list[str] = []
+    insp = inspect(engine)
+    existing_tables = set(insp.get_table_names())
+    with engine.begin() as conn:
+        for table in Base.metadata.sorted_tables:
+            if table.name not in existing_tables:
+                continue
+            have = {c["name"] for c in insp.get_columns(table.name)}
+            for col in table.columns:
+                if col.name in have:
+                    continue
+                if not col.nullable:
+                    raise RuntimeError(f"cannot auto-add NOT NULL column {table.name}.{col.name}")
+                ddl = col.type.compile(dialect=engine.dialect)
+                conn.execute(text(f'ALTER TABLE "{table.name}" ADD COLUMN "{col.name}" {ddl}'))
+                added.append(f"{table.name}.{col.name}")
+    return added
+
+
 class Database:
     def __init__(self, url: str):
         self.engine = create_engine(url, connect_args={"check_same_thread": False})
@@ -182,6 +210,7 @@ class Database:
             cur.close()
 
         Base.metadata.create_all(self.engine)
+        add_missing_columns(self.engine)
         self._factory = sessionmaker(self.engine, expire_on_commit=False)
 
     @contextmanager
