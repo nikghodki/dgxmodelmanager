@@ -1,7 +1,7 @@
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState, type KeyboardEvent } from "react";
 import { useQuery } from "@tanstack/react-query";
 import type { ColumnDef } from "@tanstack/react-table";
-import { Box, Monitor, Pause, Play } from "lucide-react";
+import { Box, Check, Monitor, Pause } from "lucide-react";
 import { api } from "@/api";
 import { CopyButton } from "@/components/app/copy-button";
 import { DataTable } from "@/components/app/data-table";
@@ -11,7 +11,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { fmtBytes } from "@/format";
-import { containerLabel, filterScope, groupByContainer, processSearchText, type ProcessGroup, type ProcessScope } from "@/lib/processes";
+import { containerLabel, filterScope, groupByContainer, processSearchText, userLabel, type ProcessGroup, type ProcessScope } from "@/lib/processes";
 import { cn } from "@/lib/utils";
 import type { ContainerRef, ManagedRef, ProcessesResponse, ProcessInfo } from "@/types";
 
@@ -36,6 +36,39 @@ function ContainerCell({ container, managed }: { container: ContainerRef | null;
       <span className="font-medium">{containerLabel(container)}</span>
       {container?.image && <Badge variant="outline" className="max-w-[28ch] truncate font-mono text-[11px]" title={container.image}>{container.image}</Badge>}
       <ManagedBadge managed={managed} />
+    </div>
+  );
+}
+
+function UserText({ p }: { p: Pick<ProcessInfo, "user" | "user_scope"> }) {
+  const l = userLabel(p.user, p.user_scope);
+  return <span className="whitespace-nowrap" title={l.title}>{l.text}</span>;
+}
+
+function ScopeRadios({ scope, counts, onChange }: { scope: ProcessScope; counts: Record<string, number>; onChange: (s: ProcessScope) => void }) {
+  const refs = useRef<(HTMLButtonElement | null)[]>([]);
+  const onKey = (e: KeyboardEvent, i: number) => {
+    const step = e.key === "ArrowRight" || e.key === "ArrowDown" ? 1 : e.key === "ArrowLeft" || e.key === "ArrowUp" ? -1 : 0;
+    const to = e.key === "Home" ? 0 : e.key === "End" ? SCOPES.length - 1 : step ? (i + step + SCOPES.length) % SCOPES.length : -1;
+    if (to < 0) return;
+    e.preventDefault();
+    onChange(SCOPES[to].key);
+    refs.current[to]?.focus();
+  };
+  return (
+    <div className="flex flex-wrap gap-1.5" role="radiogroup" aria-label="Filter by scope">
+      {SCOPES.map((s, i) => {
+        const on = scope === s.key;
+        return (
+          <button key={s.key} ref={(el) => { refs.current[i] = el; }} type="button" role="radio" aria-checked={on} tabIndex={on ? 0 : -1}
+            onClick={() => onChange(s.key)} onKeyDown={(e) => onKey(e, i)}
+            className={cn("inline-flex h-8 items-center gap-1.5 rounded-full border px-3 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+              on ? "border-primary bg-primary text-primary-foreground" : "bg-card text-muted-foreground hover:text-foreground")}>
+            {on && <Check className="h-3.5 w-3.5" aria-hidden />}
+            {s.label}<span className="tabular-nums opacity-70">{counts[s.key] ?? 0}</span>
+          </button>
+        );
+      })}
     </div>
   );
 }
@@ -83,9 +116,9 @@ export function Processes() {
   const groups = useMemo(() => groupByContainer(shown), [shown]);
 
   const processCols = useMemo<ColumnDef<ProcessInfo, any>[]>(() => [
-    { id: "command", accessorFn: (r) => r.command, header: "Command", enableSorting: false, cell: ({ row }) => <CommandText command={row.original.command} />, meta: { className: "min-w-[24ch] max-w-[70ch]" } },
+    { id: "command", accessorFn: (r) => r.command, header: "Command", enableSorting: false, cell: ({ row }) => <CommandText command={row.original.command} />, meta: { className: "min-w-[24ch] max-w-[70ch]", hideOnMobile: true } },
     { id: "container", accessorFn: (r) => containerLabel(r.container), header: "Container", cell: ({ row }) => <ContainerCell container={row.original.container} managed={row.original.managed} /> },
-    { accessorKey: "user", header: "User", cell: ({ getValue }) => <span className="whitespace-nowrap">{getValue()}</span> },
+    { accessorKey: "user", header: "User", cell: ({ row }) => <UserText p={row.original} /> },
     ...memCols<ProcessInfo>(),
     { accessorKey: "pid", header: "PID", meta: { className: "text-right" } },
   ], []);
@@ -99,17 +132,7 @@ export function Processes() {
       cell: ({ getValue }) => <CommandText command={getValue()} />, meta: { className: "min-w-[24ch] max-w-[60ch]", hideOnMobile: true } },
   ], []);
 
-  const scopeBar = (
-    <div className="flex flex-wrap gap-1.5" role="radiogroup" aria-label="Filter by scope">
-      {SCOPES.map((s) => (
-        <button key={s.key} type="button" role="radio" aria-checked={scope === s.key} onClick={() => setScope(s.key)}
-          className={cn("inline-flex h-8 items-center gap-1.5 rounded-full border px-3 text-xs font-medium transition-colors",
-            scope === s.key ? "border-primary bg-primary text-primary-foreground" : "bg-card text-muted-foreground hover:text-foreground")}>
-          {s.label}<span className="tabular-nums opacity-70">{counts[s.key] ?? 0}</span>
-        </button>
-      ))}
-    </div>
-  );
+  const scopeBar = <ScopeRadios scope={scope} counts={counts} onChange={setScope} />;
 
   const truncatedNote = q.data && q.data.total > all.length
     ? <p className="text-xs text-muted-foreground">Showing the {all.length} largest of {q.data.total} processes.</p> : null;
@@ -120,8 +143,9 @@ export function Processes() {
         actions={
           <>
             {q.data && <span className="text-xs text-muted-foreground tabular-nums">{q.data.total} processes · scanned in {Math.round(q.data.duration_ms)} ms</span>}
-            <Button size="sm" variant="outline" aria-pressed={paused} aria-label={paused ? "Resume auto-refresh" : "Pause auto-refresh"} onClick={() => setPaused(!paused)}>
-              {paused ? <Play className="mr-1 h-4 w-4" /> : <Pause className="mr-1 h-4 w-4" />}{paused ? "Resume" : "Pause"}
+            <span className="text-xs text-muted-foreground" aria-live="polite">{paused ? "Auto-refresh paused" : `Refreshing every ${REFRESH_MS / 1000} s`}</span>
+            <Button size="sm" variant={paused ? "secondary" : "outline"} aria-pressed={paused} aria-label="Pause auto-refresh" onClick={() => setPaused(!paused)}>
+              <Pause className="mr-1 h-4 w-4" aria-hidden />Pause
             </Button>
           </>
         } />
@@ -150,7 +174,7 @@ export function Processes() {
                 <li key={p.pid} className="grid grid-cols-1 gap-1 py-2 sm:grid-cols-[minmax(0,1fr)_auto] sm:gap-4">
                   <CommandText command={p.command} clamp={false} />
                   <span className="whitespace-nowrap text-xs text-muted-foreground tabular-nums">
-                    pid {p.pid} · {p.user} · RAM {fmtBytes(p.rss)}{p.gpu ? ` · GPU ${fmtBytes(p.gpu)}` : ""}
+                    pid {p.pid} · <UserText p={p} /> · RAM {fmtBytes(p.rss)}{p.gpu ? ` · GPU ${fmtBytes(p.gpu)}` : ""}
                   </span>
                 </li>
               ))}

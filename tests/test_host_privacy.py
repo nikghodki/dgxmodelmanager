@@ -16,7 +16,7 @@ def test_probe_returns_only_redacted_cmdline(settings):
     make_proc(proc, 200, "python", 1_000_000, "/user.slice/session-3.scope")
     (proc / "200" / "cmdline").write_bytes(b"python\0serve.py\0--api-key\0" + SECRET.encode() + b"\0")
     [p] = HostProbe(settings, None).sample(set()).external_top
-    assert set(p.__dict__) == {"pid", "name", "rss", "gpu", "command", "user", "container"}
+    assert set(p.__dict__) == {"pid", "name", "rss", "gpu", "command", "user", "user_scope", "container"}
     assert p.command == "python serve.py --api-key ***"
 
 
@@ -25,12 +25,12 @@ def test_host_payload_and_api_return_redacted_commands_to_viewers(api_stack):
     admin(api_stack)
     api_stack.get("/dgxmm/api/host")  # populates budget
     stack = api_stack.stack
-    p = ProcMem(pid=1, name="python", rss=10, gpu=0, command="python x.py --token ***", user="root",
+    p = ProcMem(pid=1, name="python", rss=10, gpu=0, command="python x.py --token ***", user="root", user_scope="container",
                 container={"id": "abc", "name": "litellm-proxy", "image": "litellm"})
     stack.budget.last_sample = HostSample(mem=stack.probe.meminfo(), managed={}, external_top=[p])
     payload = host_payload(api_stack.ctx, stack.budget.current())
     assert payload["external_top"] == [{"pid": 1, "name": "python", "rss": 10, "gpu": 0, "command": "python x.py --token ***",
-                                        "user": "root", "container": {"id": "abc", "name": "litellm-proxy", "image": "litellm"}}]
+                                        "user": "root", "user_scope": "container", "container": {"id": "abc", "name": "litellm-proxy", "image": "litellm"}}]
     r = api_stack.post("/dgxmm/api/auth/login", json={"username": "vic", "password": "viewer-password-1"})
     assert r.status_code == 200
     body = api_stack.get("/dgxmm/api/host").json()

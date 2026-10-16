@@ -15,6 +15,7 @@ from dgxmm.engines.base import MANAGED_LABEL, ContainerSpec
 
 log = logging.getLogger(__name__)
 CONTAINER_CACHE_TTL_S = 30.0
+LOOKUP_TIMEOUT_S = 3
 
 
 @dataclass
@@ -61,22 +62,40 @@ def _info(c) -> ContainerInfo:
 
 class ContainerDirectory:
     """Read-only container id → {id, name, image, deployment_id}, from one sparse `docker ps` at most every `ttl`
-    seconds (a miss may refresh early, but not more often than every `miss_refresh_s`). Never modifies containers."""
+    seconds (a miss may refresh early, but not more often than every `miss_refresh_s`). Never modifies containers.
+
+    The Docker call runs outside the lock and at most one refresh runs at a time, so cache readers (the budget
+    loop uses refresh=False) never wait on the daemon."""
 
     def __init__(self, client, ttl: float = CONTAINER_CACHE_TTL_S, miss_refresh_s: float = 5.0,
                  clock: Callable[[], float] = time.monotonic):
         self.client, self.ttl, self.miss_refresh_s, self.clock = client, ttl, miss_refresh_s, clock
         self._by_id: dict[str, dict] = {}
         self._at: float | None = None
+        self._refreshing = False
         self._lock = threading.Lock()
 
-    def _refresh(self, now: float) -> None:
-        self._at = now  # also on failure: a down daemon is retried at the normal pace
+    def refresh(self) -> None:
+        with self._lock:
+            if self._refreshing:
+                return  # another thread is already asking Docker
+            self._refreshing = True
+            self._at = self.clock()  # also on failure: a down daemon is retried at the normal pace
+        try:
+            by_id = self._list()
+        finally:
+            with self._lock:
+                self._refreshing = False
+        if by_id is not None:
+            with self._lock:
+                self._by_id = by_id
+
+    def _list(self) -> dict[str, dict] | None:
         try:
             items = self.client.containers.list(all=False, sparse=True)
-        except Exception as e:  # docker.errors.APIError, connection errors
+        except Exception as e:  # docker.errors.APIError, connection errors, timeouts
             log.debug("container listing failed: %s", e)
-            return
+            return None
         by_id: dict[str, dict] = {}
         for c in items:
             a = getattr(c, "attrs", None) or {}
@@ -87,32 +106,36 @@ class ContainerDirectory:
             by_id[c.id] = {"id": c.id[:12], "name": name.lstrip("/") if name else None,
                            "image": cfg.get("Image") or a.get("Image") or None,
                            "deployment_id": int(dep) if dep and str(dep).isdigit() else None}
-        self._by_id = by_id
+        return by_id
 
-    def lookup(self, cid: str | None) -> dict | None:
+    def lookup(self, cid: str | None, refresh: bool = True) -> dict | None:
+        """refresh=False: cache only, never calls Docker (may be stale or empty)."""
         if not cid:
             return None
         with self._lock:
             now = self.clock()
             age = None if self._at is None else now - self._at
-            if age is None or age >= self.ttl or (cid not in self._by_id and age >= self.miss_refresh_s):
-                self._refresh(now)
+            stale = age is None or age >= self.ttl or (cid not in self._by_id and age >= self.miss_refresh_s)
+        if refresh and stale:
+            self.refresh()
+        with self._lock:
             found = self._by_id.get(cid)
-            return dict(found) if found else None
+        return dict(found) if found else None
 
 
 class DockerController:
-    def __init__(self, client):
+    def __init__(self, client, lookup_client=None):
         self.client = client
-        self.directory = ContainerDirectory(client)
+        self.directory = ContainerDirectory(lookup_client or client)
 
-    def lookup(self, cid: str | None) -> dict | None:
+    def lookup(self, cid: str | None, refresh: bool = True) -> dict | None:
         """Cached, read-only name/image lookup by full container id (for the processes view)."""
-        return self.directory.lookup(cid)
+        return self.directory.lookup(cid, refresh=refresh)
 
     @classmethod
     def from_env(cls) -> "DockerController":
-        return cls(docker.from_env())
+        # Lookups use their own client with a short timeout so a slow daemon cannot stall the processes view.
+        return cls(docker.from_env(), lookup_client=docker.from_env(timeout=LOOKUP_TIMEOUT_S))
 
     def list_all(self) -> list[ContainerInfo]:
         return [_info(c) for c in self.client.containers.list(all=True)]
