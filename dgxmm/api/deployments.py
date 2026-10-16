@@ -79,25 +79,40 @@ class DeploymentPatch(BaseModel):
     rewrite_keys: StrictBool = False  # also replace the old model name in keys scoped to it
 
 
-def _key_brief(k: dict) -> dict:
-    return {"token": k.get("token"), "key_alias": k.get("key_alias"), "models": list(k.get("models") or [])}
+def _renamed(models: list[str], old: str, new: str) -> list[str]:
+    out: list[str] = []
+    for m in models:
+        m = new if m == old else m
+        if m not in out:  # a key that already listed the new name must not get it twice
+            out.append(m)
+    return out
 
 
-async def _rename_in_keys(ctx: AppContext, old: str, new: str, rewrite: bool) -> tuple[list[dict], bool, dict | None]:
-    """Keys whose model list names ``old`` explicitly (unrestricted keys are unaffected by a rename)."""
+async def _rename_in_keys(ctx: AppContext, old: str, new: str, rewrite: bool) -> tuple[list[dict], int, dict | None]:
+    """Keys whose model list names ``old`` explicitly (unrestricted keys are unaffected by a rename), each with
+    ``rewritten``; with ``rewrite`` their model lists are updated. A failure stops the loop but keeps the keys
+    already rewritten in the result, so the response and the audit row say exactly what changed in LiteLLM."""
     cfg = ctx.settings_store.litellm()
     if ctx.litellm is None or ctx.litellm.client is None or not cfg.active:
-        return [], False, {"code": "litellm_disabled" if cfg.master_key else "litellm_not_configured",
-                           "message": "LiteLLM keys are not available"}
+        return [], 0, {"code": "litellm_disabled" if cfg.master_key else "litellm_not_configured",
+                       "message": "LiteLLM keys are not available"}
     client = ctx.litellm.client
     try:
         affected = [k for k in await client.key_list() if old in (k.get("models") or [])]
-        if rewrite:
-            for k in affected:
-                await client.key_update(k["token"], {"models": [new if m == old else m for m in k["models"]]})
     except LiteLLMError as e:
-        return [], False, {"code": e.code, "message": e.message}
-    return [_key_brief(k) for k in affected], bool(rewrite and affected), None
+        return [], 0, {"code": e.code, "message": e.message}
+    out = [{"token": k.get("token"), "key_alias": k.get("key_alias"), "models": list(k.get("models") or []),
+            "rewritten": False} for k in affected]
+    error = None
+    if rewrite:
+        for item in out:
+            try:
+                await client.key_update(item["token"], {"models": _renamed(item["models"], old, new)})
+            except LiteLLMError as e:
+                error = {"code": e.code, "message": e.message}
+                break
+            item["rewritten"] = True
+    return out, sum(i["rewritten"] for i in out), error
 
 
 @router.patch("/{dep_id}")
@@ -107,16 +122,17 @@ async def patch_deployment(dep_id: int, body: DeploymentPatch, p: Principal = De
         raise api_error(422, "nothing_to_update", "send {\"alias\": ...}")
     try:
         before = ctx.deployer.view(dep_id)
-        view = ctx.deployer.set_alias(dep_id, body.alias)
+        view = await ctx.deployer.rename(dep_id, body.alias)
     except DeployError as e:
         raise deploy_error(e)
-    affected, rewritten, keys_error = [], False, None
+    affected, rewritten, keys_error = [], 0, None
     if before["model_name"] != view["model_name"] and before["model_name"] and view["model_name"]:
         affected, rewritten, keys_error = await _rename_in_keys(ctx, before["model_name"], view["model_name"],
                                                                 body.rewrite_keys)
     if before["alias"] != view["alias"]:
         audit(ctx.db, p.user.id, "deployment_alias", view["name"],
-              {"from": before["alias"], "to": view["alias"], "keys_rewritten": len(affected) if rewritten else 0})
+              {"from": before["alias"], "to": view["alias"], "keys_rewritten": rewritten,
+               "rewritten_keys": [k["key_alias"] or (k["token"] or "")[:12] for k in affected if k["rewritten"]]})
         if ctx.litellm is not None:
             ctx.litellm.trigger()  # re-register under the new name, drop the old one
     return {**view, "affected_keys": affected, "keys_rewritten": rewritten, "keys_error": keys_error}

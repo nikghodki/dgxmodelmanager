@@ -119,6 +119,10 @@ def test_key_entered_with_url_is_bound_to_it(lite):
 
 def test_put_without_changes_is_not_audited(lite):
     lite.put(BASE, headers=lite.h, json={})
+    lite.put(BASE, headers=lite.h, json={"url": "http://litellm-proxy:4000/"})  # = effective default
+    lite.put(BASE, headers=lite.h, json={"public_url": ""})
+    from dgxmm.settings_store import LITELLM_URL
+    assert lite.ctx.settings_store.get(LITELLM_URL) is None
     assert not [a for a, _, _ in audit_rows(lite) if a == "litellm_settings_update"]
 
 
