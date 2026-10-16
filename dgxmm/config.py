@@ -82,6 +82,7 @@ class Settings(BaseModel):
     static_dir: str = "/app/static"
     host_proc: str = "/host/proc"
     host_cgroup: str = "/host/sys/fs/cgroup"
+    host_passwd: str = "/host/etc/passwd"  # read-only mount; uid → user name in the processes view
     hf_cache: PathMapping = Field(default_factory=_default_hf_cache)
     gguf_roots: list[PathMapping] = Field(default_factory=_default_gguf_roots)
     vllm_cache_mounts: list[Mount] = Field(default_factory=_default_vllm_cache_mounts)

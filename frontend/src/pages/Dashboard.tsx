@@ -5,6 +5,7 @@ import { ChevronDown, ChevronRight, Plus, Puzzle, Rocket } from "lucide-react";
 import { api } from "@/api";
 import { useIsAdmin } from "@/auth";
 import { DeploymentsTable } from "@/components/app/deployments-table";
+import { ExternalProcessesCard } from "@/components/app/external-processes-card";
 import { ChartCard } from "@/components/app/metric-chart";
 import { MemoryBar } from "@/components/app/memory-bar";
 import { PageHeader } from "@/components/app/page-header";
@@ -97,22 +98,7 @@ export function Dashboard() {
 
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
         <AdoptCard />
-        {host.data && host.data.external_top.length > 0 && (
-          <Card className="min-w-0 shadow-card">
-            <CardHeader className="pb-2"><CardTitle className="text-sm">Largest external memory users</CardTitle>
-              <CardDescription className="text-xs">Processes DGXMM does not manage. They are never touched.</CardDescription></CardHeader>
-            <CardContent>
-              <ul className="divide-y text-sm">
-                {host.data.external_top.map((p) => (
-                  <li key={p.pid} className="flex items-center justify-between gap-3 py-2">
-                    <span className="min-w-0 truncate"><span className="font-medium">{p.name}</span> <span className="text-xs text-muted-foreground">pid {p.pid}</span></span>
-                    <span className="shrink-0 tabular-nums">{fmtBytes(p.rss + p.gpu)}</span>
-                  </li>
-                ))}
-              </ul>
-            </CardContent>
-          </Card>
-        )}
+        {host.data && host.data.external_top.length > 0 && <ExternalProcessesCard items={host.data.external_top} />}
       </div>
 
       {dialog && <SwitchDialog mode={dialog.mode} deployment={dialog.d} onClose={() => setDialog(null)} />}
