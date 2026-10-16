@@ -144,6 +144,14 @@ class AuditLog(Base):
     ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
 
 
+class AppSetting(Base):
+    """Runtime settings editable from the UI (take precedence over config.yaml/env)."""
+    __tablename__ = "app_settings"
+    key: Mapped[str] = mapped_column(String(128), primary_key=True)
+    value: Mapped[str] = mapped_column(Text)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
 class Database:
     def __init__(self, url: str):
         self.engine = create_engine(url, connect_args={"check_same_thread": False})
