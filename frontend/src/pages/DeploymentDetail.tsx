@@ -3,6 +3,7 @@ import { useState } from "react";
 import { useParams } from "react-router-dom";
 import { api } from "../api";
 import { useIsAdmin } from "../auth";
+import { SwitchDialog } from "../components/SwitchDialog";
 import { Badge, Button, Card, ErrorBox } from "../components/ui";
 import { fmtBytes, stateTone } from "../format";
 import type { Deployment } from "../types";
@@ -13,6 +14,7 @@ export function DeploymentDetail() {
   const qc = useQueryClient();
   const dep = useQuery({ queryKey: ["deployment", id], queryFn: () => api<Deployment>(`/deployments/${id}`) });
   const [logs, setLogs] = useState<string | null>(null);
+  const [dialog, setDialog] = useState<null | { patch?: Record<string, any> }>(null);
   const act = useMutation({
     mutationFn: (action: string) => api(`/deployments/${id}/${action}`, { method: "POST" }),
     onSettled: () => qc.invalidateQueries({ queryKey: ["deployment", id] }),
@@ -26,6 +28,9 @@ export function DeploymentDetail() {
         <Badge tone={stateTone(d.state)}>{d.state}</Badge>
         <span className="text-sm text-slate-500">{d.model_ref} · {d.engine}</span>
         <div className="ml-auto space-x-2">
+          {admin && d.state === "ready" && d.sleep_capable && <Button onClick={() => act.mutate("sleep")}>Sleep</Button>}
+          {admin && d.state === "sleeping" && <Button onClick={() => act.mutate("wake")}>Wake</Button>}
+          {admin && <Button onClick={() => setDialog({})}>Reconfigure…</Button>}
           {admin && ["ready", "sleeping", "starting", "loading", "unknown"].includes(d.state) && <Button variant="danger" onClick={() => act.mutate("stop")}>Stop</Button>}
           {admin && ["stopped", "failed"].includes(d.state) && <Button onClick={() => act.mutate("start")}>Start</Button>}
           {admin && <Button onClick={async () => setLogs((await api<{ logs: string }>(`/deployments/${id}/logs?tail=300`)).logs)}>Logs</Button>}
@@ -66,6 +71,7 @@ export function DeploymentDetail() {
           <pre className="max-h-[32rem] overflow-auto bg-slate-900 p-3 text-xs text-slate-100">{logs || "(empty)"}</pre>
         </Card>
       )}
+      {dialog && <SwitchDialog mode="reconfigure" deployment={d} initialPatch={dialog.patch} onClose={() => setDialog(null)} />}
     </div>
   );
 }

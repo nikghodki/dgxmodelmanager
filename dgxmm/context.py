@@ -97,6 +97,19 @@ def build_context(settings: Settings) -> AppContext:
         await asyncio.sleep(settings.inventory_interval_s)
         await inventory.run()
 
+    from dgxmm.litellm import LiteLLMClient, LiteLLMSync
+    key = settings.read_secret(settings.litellm_key_file)
+    if not key:
+        log.warning("no LiteLLM master key at %s; LiteLLM registration disabled", settings.litellm_key_file)
+    litellm = LiteLLMSync(LiteLLMClient(settings.litellm_url, key, http) if key else None, deployer, db, events)
+    deployer.state_hooks.append(litellm.on_state)
+    ctx.litellm = litellm
+    ctx.background.append(litellm.run)
+
+    from dgxmm.watchdog import Watchdog
+    ctx.watchdog = Watchdog(settings, deployer, events, db)
+    ctx.budget_listeners.append(ctx.watchdog.check)
+
     ctx.startup += [_bootstrap, _inventory, _reconcile]
     ctx.background += [_budget_loop, _inventory_loop]
     return ctx

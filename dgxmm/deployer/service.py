@@ -23,6 +23,7 @@ from dgxmm.events import EventBroker
 from dgxmm.inventory.artifact import REPO_RE, ModelArtifact
 from dgxmm.memory.estimate import MemoryEstimate, vllm_gpu_util
 from dgxmm.planner.fit import FitResult, check_fit
+from dgxmm.planner.plans import ActiveDep, PlanAction, base_model_name, build_plans
 
 log = logging.getLogger(__name__)
 NAME_PATTERN = r"^[a-z0-9][a-z0-9-]{0,40}$"
@@ -193,6 +194,7 @@ class Deployer:
                "config": prep.cfg.model_dump(mode="json")}
         if engine == "vllm":
             out["gpu_memory_utilization"] = vllm_gpu_util(prep.estimate.total, budget.total)
+        out["plans"] = [] if fit.fits else self.plans_for(prep, fit, replacing)
         return out
 
     # ---------- lifecycle ----------
@@ -453,3 +455,177 @@ class Deployer:
     def list_views(self) -> list[dict]:
         with self.db.session() as s:
             return [self._view(d) for d in s.scalars(select(Deployment).order_by(Deployment.name))]
+
+    def active_deps(self, exclude: int | None = None) -> list[ActiveDep]:
+        out = []
+        for v in self.list_views():
+            if v["id"] == exclude or v["state"] not in ("ready", "sleeping", "unknown", "loading", "starting"):
+                continue
+            est = v["estimate"] or {}
+            sleep_frees = max(v["reserved_bytes"] - est.get("weights", 0) - est.get("draft_weights", 0)
+                              - est.get("runtime", 0), 0)
+            out.append(ActiveDep(v["id"], v["name"], v["state"], v["priority"], v["reserved_bytes"],
+                                 v["actual_bytes"] or 0, v["sleep_capable"] and v["state"] == "ready", sleep_frees))
+        return out
+
+    def plans_for(self, prep: Prepared, fit: FitResult, replacing: int | None = None) -> list[dict]:
+        cfg = prep.cfg.model_dump(mode="json")
+        name = prep.engine.name
+
+        def est_with(patch: dict) -> int | None:
+            try:
+                return self.prepare(name, prep.artifact.ref, {**cfg, **patch}).estimate.total
+            except DeployError:
+                return None
+
+        def est_ref(ref: str) -> int | None:
+            try:
+                return self.prepare(name, ref, cfg).estimate.total
+            except DeployError:
+                return None
+
+        base = base_model_name(prep.artifact.ref)
+        variants = [a.ref for a in self.inventory.list()
+                    if a.ref != prep.artifact.ref and a.complete and a.kind == "llm" and prep.engine.supports(a)
+                    and base_model_name(a.ref) == base and a.weights_bytes < prep.artifact.weights_bytes]
+        plans = build_plans(fit=fit, cfg=cfg, context_key=prep.engine.context_key, seqs_key=prep.engine.seqs_key,
+                            kv_patches=prep.engine.kv_patch_options(prep.cfg), estimate_with=est_with,
+                            active=self.active_deps(exclude=replacing), variants=variants, estimate_ref=est_ref)
+        return [p.as_dict() for p in plans]
+
+    def _stored_estimate(self, dep: Deployment) -> MemoryEstimate:
+        if dep.estimate:
+            return MemoryEstimate.from_dict(dep.estimate)
+        return MemoryEstimate(dep.reserved_bytes, 0, 0, 0, 0, 0, 0, "low")
+
+    async def sleep(self, dep_id: int, user_id: int | None = None) -> dict:
+        async with self._lock(dep_id):
+            dep = self._require(dep_id)
+            if dep.state != "ready":
+                raise DeployError("not_ready", f"deployment is {dep.state}", 409)
+            engine = self.engines[dep.engine]
+            cfg = engine.validate_config(dep.config)
+            if not (engine.supports_sleep and engine.sleep_enabled(cfg)):
+                raise DeployError("sleep_unsupported", "this deployment was not started with sleep mode", 409)
+            try:
+                await engine.sleep(self.http, self.base_url(dep.name, dep.port))
+            except httpx.HTTPError as e:
+                raise DeployError("engine_error", f"sleep failed: {e}", 502)
+            return self._transition(dep_id, "sleeping", message="sleeping (level 1: KV freed, weights offloaded)")
+
+    async def wake(self, dep_id: int, user_id: int | None = None) -> dict:
+        async with self._lock(dep_id):
+            dep = self._require(dep_id)
+            if dep.state != "sleeping":
+                raise DeployError("not_sleeping", f"deployment is {dep.state}", 409)
+            engine = self.engines[dep.engine]
+            async with self.mem_lock:
+                budget = await self.budget.refresh()
+                actual = next((u.actual for u in budget.deployments if u.deployment_id == dep_id), 0)
+                need = max(dep.reserved_bytes - actual, 0)
+                if need > budget.free_for_new:
+                    raise InsufficientMemory(FitResult(False, need, budget.free_for_new, budget.free_for_new - need,
+                                                       self._stored_estimate(dep), budget))
+                try:
+                    await engine.wake(self.http, self.base_url(dep.name, dep.port))
+                except httpx.HTTPError as e:
+                    raise DeployError("engine_error", f"wake failed: {e}", 502)
+                return self._transition(dep_id, "ready", message="woken up")
+
+    async def apply_actions(self, actions, user_id: int | None = None) -> list[tuple[str, int]]:
+        applied: list[tuple[str, int]] = []
+        try:
+            for raw in actions:
+                a = raw if isinstance(raw, PlanAction) else PlanAction.model_validate(raw)
+                if a.type == "sleep":
+                    await self.sleep(a.deployment_id, user_id)
+                else:
+                    await self.stop(a.deployment_id, user_id, reason="plan")
+                applied.append((a.type, a.deployment_id))
+        except Exception:
+            await self.undo_actions(applied)
+            raise
+        return applied
+
+    async def undo_actions(self, applied: list[tuple[str, int]]) -> None:
+        for typ, dep_id in reversed(applied):
+            try:
+                if typ == "sleep":
+                    await self.wake(dep_id)
+                else:
+                    await self.restart(dep_id)
+            except Exception:
+                log.exception("could not undo %s of deployment %s", typ, dep_id)
+
+    def _set_alias(self, dep_id: int, alias: str | None) -> None:
+        with self.db.session() as s:
+            s.get(Deployment, dep_id).alias = alias
+        self.events.publish("deployment", self.view(dep_id))
+
+    def _can_sleep(self, dep: Deployment) -> bool:
+        engine = self.engines.get(dep.engine)
+        return bool(dep.state == "ready" and engine and engine.supports_sleep and dep.config.get("enable_sleep_mode"))
+
+    async def switch(self, old_id: int, req: DeployRequest, actions, user_id: int | None) -> dict:
+        old = self._require(old_id)
+        acts = [a if isinstance(a, PlanAction) else PlanAction.model_validate(a) for a in actions]
+        if not any(a.deployment_id == old_id for a in acts) and old.state in ("ready", "sleeping", "unknown"):
+            if old.state != "sleeping":
+                acts.insert(0, PlanAction(type="sleep" if self._can_sleep(old) else "stop", deployment_id=old_id))
+        alias = old.alias
+        applied = await self.apply_actions(acts, user_id)
+        new_id = None
+        try:
+            if alias:
+                self._set_alias(old_id, None)
+            new = await self.deploy(req.model_copy(update={"alias": req.alias or alias}), user_id)
+            new_id = new["id"]
+            state = await self.wait_ready(new_id, self.settings.startup_timeout_s + 30)
+            if state != "ready":
+                raise DeployError("switch_failed", f"new deployment ended in state {state}; rolled back", 502)
+            return self.view(new_id)
+        except Exception:
+            if new_id is not None:
+                try:
+                    await self.stop(new_id, user_id, reason="switch rollback")
+                except Exception:
+                    log.exception("rollback: could not stop %s", new_id)
+            if alias:
+                self._set_alias(old_id, alias)
+            await self.undo_actions(applied)
+            raise
+
+    async def reconfigure(self, dep_id: int, new_config: dict, model_ref: str | None = None, actions=(),
+                          user_id: int | None = None) -> dict:
+        dep = self._require(dep_id)
+        old_cfg, old_ref = dict(dep.config), dep.model_ref
+        was_active = dep.state in ("ready", "sleeping", "unknown", "starting", "loading")
+        prep = self.prepare(dep.engine, model_ref or old_ref, new_config)
+        if not actions:
+            budget = await self.budget.refresh()
+            fit = check_fit(prep.estimate, budget, extra_free=self._replacing_credit(dep_id))
+            if not fit.fits:
+                raise InsufficientMemory(fit)
+        applied = await self.apply_actions(actions, user_id)
+        try:
+            if was_active:
+                await self.stop(dep_id, user_id, reason="reconfigure")
+            await self.restart(dep_id, user_id, config_override=new_config, model_ref=model_ref)
+            state = await self.wait_ready(dep_id, self.settings.startup_timeout_s + 30)
+            if state != "ready":
+                raise DeployError("reconfigure_failed", f"new configuration ended in state {state}; rolled back", 502)
+            return self.view(dep_id)
+        except Exception:
+            now = self._get(dep_id)
+            if now is not None and now.state not in ("stopped", "failed"):
+                await self.stop(dep_id, user_id, reason="reconfigure rollback")
+            with self.db.session() as s:  # always restore the old config, even if we cannot restart it
+                row = s.get(Deployment, dep_id)
+                row.config, row.model_ref = old_cfg, old_ref
+            if was_active:
+                try:
+                    await self.restart(dep_id, user_id, config_override=old_cfg, model_ref=old_ref)
+                except Exception:
+                    log.exception("rollback restart of %s failed", dep_id)
+            await self.undo_actions(applied)
+            raise

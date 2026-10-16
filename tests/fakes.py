@@ -92,6 +92,8 @@ class FakeContainers:
         plist = [(int(k.split("/")[0]), v[0]) for k, v in (ports or {}).items()]
         c = FakeContainer(self.client, cid, name, image, command, labels, environment, plist,
                           [network] if network else [], mounts)
+        if name in self.client.exit_on_start:
+            c.status, c.exit_code = "exited", self.client.exit_on_start[name]
         self.client._containers[cid] = c
         return c
 
@@ -106,6 +108,7 @@ class FakeDockerClient:
         self.fail_get_count = 0
         self.always_fail_get = False
         self.skip_gets = 0
+        self.exit_on_start: dict[str, int] = {}
 
     def add_unmanaged(self, name, image="vllm/vllm-openai:x", command=None, labels=None, ports=(), status="running",
                       mounts=(), networks=("gateway",), env=None):
@@ -141,6 +144,7 @@ class FakeEngines:
         self.sleeping: set[int] = set()
         self.fail_paths: set[str] = set()
         self.calls: list[tuple[str, int, str]] = []
+        self.all_healthy = False
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         port, path = request.url.port, request.url.path
@@ -148,9 +152,9 @@ class FakeEngines:
         if path in self.fail_paths:
             return httpx.Response(500)
         if path == "/health":
-            return httpx.Response(200 if port in self.healthy else 503)
+            return httpx.Response(200 if (self.all_healthy or port in self.healthy) else 503)
         if path == "/v1/completions":
-            return httpx.Response(200 if port in self.healthy else 503, json={"choices": [{"text": "x"}]})
+            return httpx.Response(200 if (self.all_healthy or port in self.healthy) else 503, json={"choices": [{"text": "x"}]})
         if path == "/metrics":
             return httpx.Response(200, text=self.metrics.get(port, ""))
         if path == "/sleep":
