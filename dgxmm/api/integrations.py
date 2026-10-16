@@ -18,7 +18,7 @@ from dgxmm.auth.deps import Principal, current_principal, get_ctx, require_admin
 from dgxmm.context import AppContext
 from dgxmm.litellm import UNRESTRICTED, LiteLLMClient, LiteLLMError
 from dgxmm.settings_store import (LITELLM_ENABLED, LITELLM_MASTER_KEY, LITELLM_MASTER_KEY_URL, LITELLM_PUBLIC_URL,
-                                  LITELLM_URL)
+                                  LITELLM_URL, norm_url)
 
 router = APIRouter(prefix="/api/integrations/litellm", tags=["integrations"])
 
@@ -126,11 +126,14 @@ async def put_settings(raw: Any = Body(...), p: Principal = Depends(require_admi
     store, changes = ctx.settings_store, {}
     if "url" in fields and body.url is not None:
         url = _http_url("url", body.url) if body.url.strip() else None
+        if url is not None and norm_url(url) == norm_url(ctx.settings.litellm_url):
+            url = None  # the config default is stored as "unset"
         if url != store.get(LITELLM_URL):
             store.set(LITELLM_URL, url)
             changes["url"] = url or "(default)"
     if "public_url" in fields and body.public_url is not None:
         pub = _http_url("public_url", body.public_url) if body.public_url.strip() else None
+        pub = norm_url(pub) if pub else None
         if pub != store.get(LITELLM_PUBLIC_URL):
             store.set(LITELLM_PUBLIC_URL, pub)
             changes["public_url"] = pub or ""
