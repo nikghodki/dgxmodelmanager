@@ -53,3 +53,22 @@ describe("deploymentActions", () => {
     expect(deploymentActions(d("unknown"), true)).toEqual(["open", "stop"]);
   });
 });
+
+import { submitState } from "./logic";
+
+describe("submitState", () => {
+  const fits = { fit: { fits: true } } as any;
+  const short = { fit: { fits: false } } as any;
+  it("blocks while there is no preview or while pending", () => {
+    expect(submitState(null, [], false, "deploy")).toEqual({ disabled: true, label: "Deploy" });
+    expect(submitState(fits, [], true, "deploy")).toEqual({ disabled: true, label: "Deploying…" });
+  });
+  it("requires a plan when the model does not fit", () => {
+    expect(submitState(short, [], false, "deploy")).toEqual({ disabled: true, label: "Choose a plan to fit" });
+    expect(submitState(short, [{ type: "stop", deployment_id: 1 }], false, "deploy")).toEqual({ disabled: false, label: "Apply plan and deploy" });
+  });
+  it("labels switch and reconfigure", () => {
+    expect(submitState(fits, [], false, "switch").label).toBe("Switch");
+    expect(submitState(fits, [], true, "reconfigure").label).toBe("Working… this can take minutes");
+  });
+});

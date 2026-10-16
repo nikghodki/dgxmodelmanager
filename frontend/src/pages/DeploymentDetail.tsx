@@ -25,7 +25,7 @@ import { estimateParts } from "@/lib/estimate";
 import { adviceApplicable, deploymentActions } from "@/logic";
 import { useLive } from "@/stream";
 import type { Deployment } from "@/types";
-import { SwitchDialog } from "../components/SwitchDialog";
+import { SwitchDialog } from "@/components/app/switch-dialog";
 
 const WINDOWS = ["live", "24h", "7d"] as const;
 
