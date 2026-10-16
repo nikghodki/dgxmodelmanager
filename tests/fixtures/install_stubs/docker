@@ -24,9 +24,24 @@ case "$*" in
     if [ -f "$FAKE_LOG.id" ]; then cat "$FAKE_LOG.id"
     elif [ -n "${FAKE_DGXMM_STATE:-}" ]; then echo "old-id"
     else exit 1; fi ;;
-  "compose up -d --build")
-    [ "${FAKE_COMPOSE_UP:-ok}" = ok ] || { echo "failed to solve: process did not complete" >&2; exit 17; }
-    [ "${FAKE_RECREATE:-1}" = 1 ] && echo "id-$RANDOM-$$" > "$FAKE_LOG.id" ;;
+  "compose up -d --build"|"compose --profile litellm up -d --build")
+    echo "COMPOSE_PROFILES=${COMPOSE_PROFILES-<unset>}" >> "$FAKE_LOG.profiles"
+    [ "${FAKE_COMPOSE_UP:-ok}" = fail ] && { echo "failed to solve: process did not complete" >&2; exit 17; }
+    [ "${FAKE_RECREATE:-1}" = 1 ] && echo "id-$RANDOM-$$" > "$FAKE_LOG.id"
+    case "$*" in
+      *litellm*)
+        # fail-litellm: dgxmm starts, but the LiteLLM database never becomes healthy.
+        [ "${FAKE_COMPOSE_UP:-ok}" = fail-litellm ] && { echo "dependency failed to start: container dgxmm-litellm-db is unhealthy" >&2; exit 1; }
+        touch "$FAKE_LOG.bundled" ;;
+    esac ;;
+  "compose --profile litellm logs --tail 30 dgxmm-litellm-db dgxmm-litellm") printf '%s\n' "${FAKE_LITELLM_LOGS:-}" ;;
+  "inspect --format {{.RestartCount}} id-dgxmm-litellm") echo "${FAKE_LITELLM_RESTARTS:-0}" ;;
+  ps\ -aq\ --filter\ label=com.docker.compose.project.working_dir=*\ --filter\ label=com.docker.compose.service=*)
+    # Bundled LiteLLM containers exist after a profile up, or when FAKE_BUNDLED=1.
+    if [ -e "$FAKE_LOG.bundled" ] || [ "${FAKE_BUNDLED:-0}" = 1 ]; then last=${!#}; echo "id-${last##*service=}"; fi ;;
+  "inspect --format {{.State.Status}}/{{if .State.Health}}{{.State.Health.Status}}{{end}} id-dgxmm-litellm")
+    echo "${FAKE_LITELLM_HEALTH:-running/healthy}" ;;
+  "inspect --format {{.Name}}"*" id-"*) last=${!#}; echo "/repo-${last#id-}-1  running (healthy)" ;;
   pull\ *) [ "${FAKE_PULL:-ok}" = ok ] || { echo "manifest unknown" >&2; exit 1; } ;;
   network\ inspect\ *\ -f\ *Gateway*) [ "${FAKE_NETWORK:-missing}" = exists ] || { echo "Error: No such network" >&2; exit 1; }; echo "172.99.0.1" ;;
   network\ inspect\ --format*) [ "${FAKE_NETWORK:-missing}" = exists ] || exit 1; echo "${FAKE_NETWORK_LABEL:-}" ;;
