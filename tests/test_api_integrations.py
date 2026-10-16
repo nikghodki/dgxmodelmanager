@@ -47,7 +47,7 @@ def test_get_settings_shape(lite):
     st = j.pop("status")
     assert j == {"enabled": True, "url": "http://litellm-proxy:4000", "public_url": "",
                  "endpoint": "http://litellm-proxy:4000/v1", "master_key_set": True, "master_key_source": "secret_file",
-                 "master_key_hint": None}
+                 "master_key_hint": None, "default_url": "http://litellm-proxy:4000"}
     assert st["reachable"] is True and st["version"] == "1.100.0" and st["db"] == "connected"
     assert st["error"] is None and st["checked_at"]
     assert MASTER not in r.text

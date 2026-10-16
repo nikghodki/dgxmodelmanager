@@ -19,7 +19,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { useActionMutation } from "@/hooks/use-action-mutation";
-import { connectionPatch, endpointPreview, litellmProblem, modelNameOptions, urlProblem, type KeyMode } from "@/lib/litellm";
+import { connectionPatch, endpointPreview, litellmProblem, modelNameOptions, syncMessage, urlProblem, type KeyMode } from "@/lib/litellm";
 import type { Deployment, LiteLLMModel, LiteLLMKey, LiteLLMSettings, LiteLLMSyncResult, LiteLLMTestResult } from "@/types";
 
 const SOURCE: Record<LiteLLMSettings["master_key_source"], string> = { settings: "Set (from settings)", secret_file: "Set (from secret file)", none: "Not set" };
@@ -175,8 +175,7 @@ function ConnectionCard({ s }: { s: LiteLLMSettings }) {
           {test && <TestResult r={test} />}
           {sync && (
             <p role="status" className="text-sm text-muted-foreground">
-              {sync.status === "disabled" ? "Sync skipped: the integration is disabled or has no master key."
-                : `Sync ${sync.ok ? "finished" : "failed"}: ${sync.registered} registered, ${sync.removed} removed.`}
+              {syncMessage(sync)}
               {sync.error && <span className="block text-status-critical">{sync.error}</span>}
             </p>
           )}
@@ -243,9 +242,10 @@ function KeysCard({ s }: { s: LiteLLMSettings }) {
         <CardDescription className="text-xs">Give apps and people their own key, limited to some models, a budget or a rate.</CardDescription>
       </CardHeader>
       <CardContent>
-        {block ? <Problem icon={KeyRound} p={block} />
-          : q.error ? <Problem icon={KeyRound} p={litellmProblem(q.error)} onRetry={() => q.refetch()} />
-          : <KeyManager keys={q.data ?? []} loading={q.isLoading} modelOptions={options} endpoint={s.endpoint} />}
+        {/* KeyManager stays mounted through errors: it owns the one-time created-key dialog. */}
+        <KeyManager keys={q.data ?? []} loading={q.isLoading} modelOptions={options} endpoint={s.endpoint}
+          problem={block ? <Problem icon={KeyRound} p={block} />
+            : q.error ? <Problem icon={KeyRound} p={litellmProblem(q.error)} onRetry={() => q.refetch()} /> : undefined} />
       </CardContent>
     </Card>
   );

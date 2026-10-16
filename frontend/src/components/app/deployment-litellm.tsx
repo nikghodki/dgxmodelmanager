@@ -9,8 +9,8 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useActionMutation } from "@/hooks/use-action-mutation";
-import { aliasProblem, curlSnippet, keysScopedTo, litellmProblem, modelNameOptions, pythonSnippet, rewrittenCount, suggestAlias, takenHolder } from "@/lib/litellm";
-import type { AliasPatchResult, Deployment, DeploymentLiteLLM } from "@/types";
+import { aliasProblem, curlSnippet, keysScopedTo, litellmProblem, modelNameOptions, pythonSnippet, rewrittenCount, suggestAlias, syncMessage, takenHolder } from "@/lib/litellm";
+import type { AliasPatchResult, Deployment, DeploymentLiteLLM, LiteLLMSyncResult } from "@/types";
 import { CopyButton } from "./copy-button";
 import { CodeBlock, KeyManager } from "./litellm-keys";
 import { ModelNameTaken } from "./model-name-taken";
@@ -82,7 +82,7 @@ export function ApiAccessCard({ d, info, loading, error }: { d: Deployment; info
 
 const nKeys = (n: number) => `${n} key${n === 1 ? "" : "s"}`;
 
-function ModelNameForm({ d, info, suggested }: { d: Deployment; info?: DeploymentLiteLLM; suggested?: string | null }) {
+function ModelNameForm({ d, info, suggested, onSaved }: { d: Deployment; info?: DeploymentLiteLLM; suggested?: string | null; onSaved?: () => void }) {
   const [value, setValue] = useState(suggested ?? d.alias ?? "");
   const input = useRef<HTMLInputElement>(null);
   useEffect(() => { if (suggested) input.current?.focus(); }, [suggested]);
@@ -92,12 +92,16 @@ function ModelNameForm({ d, info, suggested }: { d: Deployment; info?: Deploymen
   const oldName = modelNameOf(d, info);
   const newName = value.trim() || d.served_name || "";
   const scoped = keysScopedTo(info?.keys ?? [], oldName);
-  const offerRewrite = scoped.length > 0 && !!oldName && newName !== oldName;
+  // If the key list is unknown (not loaded, errored, or stale on the server) still default to rewriting.
+  const keysKnown = !!info && info.keys_visible && !info.keys_error;
+  const renames = !!oldName && newName !== oldName;
+  const offerRewrite = renames && (!keysKnown || scoped.length > 0);
   const save = useActionMutation((body: { alias: string; rewrite_keys?: boolean }) =>
     api<AliasPatchResult>(`/deployments/${d.id}`, { method: "PATCH", body }), {
     success: (_r, b) => (b.alias ? `Model name set to ${b.alias}` : "Model name reset to the served name"),
     invalidate: [["deployment", d.id], ["deployments"], ["deployment-litellm", d.id], ["litellm-models"], ["litellm-keys"]],
     onSuccess: (r, b) => {
+      onSaved?.();
       const name = r.model_name ?? b.alias;
       const n = r.affected_keys?.length ?? 0;
       const done = rewrittenCount(r.keys_rewritten, n);
@@ -113,7 +117,7 @@ function ModelNameForm({ d, info, suggested }: { d: Deployment; info?: Deploymen
   });
   const problem = aliasProblem(value);
   const changed = value.trim() !== (d.alias ?? "");
-  const submit = () => save.mutate({ alias: value.trim(), ...(offerRewrite && { rewrite_keys: rewrite }) });
+  const submit = () => save.mutate({ alias: value.trim(), ...(renames && { rewrite_keys: rewrite }) });
   return (
     <form className="space-y-1.5" noValidate onSubmit={(e) => { e.preventDefault(); if (!problem && changed) submit(); }}>
       <Label htmlFor="dep-model-name">Model name</Label>
@@ -135,7 +139,7 @@ function ModelNameForm({ d, info, suggested }: { d: Deployment; info?: Deploymen
       {offerRewrite && changed && !problem && (
         <div className="flex items-center gap-2 pt-1">
           <Checkbox id="dep-rewrite-keys" checked={rewrite} onCheckedChange={(v) => setRewrite(v === true)} />
-          <Label htmlFor="dep-rewrite-keys" className="font-normal">Also update {nKeys(scoped.length)} scoped to {oldName}</Label>
+          <Label htmlFor="dep-rewrite-keys" className="font-normal">{keysKnown ? `Also update ${nKeys(scoped.length)} scoped to ${oldName}` : `Also update any keys scoped to ${oldName}`}</Label>
         </div>
       )}
       {result && (
@@ -149,13 +153,14 @@ function ModelNameForm({ d, info, suggested }: { d: Deployment; info?: Deploymen
 }
 
 /** The deployment's LiteLLM tab. Admins can rename the model, re-sync and manage keys; viewers only read. */
-export function LiteLLMTab({ d, info, loading, error, admin, suggested }: {
-  d: Deployment; info?: DeploymentLiteLLM; loading: boolean; error: unknown; admin: boolean; suggested?: string | null;
+export function LiteLLMTab({ d, info, loading, error, admin, suggested, onRenamed }: {
+  d: Deployment; info?: DeploymentLiteLLM; loading: boolean; error: unknown; admin: boolean; suggested?: string | null; onRenamed?: () => void;
 }) {
+  const [syncResult, setSyncResult] = useState<LiteLLMSyncResult | null>(null);
   const model = modelNameOf(d, info);
   const deps = useQuery({ queryKey: ["deployments"], queryFn: () => api<Deployment[]>("/deployments"), enabled: admin });
-  const sync = useActionMutation(() => api("/integrations/litellm/sync", { method: "POST" }), {
-    success: "LiteLLM sync finished", invalidate: [["deployment-litellm", d.id], ["deployment", d.id], ["deployments"]],
+  const sync = useActionMutation(() => api<LiteLLMSyncResult>("/integrations/litellm/sync", { method: "POST" }), {
+    success: (r) => syncMessage(r), onSuccess: setSyncResult, invalidate: [["deployment-litellm", d.id], ["deployment", d.id], ["deployments"]],
   });
   const registered = info?.registered === true ? "Yes" : info?.registered === false ? "No" : loading ? "Checking…" : "Unknown — not synced yet";
   return (
@@ -164,7 +169,7 @@ export function LiteLLMTab({ d, info, loading, error, admin, suggested }: {
         <CardHeader className="pb-2"><CardTitle className="text-sm">Model name</CardTitle>
           <CardDescription className="text-xs">The name this deployment is registered under in LiteLLM.</CardDescription></CardHeader>
         <CardContent>
-          {admin ? <ModelNameForm d={d} info={info} suggested={suggested} /> : <dl><KV label="Model name" mono value={model} copy={model || null} /></dl>}
+          {admin ? <ModelNameForm d={d} info={info} suggested={suggested} onSaved={onRenamed} /> : <dl><KV label="Model name" mono value={model} copy={model || null} /></dl>}
         </CardContent>
       </Card>
       <Card className="min-w-0 shadow-card">
@@ -180,6 +185,7 @@ export function LiteLLMTab({ d, info, loading, error, admin, suggested }: {
             <KV label="Found in LiteLLM" value={registered} />
             <KV label="Endpoint" mono value={info?.endpoint} copy={info?.endpoint} />
           </dl>
+          {syncResult && <p role="status" className="text-xs text-muted-foreground">{syncMessage(syncResult)}</p>}
           {!!error && <ErrorState error={error} />}
           {info && !info.enabled && <Warn>The integration is disabled.{admin && <> Turn it on in <Link className="underline" to="/litellm">LiteLLM settings</Link>.</>}</Warn>}
           {info?.error && info.error.code !== "litellm_disabled" && <Warn>{litellmProblem(info.error).title}: {litellmProblem(info.error).description}</Warn>}
@@ -190,10 +196,11 @@ export function LiteLLMTab({ d, info, loading, error, admin, suggested }: {
           <CardHeader className="pb-2"><CardTitle className="text-sm">Keys with access</CardTitle>
             <CardDescription className="text-xs">Virtual keys allowed to call {model}: keys listing it, and keys for all models.</CardDescription></CardHeader>
           <CardContent>
-            {info.keys_error ? <EmptyState icon={KeyRound} title={litellmProblem(info.keys_error).title} description={litellmProblem(info.keys_error).description} />
-              : <KeyManager keys={info.keys} modelOptions={modelNameOptions(deps.data ?? [], [model])} endpoint={info.endpoint}
-                  preselect={model ? [model] : undefined} createLabel="Create key for this deployment"
-                  empty={<EmptyState icon={KeyRound} title="No keys can call this model yet" description="Create a key for this deployment, or one for all models." />} />}
+            {/* KeyManager stays mounted through key errors: it owns the one-time created-key dialog. */}
+            <KeyManager keys={info.keys} modelOptions={modelNameOptions(deps.data ?? [], [model])} endpoint={info.endpoint}
+              preselect={model ? [model] : undefined} createLabel="Create key for this deployment"
+              problem={info.keys_error ? <EmptyState icon={KeyRound} title={litellmProblem(info.keys_error).title} description={litellmProblem(info.keys_error).description} /> : undefined}
+              empty={<EmptyState icon={KeyRound} title="No keys can call this model yet" description="Create a key for this deployment, or one for all models." />} />
           </CardContent>
         </Card>
       )}

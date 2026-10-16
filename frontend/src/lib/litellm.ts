@@ -1,4 +1,4 @@
-import type { ApiProblem, Deployment, DeploymentRef, LiteLLMKey } from "@/types";
+import type { ApiProblem, Deployment, DeploymentRef, LiteLLMKey, LiteLLMSyncResult } from "@/types";
 
 /** Same rule as the backend `ALIAS_PATTERN`; the model name clients pass to LiteLLM. */
 export const ALIAS_RE = /^[A-Za-z0-9._:/-]{1,64}$/;
@@ -30,7 +30,7 @@ export function urlProblem(raw: string): string | null {
 
 export type KeyMode = "keep" | "replace" | "clear";
 export interface ConnectionForm { enabled: boolean; url: string; public_url: string; keyMode: KeyMode; masterKey: string }
-export interface ConnectionSaved { enabled: boolean; url: string; public_url: string; master_key_set: boolean }
+export interface ConnectionSaved { enabled: boolean; url: string; public_url: string; master_key_set: boolean; default_url?: string }
 
 /**
  * The PUT body for the connection form (changed fields only). `keyDetaches` is true when the internal URL changes
@@ -41,7 +41,9 @@ export function connectionPatch(saved: ConnectionSaved, form: ConnectionForm): {
   const body: Record<string, unknown> = {};
   if (form.enabled !== saved.enabled) body.enabled = form.enabled;
   const url = trimSlash(form.url);
-  const urlChanged = url !== trimSlash(saved.url);
+  // An empty internal URL means "the config default": no change if that is already the effective URL.
+  const effective = url || (saved.default_url !== undefined ? trimSlash(saved.default_url) : "");
+  const urlChanged = effective !== trimSlash(saved.url);
   if (urlChanged) body.url = url;
   const pub = trimSlash(form.public_url);
   if (pub !== trimSlash(saved.public_url)) body.public_url = pub;
@@ -105,9 +107,10 @@ export function keyFormFromKey(k: LiteLLMKey): KeyForm {
 
 export type KeyFormProblems = Partial<Record<keyof KeyForm, string>>;
 
-export function keyFormProblems(f: KeyForm, mode: "create" | "edit"): KeyFormProblems {
+export function keyFormProblems(f: KeyForm, mode: "create" | "edit", original?: LiteLLMKey | null): KeyFormProblems {
   const p: KeyFormProblems = {};
-  if (!KEY_ALIAS_RE.test(f.alias.trim())) p.alias = "Required: up to 128 letters, digits, spaces and . _ : @ / -";
+  const keepsNoAlias = mode === "edit" && !f.alias.trim() && !original?.key_alias;
+  if (!keepsNoAlias && !KEY_ALIAS_RE.test(f.alias.trim())) p.alias = "Required: up to 128 letters, digits, spaces and . _ : @ / -";
   if (!f.allModels && f.models.length === 0) p.models = "Choose at least one model, or allow all models";
   const budget = f.maxBudget.trim();
   if (budget && !(Number.isFinite(Number(budget)) && Number(budget) >= 0)) p.maxBudget = "Enter an amount of 0 or more";
@@ -238,4 +241,10 @@ export function rewrittenCount(v: unknown, affected: number): number {
   if (typeof v === "number") return v;
   if (Array.isArray(v)) return v.length;
   return v === true ? affected : 0;
+}
+
+/** One wording for "Sync now" / "Re-sync" results. */
+export function syncMessage(r: LiteLLMSyncResult): string {
+  if (r.status === "disabled") return "Sync skipped: the integration is disabled or has no master key.";
+  return `Sync ${r.ok ? "finished" : "failed"}: ${r.registered} registered, ${r.removed} removed.`;
 }

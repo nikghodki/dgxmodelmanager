@@ -120,7 +120,6 @@ function DeployWizardPage() {
           }} />
       )}
       {memoryChanged && <p className="text-xs text-status-critical">Memory changed since the preview — choose a plan again.</p>}
-      <ModelNameTaken error={deploy.error} />
     </div>
   );
 
