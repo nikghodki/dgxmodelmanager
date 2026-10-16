@@ -21,9 +21,7 @@ import { useActionMutation } from "@/hooks/use-action-mutation";
 import { passwordProblems } from "@/lib/validation";
 import type { User } from "@/types";
 
-export function Users() {
-  const admin = useIsAdmin();
-  if (!admin) return <Navigate to="/" replace />;
+function UsersPage() {
   const me = useAuth().user;
   const users = useQuery({ queryKey: ["users"], queryFn: () => api<User[]>("/users") });
   const [adding, setAdding] = useState(false);
@@ -97,4 +95,8 @@ export function Users() {
         confirmLabel="Delete" destructive pending={remove.isPending} onConfirm={() => del && remove.mutate(del.id)} />
     </div>
   );
+}
+
+export function Users() {
+  return useIsAdmin() ? <UsersPage /> : <Navigate to="/" replace />;
 }

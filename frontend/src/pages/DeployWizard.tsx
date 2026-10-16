@@ -35,9 +35,7 @@ function Section({ n, title, description, children }: { n: number; title: string
   );
 }
 
-export function DeployWizard() {
-  const admin = useIsAdmin();
-  if (!admin) return <Navigate to="/" replace />;
+function DeployWizardPage() {
   const [params] = useSearchParams();
   const nav = useNavigate();
   const inv = useQuery({ queryKey: ["inventory"], queryFn: () => api<Artifact[]>("/inventory") });
@@ -172,4 +170,8 @@ export function DeployWizard() {
       )}
     </div>
   );
+}
+
+export function DeployWizard() {
+  return useIsAdmin() ? <DeployWizardPage /> : <Navigate to="/" replace />;
 }
