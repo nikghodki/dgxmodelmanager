@@ -1,0 +1,5 @@
+build: 6527 (7f766929) with cc (Ubuntu 13.3.0-6ubuntu2~24.04) 13.3.0 for aarch64-linux-gnu
+main: loading model
+load_tensors: offloaded 29/29 layers to GPU
+load_tensors:        CUDA0 model buffer size =   604.15 MiB
+load_tensors:   CPU_Mapped model buffer size =   157.65 MiB

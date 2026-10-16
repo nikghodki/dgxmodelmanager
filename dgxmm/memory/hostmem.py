@@ -155,6 +155,7 @@ class HostSample:
     managed: dict[str, int]
     external_top: list[ProcMem]
     gpu: dict = field(default_factory=dict)
+    managed_gpu: dict[str, int] = field(default_factory=dict)  # NVML part of `managed`
 
 
 class GpuSource(Protocol):
@@ -312,11 +313,13 @@ class HostProbe:
         mem = self.meminfo()
         gpu_by_pid = self.gpu.process_gpu_bytes() if self.gpu else {}
         managed = {cid: self._cgroup_anon(cid) for cid in managed_ids}
+        managed_gpu = dict.fromkeys(managed_ids, 0)
         self.users.refresh()
         external: list[tuple[_Proc, dict | None]] = []
         for p in self._scan(gpu_by_pid):
             if p.cid in managed:
                 managed[p.cid] += p.gpu
+                managed_gpu[p.cid] += p.gpu
                 continue
             external.append((p, self._container(p.cid, refresh=False)))  # managed_ref(...)[0] is None here
         external.sort(key=lambda pc: pc[0].rss + pc[0].gpu, reverse=True)
@@ -327,7 +330,7 @@ class HostProbe:
                                user=user, user_scope=scope, container=_public(c),
                                dgxmm_label=managed_ref(p.cid, {}, c)[1]))
         return HostSample(mem=mem, managed=managed, external_top=top,
-                          gpu=self.gpu.device_stats() if self.gpu else {})
+                          gpu=self.gpu.device_stats() if self.gpu else {}, managed_gpu=managed_gpu)
 
 
 def _int(v: str | None) -> int:
