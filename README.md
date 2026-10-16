@@ -66,6 +66,11 @@ Open one of the URLs (`http://<host>:8090/` redirects to `/dgxmm/`). Sign in as 
 printed password, then choose a new one of at least 12 characters. Next, deploy a model from
 **Deploy model** or find one in **Catalog**.
 
+**Need a LiteLLM endpoint too?** On a fresh box, `./install.sh --with-litellm` also starts a bundled
+LiteLLM proxy with its own Postgres and prints one OpenAI-compatible endpoint
+(`http://<host>:4000/v1`) that serves every DGXMM deployment by `model` name. See
+[Bundled LiteLLM](docs/configuration.md#bundled-litellm).
+
 > The first start runs a short one-off vLLM container to read which model architectures vLLM supports,
 > so the vLLM image (several GB) is pulled in the background. Set `DGXMM_PULL_ENGINES=1` to pull both
 > engine images during install instead.

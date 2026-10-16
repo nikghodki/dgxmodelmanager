@@ -592,7 +592,7 @@ def test_trusted_proxies_existing_env_file_wins_over_environment(box):
 
 # --- bundled LiteLLM (--with-litellm) -----------------------------------------------------------
 
-LITELLM_SECRETS = ("litellm_master_key", "litellm_salt_key", "litellm_db_password")
+LITELLM_SECRETS = ("litellm_bundled_master_key", "litellm_salt_key", "litellm_db_password")
 
 
 def _copy_litellm_files(box):
@@ -616,8 +616,10 @@ def test_with_litellm_install_generates_secrets_env_and_uses_profile(box):
         assert mode(sec / name) == 0o600
         value = (sec / name).read_text()
         assert len(value) >= 32 and value not in p.out
-    master = (sec / "litellm_master_key").read_text()
+    master = (sec / "litellm_bundled_master_key").read_text()
     assert master.startswith("sk-") and len(master) >= 35 and master.isascii()
+    # Fresh config wired to the bundled LiteLLM: DGXMM gets the same key, zero touch.
+    assert (sec / "litellm_master_key").read_text() == master and mode(sec / "litellm_master_key") == 0o600
     assert len(set((sec / n).read_text() for n in LITELLM_SECRETS)) == 3
     env = (repo / ".env").read_text()
     assert "DGXMM_WITH_LITELLM=1" in env and "DGXMM_LITELLM_PORT=4000" in env and "COMPOSE_PROFILES=litellm" in env
@@ -644,19 +646,47 @@ def test_with_litellm_profile_remembered_and_secrets_kept(box):
     assert "port 4000 (in use by this DGXMM's LiteLLM" in p.out
 
 
-def test_with_litellm_keeps_existing_secrets_and_master_key(box):
+def test_with_litellm_keeps_existing_bundled_secrets(box):
     _copy_litellm_files(box)
     sec = box.repo / "secrets"
     sec.mkdir()
-    (sec / "litellm_master_key").write_text("sk-existing-master-key-value")
+    (sec / "litellm_bundled_master_key").write_text("sk-existing-bundled-key-value")
     (sec / "litellm_salt_key").write_text("sk-existing-salt")
     p = box.run("--with-litellm")
     assert p.returncode == 0, p.out
-    assert (sec / "litellm_master_key").read_text() == "sk-existing-master-key-value"
+    assert (sec / "litellm_bundled_master_key").read_text() == "sk-existing-bundled-key-value"
+    assert (sec / "litellm_master_key").read_text() == "sk-existing-bundled-key-value"  # wired, fresh config
     assert (sec / "litellm_salt_key").read_text() == "sk-existing-salt"
     assert len((sec / "litellm_db_password").read_text()) >= 32
     assert "sk-existing" not in p.out
-    assert "exec litellm-proxy" not in box.calls()  # bundled mode never reads the external key
+
+
+def test_with_litellm_existing_external_key_is_not_reused(box):
+    """An existing install's key belongs to the external LiteLLM: never make it the bundled admin key."""
+    _copy_litellm_files(box)
+    sec = box.repo / "secrets"
+    sec.mkdir()
+    (sec / "litellm_master_key").write_text("sk-external-production-key")
+    (box.repo / "config.yaml").write_text("docker_network: dgxmm\nlitellm_url: http://litellm-proxy:4000\n")
+    p = box.run("--with-litellm", FAKE_LITELLM="1", FAKE_LITELLM_KEY="sk-external-production-key")
+    assert p.returncode == 0, p.out
+    assert (sec / "litellm_master_key").read_text() == "sk-external-production-key"
+    bundled = (sec / "litellm_bundled_master_key").read_text()
+    assert bundled.startswith("sk-") and bundled != "sk-external-production-key"
+    assert "sk-external" not in p.out and bundled not in p.out
+    assert "secrets/litellm_bundled_master_key" in p.out and "Integrations" in p.out
+    assert "litellm_url to http://dgxmm-litellm:4000" in p.out
+
+
+def test_with_litellm_fresh_config_external_key_env_not_used_for_dgxmm_when_external_url(box):
+    """LITELLM_URL pointing elsewhere: DGXMM keeps the external key; the bundled key is separate."""
+    _copy_litellm_files(box)
+    p = box.run("--with-litellm", LITELLM_URL="http://litellm-proxy:4000", LITELLM_MASTER_KEY="sk-ext-from-env")
+    assert p.returncode == 0, p.out
+    sec = box.repo / "secrets"
+    assert (sec / "litellm_master_key").read_text() == "sk-ext-from-env"
+    assert (sec / "litellm_bundled_master_key").read_text() != "sk-ext-from-env"
+    assert "litellm_url: http://litellm-proxy:4000" in (box.repo / "config.yaml").read_text()
 
 
 def test_with_litellm_from_env_var_and_custom_port(box):
@@ -700,6 +730,17 @@ def test_with_litellm_existing_config_pointing_elsewhere_is_kept(box):
     assert p.returncode == 0, p.out
     assert (box.repo / "config.yaml").read_text() == cfg
     assert "keeps litellm_url: http://litellm-proxy:4000" in p.out
+
+
+@pytest.mark.parametrize("line", ['litellm_url: "http://dgxmm-litellm:4000"', "litellm_url: 'http://dgxmm-litellm:4000'"])
+def test_with_litellm_quoted_internal_url_counts_as_bundled(box, line):
+    _copy_litellm_files(box)
+    (box.repo / "config.yaml").write_text(f"docker_network: dgxmm\n{line}\n")
+    p = box.run("--with-litellm")
+    assert p.returncode == 0, p.out
+    assert "keeps litellm_url" not in p.out
+    sec = box.repo / "secrets"
+    assert (sec / "litellm_master_key").read_text() == (sec / "litellm_bundled_master_key").read_text()
 
 
 def test_with_litellm_port_conflict(box):
@@ -761,6 +802,7 @@ def _installed_with_litellm(box):
     (box.repo / "data" / "litellm-db").mkdir()
     (box.repo / "data" / "litellm-db" / "PG_VERSION").write_text("16")
     (box.repo / "secrets" / "litellm_salt_key").write_text("s")
+    (box.repo / ".env").write_text("DGXMM_NETWORK=dgxmm\nDGXMM_WITH_LITELLM=1\nCOMPOSE_PROFILES=litellm\n")
     fake["FAKE_BUNDLED"] = "1"
     return fake
 
@@ -830,3 +872,84 @@ def test_compose_file_validates(tmp_path, profile):
                               capture_output=True, text=True, check=True).stdout.split()
     expected = {"dgxmm", "dgxmm-litellm", "dgxmm-litellm-db"} if profile else {"dgxmm"}
     assert set(services) == expected
+
+
+# --- review fix round 1 (bundled LiteLLM) ---------------------------------------------------------
+
+def test_with_litellm_compose_up_failure_still_shows_password(box):
+    """A DB that never gets healthy fails `compose up`; DGXMM is up, so finish its setup first."""
+    _copy_litellm_files(box)
+    p = box.run("--with-litellm", FAKE_LOGS=FIRST_RUN, FAKE_COMPOSE_UP="fail-litellm",
+                FAKE_LITELLM_LOGS="db: FATAL postgresql://litellm:hunter2pw@dgxmm-litellm-db/litellm sk-abcdef123456")
+    assert p.returncode != 0
+    assert p.out.count(PW) == 1 and (box.repo / "secrets" / "admin_password").read_text().strip() == PW
+    assert "DGXMM is running" in p.out
+    assert "bundled LiteLLM" in p.out and "logs --tail" in p.out
+    assert "docker compose --profile litellm logs --tail 30 dgxmm-litellm-db dgxmm-litellm" in box.calls()
+    assert "hunter2pw" not in p.out and "sk-abcdef123456" not in p.out and "://***@" in p.out
+    assert p.out.index(PW) < p.out.index("did not start")
+
+
+def test_with_litellm_compose_up_failure_without_dgxmm_dies(box):
+    _copy_litellm_files(box)
+    p = box.run("--with-litellm", FAKE_COMPOSE_UP="fail", FAKE_HEALTH="missing/")
+    assert p.returncode != 0 and "docker compose up failed" in p.out
+
+
+def test_with_litellm_crash_loop_fails_early(box):
+    _copy_litellm_files(box)
+    p = box.run("--with-litellm", FAKE_LITELLM_HEALTH="restarting/", FAKE_LITELLM_RESTARTS="4",
+                DGXMM_LITELLM_HEALTH_TIMEOUT="300", FAKE_LITELLM_LOGS="crash")
+    assert p.returncode != 0
+    assert "restarted 4 times" in p.out and "crash" in p.out
+
+
+def test_compose_profiles_ignores_stray_shell_value(box):
+    _copy_litellm_files(box)
+    p = box.run("--with-litellm", COMPOSE_PROFILES="something-else")
+    assert p.returncode == 0, p.out
+    assert "COMPOSE_PROFILES=litellm" in (box.repo / ".env").read_text()
+
+
+def test_status_accepts_truthy_with_litellm(box):
+    (box.repo / ".env").write_text("DGXMM_WITH_LITELLM=true\n")
+    p = box.run("status", FAKE_DGXMM_STATE="running", FAKE_DGXMM_WORKDIR=str(box.repo.resolve()), FAKE_BUNDLED="1")
+    assert p.returncode == 0, p.out
+    assert "LiteLLM endpoint" in p.out
+
+
+def test_disabling_bundle_stops_containers_and_drops_profile(box):
+    (box.repo / ".env").write_text("DGXMM_WITH_LITELLM=0\nCOMPOSE_PROFILES=litellm,extra\n")
+    p = box.run(FAKE_BUNDLED="1")
+    assert p.returncode == 0, p.out
+    calls = box.calls()
+    assert "docker stop -t 30 id-dgxmm-litellm id-dgxmm-litellm-db" in calls
+    assert "docker rm id-dgxmm-litellm id-dgxmm-litellm-db" in calls
+    assert "--profile" not in calls
+    assert "COMPOSE_PROFILES=extra" in (box.tmp / "calls.log.profiles").read_text()
+    assert "DGXMM_WITH_LITELLM=0" in p.out and "data/litellm-db" in p.out
+
+
+def test_disabled_without_bundled_containers_touches_nothing(box):
+    p = box.run()
+    assert p.returncode == 0, p.out
+    assert "docker stop" not in box.calls()
+
+
+def test_bundled_key_mounted_only_into_bundled_litellm():
+    text = (ROOT / "docker-compose.yaml").read_text()
+    assert "/run/secrets/litellm_bundled_master_key" in text
+    litellm_svc = text.split("  dgxmm-litellm:\n", 1)[1].split("\nnetworks:", 1)[0]
+    assert "secrets: [litellm_bundled_master_key, litellm_salt_key, litellm_db_password]" in litellm_svc
+    dgxmm_svc = text.split("  dgxmm:\n", 1)[1].split("  dgxmm-litellm-db:", 1)[0]
+    assert "litellm_bundled_master_key" not in dgxmm_svc
+
+
+def test_docs_cover_bundled_litellm():
+    ops = (ROOT / "docs" / "operations.md").read_text()
+    assert "pg_dump" in ops and "dgxmm-litellm-db" in ops and "data/litellm-db" in ops
+    cfg = (ROOT / "docs" / "configuration.md").read_text()
+    for word in ("DGXMM_WITH_LITELLM", "DGXMM_LITELLM_PORT", "COMPOSE_PROFILES", "Bundled LiteLLM",
+                 "litellm_bundled_master_key"):
+        assert word in cfg
+    assert "--with-litellm" in (ROOT / "README.md").read_text()
