@@ -64,7 +64,7 @@ def _weights(sizes: dict[str, int]) -> int:
     return sum(v for k, v in sizes.items() if k.endswith((".bin", ".pt", ".pth")) and "training_args" not in k)
 
 
-def _scan_repo(d: Path) -> ModelArtifact:
+def _scan_repo(d: Path) -> ModelArtifact | None:
     parts = d.name.split("--")
     ref = f"{parts[1]}/{'--'.join(parts[2:])}"
     snaps_dir = d / "snapshots"
@@ -85,6 +85,8 @@ def _scan_repo(d: Path) -> ModelArtifact:
         if snap.name == main_rev:
             problems.append(f"refs/main snapshot {snap.name[:8]} is incomplete ({len(broken)} broken links)")
     if chosen is None:
+        if any(any(f.lower().endswith(".gguf") for f in os.listdir(s)) for s in snaps if s.is_dir()):
+            return None  # GGUF repo: reported by scan_gguf_roots instead
         if not snaps:
             problems.append("no snapshot")
         elif not problems or all("refs/main" not in p for p in problems):
@@ -117,7 +119,9 @@ def scan_hf_cache(hub_dir: Path) -> list[ModelArtifact]:
     for d in sorted(hub_dir.iterdir()):
         if d.is_dir() and d.name.startswith("models--") and d.name.count("--") >= 2:
             try:
-                out.append(_scan_repo(d))
+                a = _scan_repo(d)
+                if a is not None:
+                    out.append(a)
             except OSError as e:
                 log.warning("skipping %s: %s", d, e)
     return out
