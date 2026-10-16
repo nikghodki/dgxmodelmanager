@@ -121,8 +121,6 @@ def build_context(settings: Settings) -> AppContext:
     ctx.budget_listeners.append(ctx.watchdog.check)
     ctx.budget_listeners.append(liveness_listener(deployer))
 
-    from dgxmm.inventory.weights import WeightsDeleter
-    ctx.weights = WeightsDeleter(settings, db, inventory, docker=docker)
 
     from dgxmm.catalog.support import VllmArchRegistry
     archs = VllmArchRegistry(settings, docker)
@@ -143,6 +141,9 @@ def build_context(settings: Settings) -> AppContext:
 
     from dgxmm.downloads import DownloadService
     ctx.downloads = DownloadService(settings, db, inventory, hub, events, token=hf_token)
+
+    from dgxmm.inventory.weights import WeightsDeleter
+    ctx.weights = WeightsDeleter(settings, db, inventory, docker=docker, deployer=deployer, downloads=ctx.downloads)
 
     async def _recover_downloads():
         ctx.downloads.recover()

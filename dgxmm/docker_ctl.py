@@ -4,18 +4,24 @@ from __future__ import annotations
 
 import logging
 import posixpath
+import re
 import socket
 from dataclasses import dataclass, field
 
 import docker
 import docker.errors
 from docker.types import DeviceRequest
+from docker.types import Mount as DockerMount
 
 from dgxmm.engines.base import MANAGED_LABEL, ContainerSpec
 
 log = logging.getLogger(__name__)
 HELPER_LABEL = "dgxmm.helper"
 HELPER_MOUNT = "/x"  # where a helper sees the single host directory it may touch
+
+
+class HelperUnavailable(RuntimeError):
+    """The delete helper cannot run (e.g. its image is missing); callers fall back to in-process deletion."""
 
 
 @dataclass
@@ -144,26 +150,55 @@ class DockerController:
                                          labels={MANAGED_LABEL: "true", "dgxmm.oneshot": "true"})
         return out.decode(errors="replace") if isinstance(out, bytes) else str(out)
 
-    def self_image(self) -> str | None:
-        """Image of the container this process runs in (docker sets the hostname to the short id)."""
-        try:
-            c = self.client.containers.get(socket.gethostname())
-            return (c.attrs.get("Config") or {}).get("Image") or None
-        except Exception:
-            return None
+    @staticmethod
+    def _own_container_id(mountinfo: str, cgroup: str) -> str | None:
+        pats = [(mountinfo, re.compile(r"/containers/([0-9a-f]{64})/")),
+                (cgroup, re.compile(r"(?:docker-|/docker/)([0-9a-f]{64})"))]
+        for path, rx in pats:
+            try:
+                with open(path) as f:
+                    m = rx.search(f.read())
+            except OSError:
+                continue
+            if m:
+                return m.group(1)
+        return None
+
+    def self_image(self, mountinfo: str = "/proc/self/mountinfo", cgroup: str = "/proc/self/cgroup") -> str | None:
+        """Image of the container this process runs in: container id from /proc (mountinfo, then cgroup),
+        else the hostname (docker's default hostname is the short id)."""
+        for key in (self._own_container_id(mountinfo, cgroup), socket.gethostname()):
+            if not key:
+                continue
+            try:
+                c = self.client.containers.get(key)
+                image = (c.attrs.get("Config") or {}).get("Image")
+                if image:
+                    return image
+            except Exception:
+                continue
+        return None
 
     def run_helper(self, image: str, host_dir: str, command: list[str], timeout: float = 120) -> int | None:
-        """Run ``command`` as root in a throwaway, network-less container that bind-mounts ONLY ``host_dir``
-        (at HELPER_MOUNT). Returns the exit code, or None if unknown (timed out / already removed)."""
+        """Run ``command`` as root in a throwaway, network-less, capability-trimmed container that bind-mounts
+        ONLY ``host_dir`` (at HELPER_MOUNT). Never pulls images. Returns the exit code, or None if unknown
+        (timed out / already removed). Raises HelperUnavailable when the image is missing."""
         norm = posixpath.normpath(host_dir) if host_dir else ""
         if not host_dir or not posixpath.isabs(host_dir) or norm == "/" or ".." in host_dir.split("/"):
             raise ValueError(f"refusing to mount {host_dir!r} into a helper container")
         if not command:
             raise ValueError("helper needs a command")
+        try:
+            self.client.images.get(image)
+        except docker.errors.ImageNotFound:
+            raise HelperUnavailable(f"helper image {image} is not present locally (set helper_image)")
         c = self.client.containers.run(
             image, entrypoint=[command[0]], command=list(command[1:]), detach=True, auto_remove=True,
             user="0:0", network_mode="none", labels={HELPER_LABEL: "true"},
-            volumes={norm: {"bind": HELPER_MOUNT, "mode": "rw"}}, security_opt=["no-new-privileges"],
+            # Mount (not volumes=): a missing source is an error instead of an auto-created root-owned dir
+            mounts=[DockerMount(target=HELPER_MOUNT, source=norm, type="bind", read_only=False)],
+            cap_drop=["ALL"], cap_add=["DAC_OVERRIDE", "FOWNER"], read_only=True, pids_limit=64,
+            security_opt=["no-new-privileges"],
         )
         try:
             res = c.wait(timeout=timeout, condition="removed")

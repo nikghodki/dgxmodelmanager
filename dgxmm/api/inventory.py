@@ -28,7 +28,8 @@ def _with_support(ctx: AppContext, a) -> dict:
 
 def _weights(ctx: AppContext) -> WeightsDeleter:
     if ctx.weights is None:
-        ctx.weights = WeightsDeleter(ctx.settings, ctx.db, ctx.inventory, docker=ctx.docker)
+        ctx.weights = WeightsDeleter(ctx.settings, ctx.db, ctx.inventory, docker=ctx.docker, deployer=ctx.deployer,
+                                     downloads=ctx.downloads)
     return ctx.weights
 
 
@@ -64,15 +65,11 @@ async def delete_model(ref: str | None = Query(None, max_length=1024), body: Del
     if not ref:
         raise api_error(422, "missing_ref", "pass ?ref=<model ref> or {\"ref\": ...}")
     try:
-        out = await asyncio.to_thread(_weights(ctx).delete, ref)
+        out = await asyncio.to_thread(_weights(ctx).delete, ref, p.user.id)  # audits success and refusals
     except DeleteError as e:
         if e.code == "delete_failed":
-            audit(ctx.db, p.user.id, "model_delete_failed", ref, {"error": e.message[:500]})
             ctx.events.publish("inventory", {"reason": "delete", "ref": ref})
         raise _err(e)
-    audit(ctx.db, p.user.id, "model_delete", ref, {"bytes": out["freed_bytes"], "paths": out["paths"],
-                                                   "method": out["method"],
-                                                   "affected_deployments": [d["name"] for d in out["warnings"]]})
     ctx.events.publish("inventory", {"reason": "delete", "ref": ref})
     return out
 
@@ -85,10 +82,7 @@ async def cleanup_preview(p: Principal = Depends(require_admin), ctx: AppContext
 @router.post("/cleanup-incomplete")
 async def cleanup_incomplete(body: CleanupIn = Body(default_factory=CleanupIn), p: Principal = Depends(require_admin),
                              ctx: AppContext = Depends(get_ctx)):
-    out = await asyncio.to_thread(_weights(ctx).cleanup, body.refs)
-    for d in out["deleted"]:
-        audit(ctx.db, p.user.id, "model_delete", d["ref"], {"bytes": d["freed_bytes"], "paths": d["paths"],
-                                                            "method": d["method"], "cleanup": True})
+    out = await asyncio.to_thread(_weights(ctx).cleanup, body.refs, p.user.id)  # audits each deletion
     audit(ctx.db, p.user.id, "incomplete_cleanup", "", {
         "deleted": [d["ref"] for d in out["deleted"]], "bytes": out["freed_bytes"],
         "skipped": [{"ref": s["ref"], "code": s["code"]} for s in out["skipped"]],
