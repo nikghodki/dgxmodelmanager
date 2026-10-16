@@ -22,11 +22,14 @@ class Hub:
 
 def fake_downloader(fail_on=None, exc=None):
     calls = []
+    cache_dirs = []
 
     def _dl(repo_id, filename, revision=None, cache_dir=None, token=None):
         calls.append(filename)
+        cache_dirs.append(cache_dir)
         if filename == fail_on:
             raise exc
+        # Match real hf_hub_download: cache_dir is the hub cache, write models--... directly into it
         repo_dir = Path(cache_dir) / ("models--" + repo_id.replace("/", "--"))
         blobs = repo_dir / "blobs"
         snap = repo_dir / "snapshots" / "abc"
@@ -46,6 +49,7 @@ def fake_downloader(fail_on=None, exc=None):
         link.symlink_to(blob)
         return str(link)
     _dl.calls = calls
+    _dl.cache_dirs = cache_dirs
     return _dl
 
 
@@ -75,6 +79,10 @@ async def test_downloads_default_files_and_refreshes_inventory(stack):
     await s.launch(v["id"])
     done = await wait_state(s, v["id"])
     assert done["state"] == "done" and dl.calls == ["config.json", "model.safetensors", "README.md"]
+    # Regression: downloader should be called with hub_dir (hf_cache.local/hub), not base dir
+    expected_hub_dir = str(Path(stack.settings.hf_cache.local) / "hub")
+    assert all(cd == expected_hub_dir for cd in dl.cache_dirs), f"Expected {expected_hub_dir}, got {dl.cache_dirs}"
+    # Inventory refresh happens before state="done", so model should be visible immediately
     assert stack.inv.get("org/new-model") is not None
 
 
