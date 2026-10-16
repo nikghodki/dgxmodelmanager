@@ -1,4 +1,6 @@
 """Command-line redaction for the processes view (spec §5). Secrets must never reach the client."""
+import shlex
+
 import pytest
 
 from dgxmm.memory.redact import MAX_COMMAND_BYTES, format_command, redact_argv
@@ -244,3 +246,142 @@ def test_round2_keeps_the_non_secret_parts():
     assert "'\"'\"'redis-cli'\"'\"'" in out and "ping" in out
     out = f(["sh", "-c", "sh -c 'redis-cli -a " + S + " ping'"])
     assert "redis-cli -a *** ping" in out
+
+
+# Fix round 3: tool detection after shell keywords and prefix commands (with their options/operands)
+ROUND3_CASES = {
+    "timeout + abs path": ["sh", "-c", "timeout 10 /usr/bin/sshpass -p" + S + " ssh h"],
+    "timeout opts": ["sh", "-c", "timeout -s KILL -k 5 30s /usr/bin/redis-cli -a " + S],
+    "timeout argv": ["timeout", "10", "/usr/bin/sshpass", "-p" + S, "ssh", "h"],
+    "sudo -u": ["sh", "-c", "sudo -u bob /usr/bin/mysql -p" + S + " db"],
+    "sudo -E -u --": ["sudo", "-E", "-u", "bob", "--", "/usr/bin/mysql", "-p" + S],
+    "while do": ["sh", "-c", "while true; do /opt/redis/bin/redis-cli -a " + S + " ping; sleep 1; done"],
+    "if then": ["sh", "-c", "if [ -x /x ]; then /usr/bin/redis-cli -a " + S + "; fi"],
+    "brace group": ["sh", "-c", "{ /usr/local/bin/redis-cli -a " + S + "; }"],
+    "subshell": ["sh", "-c", "(/usr/local/bin/redis-cli -a " + S + ")"],
+    "and-or": ["sh", "-c", "true && /usr/bin/mysql -p" + S + " || false"],
+    "pipe": ["sh", "-c", "echo x | /usr/bin/redis-cli -a " + S],
+    "bang": ["sh", "-c", "! /usr/bin/redis-cli -a " + S],
+    "env -i VAR": ["sh", "-c", "env -i A=1 B=2 /usr/bin/redis-cli -a " + S],
+    "env -u NAME": ["env", "-u", "HOME", "/usr/bin/redis-cli", "-a", S],
+    "nice -n": ["sh", "-c", "nice -n 10 /usr/bin/mysql -p" + S],
+    "nohup exec": ["sh", "-c", "nohup exec /usr/bin/redis-cli -a " + S],
+    "stdbuf ionice chrt taskset setsid": ["sh", "-c", "stdbuf -oL ionice -c 2 -n 7 chrt -f 10 taskset -c 0-3 setsid /usr/bin/redis-cli -a " + S],
+    "xargs": ["sh", "-c", "echo k | xargs -n 1 /usr/bin/redis-cli -a " + S],
+    "time -p": ["sh", "-c", "time -p /usr/bin/mysql -p" + S],
+    "VAR= prefix": ["sh", "-c", "LANG=C /usr/bin/mysql -p" + S],
+    "mid-argv abs tool": ["docker", "exec", "c", "/usr/bin/redis-cli", "-a", S],
+    # tool families
+    "docker login -p": ["docker", "login", "-u", "bob", "-p", S, "registry.example.com"],
+    "podman login --password": ["podman", "login", "--password", S, "quay.io"],
+    "docker login glued": ["docker", "login", "-p" + S, "r"],
+    "mongosh -p": ["mongosh", "mongodb://h", "-u", "admin", "-p", S],
+    "mongo -p": ["/usr/bin/mongo", "-p", S],
+    "openssl -psk": ["openssl", "s_client", "-psk", "deadbeef" + S, "-connect", "h:443"],
+    "lftp -u": ["lftp", "-u", "user," + S, "ftp://h"],
+    "smbclient -U": ["smbclient", "//h/share", "-U", "user%" + S],
+    "smbclient -U glued": ["smbclient", "//h/share", "-Uuser%" + S],
+    "smbclient --user=": ["smbclient", "//h/share", "--user=user%" + S],
+    # Python / Perl argv shapes
+    "python tuple": ["python", "-c", "subprocess.run(('redis-cli','-a','" + S + "'))"],
+    "mixed list": ["python", "-c", "subprocess.run(['redis-cli','-a','" + S + "',port])"],
+    "mixed list kw": ["python", "-c", "run(['redis-cli', '-h', host, '-a', '" + S + "'], check=True)"],
+    "environb bytes": ["python", "-c", "os.environb[b'API_KEY']=b'" + S + "'"],
+    "perl system": ["perl", "-e", "system('redis-cli','-a','" + S + "')"],
+    "perl system dq": ["perl", "-e", 'system("mysql", "-p' + S + '", "db")'],
+}
+
+
+@pytest.mark.parametrize("name", list(ROUND3_CASES))
+def test_round3_leak_cases(name):
+    out = format_command(ROUND3_CASES[name])[0]
+    assert S not in out and "value7" not in out and "Zq9SEC" not in out, out
+
+
+def test_round3_keeps_structure():
+    f = lambda argv: format_command(argv)[0]  # noqa: E731
+    assert f(["docker", "run", "-p", "8080:80", "nginx"]) == "docker run -p 8080:80 nginx"  # -p is publish here
+    assert f(["sudo", "-u", "bob", "ls", "-la"]) == "sudo -u bob ls -la"
+    assert f(["timeout", "10", "/usr/bin/sshpass", "-p" + S, "ssh", "h"]) == "timeout 10 /usr/bin/sshpass -p*** ssh h"
+    assert f(["sh", "-c", "while true; do /opt/redis/bin/redis-cli -a " + S + " ping; sleep 1; done"]) == \
+        "sh -c 'while true; do /opt/redis/bin/redis-cli -a *** ping; sleep 1; done'"
+    assert f(["python", "-c", "subprocess.run(['redis-cli','-a','" + S + "',port])"]) == \
+        "python -c 'subprocess.run(['\"'\"'redis-cli'\"'\"','\"'\"'-a'\"'\"','\"'\"'***'\"'\"',port])'"
+
+
+def test_depth_beyond_max_masks_the_remaining_script():
+    from dgxmm.memory.redact import MAX_SCRIPT_DEPTH
+    inner = "redis-cli -a " + S
+    for _ in range(MAX_SCRIPT_DEPTH + 1):
+        inner = "sh -c " + shlex.quote(inner)
+    out = format_command(["sh", "-c", inner])[0]
+    assert S not in out and "***" in out
+
+
+# Fix round 3: bounded cost. Any local user controls argv; sample() redacts the top 8 every budget tick.
+PATHOLOGICAL = {
+    "dot-a plain": ["x", "." + ".a" * 32768],
+    "dot-a spaced": ["x", ("." + ".a" * 500 + " ") * 64],
+    "dot-a sh -c": ["sh", "-c", "." + ".a" * 32768],
+    "dot-a sh -c spaced": ["sh", "-c", ("." + ".a" * 500 + " ") * 64],
+    "scheme repeat": ["x", "a://" * 16384],
+    "scheme repeat spaced": ["sh", "-c", ("a://" * 250 + " ") * 64],
+    "x-a-a header": ["x", "x-" + "a-" * 32767],
+    "x-a-a spaced": ["sh", "-c", ("x-" + "a-" * 500 + " ") * 64],
+    "dash flags": ["sh", "-c", ".-a" * 21845],
+    "quotes": ["sh", "-c", 'token="' * 9362],
+    "brackets": ["python", "-c", "['a'," * 13107],
+    "parens": ["perl", "-e", "('a'," * 13107],
+    "many args": ["x"] + ["." + ".a" * 100] * 320,
+    "many sh -c levels": ["sh", "-c", "sh -c " * 10000],
+}
+
+
+@pytest.mark.parametrize("name", list(PATHOLOGICAL))
+def test_pathological_inputs_redact_quickly(name):
+    import time
+    argv = PATHOLOGICAL[name]
+    assert sum(len(a) for a in argv) >= 60_000
+    t0 = time.perf_counter()
+    out, _ = format_command(argv)
+    assert time.perf_counter() - t0 < 0.2, name  # was 54 s (plain) / 166 s (sh -c) before the bounds
+    assert len(out.encode()) <= MAX_COMMAND_BYTES + 3
+
+
+@pytest.mark.parametrize("text", ["." + ".a" * 32768, "a://" * 16384, "x-" + "a-" * 32767, ".-a" * 21845])
+def test_text_rules_are_linear(text):
+    import time
+    from dgxmm.memory.redact import redact_text
+    t0 = time.perf_counter()
+    redact_text(text)
+    assert time.perf_counter() - t0 < 0.2
+
+
+def test_input_caps_fail_closed():
+    from dgxmm.memory.redact import MAX_TOKEN_CHARS
+    # a secret straddling the per-token cut is never partially shown
+    tok = "a " * ((MAX_TOKEN_CHARS - 10) // 2) + "--api-key=" + S + "x" * 50
+    out = format_command(["sh", "-c", tok])[0]
+    assert "Zq9" not in out and "[truncated]" in out
+    long_tail = ["x"] + ["arg"] * 5000 + ["--api-key", S]
+    out, truncated = format_command(long_tail)
+    assert truncated and S not in out
+
+
+SWEEP_UNITS = [".a", "a://", "x-a", ".-a", "a=", "-", "[", "('a',", 'token="', "'", '"', "\\", "a:", "a@", "Bearer ",
+               "pass:", "x-key:", "{", "$(", "a ", "-a ", "--api-key ", "sh -c '", "hf_", "sk-", "eyJ", "%", "=", ":",
+               "a]=", "['a']=", "os.environ['", "cookie:", "authorization: ", "a,", '"a",', "b'a',", "do ", "; ",
+               "sudo -u ", "env A=1 ", "timeout 1 "]
+
+
+@pytest.mark.parametrize("unit", SWEEP_UNITS)
+def test_repeated_unit_sweep_stays_fast(unit):
+    import time
+    from dgxmm.memory.redact import redact_text
+    t = unit * (65536 // len(unit))
+    for fn in (lambda: redact_text(t), lambda: format_command(["x", t]), lambda: format_command(["sh", "-c", t]),
+               lambda: format_command(["sh", "-c", " ".join([t[:400]] * 160)]),
+               lambda: format_command(["x"] + [t[:200]] * 320)):
+        t0 = time.perf_counter()
+        fn()
+        assert time.perf_counter() - t0 < 0.2, unit  # measured worst ~30 ms on the DGX
