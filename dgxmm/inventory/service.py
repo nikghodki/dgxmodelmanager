@@ -16,10 +16,17 @@ log = logging.getLogger(__name__)
 class InventoryService:
     def __init__(self, settings: Settings, scanners: list[Callable[[], list[ModelArtifact]]] | None = None):
         self.settings = settings
-        hub = Path(settings.hf_cache.local) / "hub"
+        # When HF_HOME is set (as in Dockerfile), hf_hub_download writes to HF_HOME/models--...
+        # For backward compat with older downloads, also scan HF_HOME/hub/
+        hf_base = Path(settings.hf_cache.local)
+        hub_legacy = hf_base / "hub"
         from dgxmm.inventory.gguf_scan import scan_gguf_roots
-        gguf_roots = [Path(m.local) for m in settings.gguf_roots] + [hub]
-        self.scanners = scanners or [lambda: scan_hf_cache(hub), lambda: scan_gguf_roots(gguf_roots)]
+        gguf_roots = [Path(m.local) for m in settings.gguf_roots] + [hub_legacy]
+        self.scanners = scanners or [
+            lambda: scan_hf_cache(hf_base),  # Scan base for new downloads (HF_HOME behavior)
+            lambda: scan_hf_cache(hub_legacy) if hub_legacy.exists() else [],  # Scan hub/ for old downloads
+            lambda: scan_gguf_roots(gguf_roots)
+        ]
         self._items: dict[str, ModelArtifact] = {}
         self._lock = threading.Lock()
 
