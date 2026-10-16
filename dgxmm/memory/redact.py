@@ -30,8 +30,8 @@ TRUNC = "…[truncated]"
 MAX_SCRIPT_DEPTH = 3       # nested sh -c "sh -c '…'" strings are redacted this many levels deep; deeper: masked
 _N = "{0,64}"              # bound for name-like runs inside patterns (keeps every rule linear)
 
-_SENSITIVE = re.compile(r"key|token|secret|pass|pwd|auth|credential|cookie", re.I)
-_EXACT_SENSITIVE = frozenset({"pw", "sig", "signature"})
+_SENSITIVE = re.compile(r"key|token|secret|pass|pwd|auth|credential|creds|cookie", re.I)
+_EXACT_SENSITIVE = frozenset({"pw", "sig", "signature", "cred"})
 _COUNT_WORDS = frozenset({"max", "min", "num", "batched", "new", "prompt", "draft", "speculative", "budget", "output",
                           "input", "context", "total", "lookahead", "reasoning"})
 _SAFE_PASS_WORDS = frozenset({"passthrough", "bypass", "compass", "passive", "passes", "multipass"})
@@ -101,7 +101,7 @@ _SEQ_ITEM = re.compile(r"([bBrRuUfF]{0,2})(" + _QUOTED + r")|[^,'\"]+|,")
 _PASS_ARG = re.compile(r"(?<![\w-])pass:[^\s'\"]+")  # openssl -passin pass:S
 # Only keys that might be sensitive start a match (bounded lookahead), so a harmless pair never swallows the text
 # after it; the callback applies the exact rule (allowlist included).
-_PAIR = re.compile(r"(?<![\w.-])([\"']?)((?=[\w.-]" + _N + r"?(?i:key|token|secret|pass|pw|auth|credential|cookie|sig))"
+_PAIR = re.compile(r"(?<![\w.-])([\"']?)((?=[\w.-]" + _N + r"?(?i:key|token|secret|pass|pw|auth|cred|cookie|sig))"
                    r"[A-Za-z_][\w.-]" + _N + r")\1(\s{0,8}[=:]\s{0,8})" + _VALUE)
 _SHELL_SAFE = re.compile(r"[\w@%+=:,./*-]+")
 
@@ -253,7 +253,7 @@ def _secret_of(orig: str, new: str) -> str:
     return orig
 
 
-def _redact_script(text: str, depth: int) -> str:
+def _redact_script(text: str, depth: int, base: frozenset[str] = frozenset()) -> str:
     """Redact a shell/code string: tokenise it (with source spans), redact the tokens as argv (tool options,
     sensitive flags, nested strings one level deeper) and rewrite the changed spans, then apply the text rules.
     The result must be a fixed point of redaction (checked once); if not, every changed token span is masked."""
@@ -261,7 +261,7 @@ def _redact_script(text: str, depth: int) -> str:
     if len(toks) < 2:
         return redact_text(text, depth)
     values = [v for v, _, _ in toks]
-    red = redact_argv(values, _depth=depth + 1)
+    red = redact_argv(values, _depth=depth + 1, _base=base)
     text_only = [redact_text(v, depth + 1) == r for v, r in zip(values, red)]
 
     def rewrite(structural_only: bool) -> str:
@@ -280,7 +280,7 @@ def _redact_script(text: str, depth: int) -> str:
 
     result = rewrite(True)
     check = [v for v, _, _ in shell_tokens(result)]
-    if redact_argv(check, _depth=MAX_SCRIPT_DEPTH, _check=True) != check:
+    if redact_argv(check, _depth=MAX_SCRIPT_DEPTH, _check=True, _base=base) != check:
         result = rewrite(False)
     return result
 
@@ -289,69 +289,175 @@ def _looks_like_long_flag(arg: str) -> bool:
     return arg.startswith("--") and len(arg) > 2
 
 
-def redact_argv(argv: list[str], _depth: int = 0, _check: bool = False) -> list[str]:
-    """Redact an argv. `_check` (fixed-point check) treats nested scripts as text instead of masking them."""
-    out: list[str] = []
-    pending = False   # previous arg was a sensitive option without "=": this arg is its value
-    tool = ""
-    cmd_pos = True    # this word names the command (start, after ; | && ( { do then … or a prefix command)
-    prefix: list | None = None  # [value_opts, operands_left, expecting_value] while skipping a prefix command's args
-    ht = {"b": False, "n": False, "pos": 0}  # htpasswd -b FILE USER PASSWORD / -nb USER PASSWORD
-    for idx, arg in enumerate(argv):
+_WRAPPERS = frozenset({"docker", "podman", "nerdctl", "kubectl", "oc", "crictl", "ctr", "ssh", "su", "runuser",
+                       "nsenter", "chroot", "unshare", "systemd-run", "machinectl", "lxc", "incus", "flatpak-spawn"})
+_CMD_VALUE_OPTS = frozenset({"--entrypoint"})  # docker run --entrypoint redis-cli: this option's value IS a command
+_TOOL_SCRIPT_FLAGS = {"lftp": {"-e", "-c"}}     # lftp -e 'open -u user,S h': the value is a script for the tool
+# tools with their own secret options: once one is active, later words never switch the context
+_OWN_FLAG_TOOLS = frozenset(set(_TOOL_VALUE_FLAGS) | set(_TOOL_GLUED) | set(_TOOL_EQ_FLAGS) | {"htpasswd"}
+                            | set(_TOOL_SCRIPT_FLAGS))
+
+
+class _Argv:
+    """Walks one argv (or a script's words), tracking which tool(s) the current simple command runs.
+
+    The tool is taken at command positions only (start, after shell operators/keywords, after a prefix command and
+    its options/operands). Mid-command, a known tool's basename switches context only from a wrapper or an unknown
+    tool (docker exec c redis-cli, ssh host mysql, kubectl exec p -- redis-cli), never from a tool with its own secret
+    options, never for an option value (the word after an option, or after "="); a switch keeps the union of rules."""
+
+    def __init__(self, depth: int, check: bool, base: frozenset[str] = frozenset()):
+        self.depth, self.check, self.base = depth, check, base
+        self.out: list[str] = []
+        self.mask_rest = False
+        self.after_opt = False   # previous word was an option: this word may be its value
+        self.cmd_value = False   # previous word was an option whose value is a command (--entrypoint)
+        self.prev = ""
+        self._reset()
+
+    def _reset(self) -> None:
+        self.pending = False     # previous arg was a sensitive option without "=": this arg is its value
+        self.tools: set[str] = set(self.base)
+        self.cmd_pos = True      # this word names the command
+        self.prefix: list | None = None  # [value_opts, operands_left, expecting, name] while skipping a prefix
+        self.ht = {"b": False, "n": False, "pos": 0}  # htpasswd -b FILE USER PASSWORD / -nb USER PASSWORD
+        self.kv_mode = False     # aws configure set / git config / npm config set: NAME VALUE positionals
+        self.script_next = False  # previous arg was lftp -e/-c: this arg is a script for the tool
+
+    def _state(self) -> dict:
+        return {k: getattr(self, k) for k in ("pending", "tools", "cmd_pos", "prefix", "ht", "kv_mode",
+                                              "script_next", "mask_rest")}
+
+    def _set_tool(self, base: str, add: bool) -> None:
+        self.tools = (self.tools | {base}) if add else (set(self.base) | {base})
+        self.ht = {"b": False, "n": False, "pos": 0}
+
+    def _can_switch(self, arg: str, base: str) -> bool:
+        if base not in _KNOWN_TOOLS or base in self.tools or self.tools & _OWN_FLAG_TOOLS:
+            return False
+        if arg.startswith("-") or "=" in arg:
+            return False
+        if self.cmd_value:
+            return True
+        return not (self.after_opt and self.tools & _WRAPPERS)  # docker run --name mongo: an option value
+
+    def feed(self, arg: str) -> None:
+        self._feed(arg)
+        self.cmd_value = arg in _CMD_VALUE_OPTS
+        self.after_opt = len(arg) > 1 and arg[0] == "-" and arg != "--" and "=" not in arg
+        self.prev = arg
+
+    def _split(self, arg: str, lead: str) -> None:
+        """env -S 'cmd args' (and shebang "-S cmd args"): the value is split into words and run as a command;
+        the words' end state (tool, pending option) carries over to the following arguments."""
+        value = arg[len(lead):]
+        if self.depth >= MAX_SCRIPT_DEPTH:
+            self.out.append(lead + MASK)
+            self.mask_rest = True
+            return
+        sub = _Argv(self.depth + 1, self.check, self.base)
+        for v, _, _ in shell_tokens(value):
+            sub.feed(v)
+        text = redact_text(value, MAX_SCRIPT_DEPTH) if self.check else _redact_script(value, self.depth, self.base)
+        self.out.append(lead + text)
+        for k, v in sub._state().items():
+            setattr(self, k, v)
+
+    def _feed(self, arg: str) -> None:
+        out, depth = self.out, self.depth
+        if self.mask_rest:
+            out.append(MASK)
+            return
         if arg and all(c in _SHELL_OP_CHARS for c in arg):
             out.append(arg)
-            pending, cmd_pos, prefix, tool = False, True, None, ""
-            continue
-        if prefix is not None:
-            value_opts, operands, expecting = prefix
+            self._reset()
+            return
+        if self.prefix is not None:
+            value_opts, operands, expecting, name = self.prefix
+            if expecting == "split":
+                self._split(arg, "")
+                return
             if expecting:
-                prefix[2] = False
-                out.append(redact_text(arg, _depth))
-                continue
+                self.prefix[2] = False
+                out.append(redact_text(arg, depth))
+                return
             if arg == "--":
                 out.append(arg)
-                continue
+                return
             if len(arg) > 1 and arg[0] == "-":
-                prefix[2] = arg.split("=", 1)[0] in value_opts and "=" not in arg
-                out.append(redact_text(arg, _depth))
-                continue
+                if name == "env" and arg in ("-S", "--split-string"):
+                    self.prefix[2] = "split"
+                    out.append(arg)
+                    return
+                if name == "env" and (arg.startswith("--split-string=") or (arg.startswith("-S") and len(arg) > 2)):
+                    self._split(arg, "--split-string=" if arg.startswith("--") else "-S")
+                    return
+                self.prefix[2] = arg.split("=", 1)[0] in value_opts and "=" not in arg
+                out.append(redact_text(arg, depth))
+                return
             if _ASSIGNMENT.match(arg):  # env VAR=value
-                out.append(redact_text(arg, _depth))
-                continue
+                out.append(redact_text(arg, depth))
+                return
             if operands > 0:  # timeout DURATION, chrt PRIORITY, taskset MASK
-                prefix[1] -= 1
-                out.append(redact_text(arg, _depth))
-                continue
-            prefix, cmd_pos = None, True
+                self.prefix[1] -= 1
+                out.append(redact_text(arg, depth))
+                return
+            self.prefix, self.cmd_pos = None, True
+        if self.script_next:
+            self.script_next = False
+            if self.check:
+                out.append(redact_text(arg, MAX_SCRIPT_DEPTH))
+            elif depth >= MAX_SCRIPT_DEPTH:
+                out.append(MASK)
+            else:
+                out.append(_redact_script(arg, depth, frozenset(self.base | (self.tools & set(_TOOL_SCRIPT_FLAGS)))))
+            return
         base = os.path.basename(arg)
-        if cmd_pos and not pending:
+        if self.cmd_pos and not self.pending:
             if arg in _SHELL_KEYWORDS:
                 out.append(arg)
-                continue
+                return
             if _ASSIGNMENT.match(arg):  # VAR=value before the command: still in command position
-                out.append(redact_text(arg, _depth))
-                continue
-            cmd_pos = False
+                out.append(redact_text(arg, depth))
+                return
+            self.cmd_pos = False
             if base in _PREFIX_COMMANDS:
                 spec = _PREFIX_COMMANDS[base]
-                prefix = [spec[0], spec[1], False]
+                self.prefix = [spec[0], spec[1], False, base]
                 out.append(arg)
-                continue
+                return
             if not arg.startswith("-"):
-                tool, ht = base, {"b": False, "n": False, "pos": 0}
+                self._set_tool(base, add=False)
                 if not any(c.isspace() for c in arg):
-                    out.append(redact_text(arg, _depth))
-                    continue
-        elif base in _KNOWN_TOOLS and base != tool and not pending:  # e.g. docker exec c /usr/bin/redis-cli
-            tool, ht = base, {"b": False, "n": False, "pos": 0}
-        if tool in _LOGIN_TOOLS and arg == "login":
-            tool = "docker-login"
-        if pending:
-            pending = False
+                    out.append(redact_text(arg, depth))
+                    return
+        elif not self.pending and self._can_switch(arg, base):
+            self._set_tool(base, add=True)
+            if not any(c.isspace() for c in arg):
+                out.append(redact_text(arg, depth))
+                return
+        if arg.startswith("--entrypoint=") and self.tools & _WRAPPERS:
+            ep = os.path.basename(arg.split("=", 1)[1])
+            if ep in _KNOWN_TOOLS and not self.tools & _OWN_FLAG_TOOLS:
+                self.tools.add(ep)
+        tools = self.tools
+        if tools & _LOGIN_TOOLS and arg == "login" and not (self.after_opt and tools & _WRAPPERS):
+            tools.add("docker-login")
+        if self.pending:
+            self.pending = False
             if not _looks_like_long_flag(arg):
                 out.append(MASK)
-                continue
-        if tool == "htpasswd" and idx:
+                return
+        if (arg == "set" and self.prev in ("configure", "config")) or (arg == "config" and "git" in tools):
+            self.kv_mode = True
+            out.append(arg)
+            return
+        if self.kv_mode and not arg.startswith("-") and "=" not in arg and is_sensitive_name(arg):
+            out.append(redact_text(arg, depth))
+            self.pending = True  # aws configure set aws_secret_access_key S, git config user.password S
+            return
+        if "htpasswd" in tools:
+            ht = self.ht
             if re.fullmatch(r"-[A-Za-z]{1,8}", arg):
                 ht["b"] |= "b" in arg
                 ht["n"] |= "n" in arg
@@ -359,39 +465,55 @@ def redact_argv(argv: list[str], _depth: int = 0, _check: bool = False) -> list[
                 ht["pos"] += 1
                 if ht["b"] and ht["pos"] >= (2 if ht["n"] else 3):
                     out.append(MASK)
-                    continue
-        glued = next((g for g in _TOOL_GLUED.get(tool, ()) if arg.startswith(g) and len(arg) > len(g)), None)
+                    return
+        glued = next((g for t in tools for g in _TOOL_GLUED.get(t, ()) if arg.startswith(g) and len(arg) > len(g)),
+                     None)
         if glued and not arg.startswith("--"):
             out.append(glued + MASK)
-            continue
+            return
         m = _FLAG.match(arg)
         if m:
             flag = m.group(1) + m.group(2)
-            if flag in _TOOL_VALUE_FLAGS.get(tool, ()) and not m.group(3):
-                out.append(arg)
-                pending = True
-                continue
-            if is_sensitive_name(m.group(2)) or (m.group(3) == "=" and flag in _TOOL_EQ_FLAGS.get(tool, ())):
+            if not m.group(3):
+                if any(flag in _TOOL_SCRIPT_FLAGS.get(t, ()) for t in tools):
+                    out.append(arg)
+                    self.script_next = True
+                    return
+                if any(flag in _TOOL_VALUE_FLAGS.get(t, ()) for t in tools):
+                    out.append(arg)
+                    self.pending = True
+                    return
+            if is_sensitive_name(m.group(2)) or (
+                    m.group(3) == "=" and any(flag in _TOOL_EQ_FLAGS.get(t, ()) for t in tools)):
                 if m.group(3):
                     out.append(f"{flag}{m.group(3)}{MASK}")
                 else:
                     out.append(arg)
-                    pending = True
-                continue
+                    self.pending = True
+                return
         kv = _KV_ARG.match(arg)
         if kv and kv.group(2) == "=" and is_sensitive_name(kv.group(1)):
             out.append(kv.group(1) + "=" + MASK)  # LITELLM_MASTER_KEY=S (names of any length)
-            continue
+            return
         if any(c.isspace() for c in arg):
-            if _check:
+            if self.check:
                 out.append(redact_text(arg, MAX_SCRIPT_DEPTH))
-            elif _depth < MAX_SCRIPT_DEPTH:
-                out.append(_redact_script(arg, _depth))
+            elif depth < MAX_SCRIPT_DEPTH:
+                out.append(_redact_script(arg, depth))
             else:
                 out.append(MASK)  # nested deeper than MAX_SCRIPT_DEPTH: fail closed
         else:
-            out.append(redact_text(arg, _depth))
-    return out
+            out.append(redact_text(arg, depth))
+
+
+def redact_argv(argv: list[str], _depth: int = 0, _check: bool = False,
+                _base: frozenset[str] = frozenset()) -> list[str]:
+    """Redact an argv. `_check` (fixed-point check) treats nested scripts as text instead of masking them;
+    `_base` are tools whose rules apply to every command (an lftp -e script)."""
+    w = _Argv(_depth, _check, _base)
+    for arg in argv:
+        w.feed(arg)
+    return w.out
 
 
 def _quote(arg: str) -> str:
@@ -416,7 +538,7 @@ def _cap_input(argv: list[str]) -> tuple[list[str], bool]:
             total += room
             continue
         out.append(arg)
-        total += len(arg)
+        total += len(arg) + 1  # an empty argument still costs a separator
     return out, cut
 
 

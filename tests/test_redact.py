@@ -371,7 +371,7 @@ def test_input_caps_fail_closed():
 SWEEP_UNITS = [".a", "a://", "x-a", ".-a", "a=", "-", "[", "('a',", 'token="', "'", '"', "\\", "a:", "a@", "Bearer ",
                "pass:", "x-key:", "{", "$(", "a ", "-a ", "--api-key ", "sh -c '", "hf_", "sk-", "eyJ", "%", "=", ":",
                "a]=", "['a']=", "os.environ['", "cookie:", "authorization: ", "a,", '"a",', "b'a',", "do ", "; ",
-               "sudo -u ", "env A=1 ", "timeout 1 "]
+               "sudo -u ", "env A=1 ", "timeout 1 ", "env -S ", "-S ", "set a_key ", "--creds ", "-e "]
 
 
 @pytest.mark.parametrize("unit", SWEEP_UNITS)
@@ -385,3 +385,107 @@ def test_repeated_unit_sweep_stays_fast(unit):
         t0 = time.perf_counter()
         fn()
         assert time.perf_counter() - t0 < 0.2, unit  # measured worst ~30 ms on the DGX
+
+
+# Fix round 4: a later argument whose basename is a known tool (an option value, a path, --flag=/path) must not
+# drop the current tool's rules; context only switches at command positions or from wrappers (union, fail closed).
+ROUND4_CASES = {
+    "redis-cli -h mongo": ["redis-cli", "-h", "mongo", "-a", S],
+    "redis-cli -h mongo sh -c": ["sh", "-c", "redis-cli -h mongo -a " + S],
+    "redis-cli -h docker": ["redis-cli", "-h", "docker", "-a", S],
+    "mysql -h docker": ["mysql", "-h", "docker", "-p" + S],
+    "mysql --socket=/run/docker": ["mysql", "--socket=/run/docker", "-p" + S],
+    "curl -o /tmp/helm": ["curl", "-o", "/tmp/helm", "-u", "u:" + S, "https://x"],
+    "openssl -in /x/mongo": ["openssl", "enc", "-in", "/x/mongo", "-k", S],
+    "sh -c mysql -h docker": ["sh", "-c", "mysql -h docker -p" + S + " db"],
+    "sh -c curl -o helm": ["sh", "-c", "curl -o /tmp/helm -u u:" + S + " https://x"],
+    # wrappers still switch (and keep their own rules)
+    "docker exec redis-cli": ["docker", "exec", "-it", "c", "redis-cli", "-a", S],
+    "kubectl exec --": ["kubectl", "exec", "-it", "pod", "-c", "ctr", "--", "redis-cli", "-a", S],
+    "ssh host": ["ssh", "-t", "host", "mysql", "-p" + S],
+    "su -c": ["su", "-", "redis", "-c", "redis-cli -a " + S],
+    "docker --entrypoint": ["docker", "run", "--rm", "--entrypoint", "redis-cli", "redis", "-a", S],
+    "docker exec helm login": ["docker", "exec", "c", "helm", "login", "-p", S, "r"],
+    # creds
+    "skopeo --creds": ["skopeo", "copy", "--creds", "u:" + S, "docker://a", "docker://b"],
+    "skopeo --src-creds=": ["skopeo", "copy", "--src-creds=u:" + S, "docker://a", "docker://b"],
+    "skopeo --dest-creds": ["skopeo", "copy", "--dest-creds", "u:" + S, "docker://a", "docker://b"],
+    "podman --creds=": ["podman", "pull", "--creds=u:" + S, "img"],
+    # env -S / shebang
+    "env -S": ["env", "-S", "redis-cli -a " + S],
+    "env -S split value": ["env", "-S", "redis-cli -a", S],
+    "shebang env -S": ["/usr/bin/env", "-S redis-cli -a " + S, "/x/script"],
+    "env --split-string=": ["env", "--split-string=mysql -p" + S],
+    "sh -c env -S": ["sh", "-c", "env -S 'redis-cli -a " + S + "'"],
+    # lftp script
+    "lftp -e": ["lftp", "-e", "open -u user," + S + " h"],
+    "lftp -c": ["lftp", "-c", "open -u user," + S + " h; ls"],
+    # positional secret after a sensitive key name
+    "aws configure set": ["aws", "configure", "set", "aws_secret_access_key", S],
+    "aws configure set --profile": ["aws", "configure", "set", "aws_secret_access_key", S, "--profile", "p"],
+    "git config": ["git", "config", "--global", "user.password", S],
+    "npm config set": ["npm", "config", "set", "//registry.example.com/:_authToken", S],
+}
+
+
+@pytest.mark.parametrize("name", list(ROUND4_CASES))
+def test_round4_leak_cases(name):
+    out = format_command(ROUND4_CASES[name])[0]
+    assert S not in out and "value7" not in out and "Zq9SEC" not in out, out
+
+
+def test_round4_keeps_structure():
+    f = lambda argv: format_command(argv)[0]  # noqa: E731
+    assert f(["redis-cli", "-h", "mongo", "-a", S, "-p", "6379"]) == "redis-cli -h mongo -a *** -p 6379"
+    assert f(["mysql", "--socket=/run/docker", "-p" + S, "db"]) == "mysql --socket=/run/docker -p*** db"
+    # an option value naming a tool is not a command position: mongo's -p must not apply here
+    assert f(["docker", "run", "--name", "mongo", "-p", "8080:80", "img"]) == "docker run --name mongo -p 8080:80 img"
+    assert f(["aws", "configure", "set", "region", "us-east-1"]) == "aws configure set region us-east-1"
+    assert f(["aws", "configure", "set", "aws_secret_access_key", S]) == "aws configure set aws_secret_access_key ***"
+    assert f(["git", "config", "user.name", "bob"]) == "git config user.name bob"
+    assert f(["skopeo", "copy", "--src-creds=u:" + S, "a", "b"]) == "skopeo copy --src-creds=*** a b"
+    assert f(["lftp", "-e", "open -u user," + S + " h"]) == "lftp -e 'open -u *** h'"
+    assert f(["env", "-S", "redis-cli -a", S]) == "env -S 'redis-cli -a' ***"
+
+
+def test_round4_empty_args_count_against_the_input_cap():
+    from dgxmm.memory.redact import MAX_INPUT_CHARS
+    argv = ["x"] + [""] * (MAX_INPUT_CHARS + 10)
+    out, truncated = format_command(argv)
+    assert truncated
+    from dgxmm.memory.redact import _cap_input
+    assert len(_cap_input(argv)[0]) <= MAX_INPUT_CHARS + 1
+
+
+def test_round4_empty_args_stay_fast():
+    import time
+    t0 = time.perf_counter()
+    format_command(["x"] + [""] * 1_000_000)
+    assert time.perf_counter() - t0 < 0.2
+
+
+def test_round4_wrapper_switch_keeps_union_and_stops_switching():
+    f = lambda argv: format_command(argv)[0]  # noqa: E731
+    assert f(["docker", "exec", "c", "redis-cli", "-h", "mongo", "-a", S]) == "docker exec c redis-cli -h mongo -a ***"
+    assert f(["docker", "exec", "c", "mysql", "-h", "docker", "-p" + S]) == "docker exec c mysql -h docker -p***"
+    assert f(["docker", "run", "--entrypoint=/usr/bin/redis-cli", "redis", "-a", S]) == \
+        "docker run --entrypoint=/usr/bin/redis-cli redis -a ***"
+    assert f(["ssh", "h", "htpasswd", "-b", "/etc/h", "admin", S]) == "ssh h htpasswd -b /etc/h admin ***"
+    assert f(["sh", "-c", "redis-cli -h mongo -a " + S + "; mongo -p " + S]) == "sh -c 'redis-cli -h mongo -a ***; mongo -p ***'"
+
+
+@pytest.mark.parametrize("argv", [["env"] + ["-S", "env -S " * 300] * 2, ["sh", "-c", "env -S 'env -S \"env -S x\"' " * 200],
+                                  ["env", "-S" + "env -S " * 1000]])
+def test_round4_env_split_is_bounded(argv):
+    import time
+    t0 = time.perf_counter()
+    out, _ = format_command(argv)
+    assert time.perf_counter() - t0 < 0.2
+
+
+def test_round4_env_split_beyond_depth_masks_the_rest():
+    inner = "redis-cli -a"
+    for _ in range(5):
+        inner = "env -S " + shlex.quote(inner)
+    out = format_command(["sh", "-c", inner + " " + S])[0]
+    assert S not in out
