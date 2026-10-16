@@ -46,6 +46,22 @@ class FakeContainer:
         return self.log_text.encode()
 
 
+class FakeHelperContainer:
+    """A short-lived auto-removed helper (dgxmm.helper=true); never appears in containers.list()."""
+
+    def __init__(self, client):
+        self.client, self.id = client, f"{next(_ids):064x}"
+
+    def wait(self, timeout=None, condition=None):
+        self.client.helper_waits.append(timeout)
+        if self.client.helper_wait_error:
+            raise self.client.helper_wait_error
+        return {"StatusCode": self.client.helper_exit_code}
+
+    def remove(self, force=False):
+        self.client.helper_killed += 1
+
+
 class FakeContainers:
     def __init__(self, client):
         self.client = client
@@ -78,6 +94,15 @@ class FakeContainers:
 
     def run(self, image, command=None, name=None, environment=None, labels=None, network=None, volumes=None,
             ports=None, entrypoint=None, remove=False, **kw):
+        if (labels or {}).get("dgxmm.helper") == "true":
+            call = dict(image=image, command=command, name=name, environment=environment, labels=labels,
+                        network=network, volumes=volumes, ports=ports, entrypoint=entrypoint, remove=remove, **kw)
+            self.client.helper_runs.append(call)
+            if self.client.fail_helper:
+                raise docker.errors.ImageNotFound("no such image")
+            if self.client.helper_action:
+                self.client.helper_action(call)
+            return FakeHelperContainer(self.client)
         self.client.run_calls.append(dict(image=image, command=command, name=name, environment=environment,
                                           labels=labels, network=network, volumes=volumes, ports=ports,
                                           entrypoint=entrypoint, remove=remove, **kw))
@@ -109,6 +134,13 @@ class FakeDockerClient:
         self.always_fail_get = False
         self.skip_gets = 0
         self.exit_on_start: dict[str, int] = {}
+        self.helper_runs: list[dict] = []      # delete-helper containers (dgxmm.helper=true)
+        self.helper_action = None              # callable(call) simulating the helper's effect
+        self.fail_helper = False
+        self.helper_exit_code = 0
+        self.helper_wait_error: Exception | None = None
+        self.helper_waits: list = []
+        self.helper_killed = 0
 
     def add_unmanaged(self, name, image="vllm/vllm-openai:x", command=None, labels=None, ports=(), status="running",
                       mounts=(), networks=("gateway",), env=None):
