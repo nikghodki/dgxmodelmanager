@@ -13,6 +13,7 @@ describe("buildCommands", () => {
     const c = buildCommands({ isAdmin: false, deployments, artifacts });
     expect(labels(c)).toContain("Open qwen");
     expect(labels(c)).not.toContain("Users");
+    expect(labels(c)).not.toContain("LiteLLM");
     expect(labels(c)).not.toContain("Deploy a model");
     expect(c.some((x) => x.action.type === "deployment")).toBe(false);
     expect(c.some((x) => x.group === "Models")).toBe(false);
@@ -21,7 +22,8 @@ describe("buildCommands", () => {
   it("gives admins state-appropriate deployment actions and deployable models", () => {
     const c = buildCommands({ isAdmin: true, deployments, artifacts });
     const l = labels(c);
-    expect(l).toEqual(expect.arrayContaining(["Users", "Audit log", "Deploy a model", "Sleep qwen", "Stop qwen", "Wake coder", "Stop coder"]));
+    expect(l).toEqual(expect.arrayContaining(["Users", "Audit log", "LiteLLM", "Deploy a model", "Sleep qwen", "Stop qwen", "Wake coder", "Stop coder"]));
+    expect(c.find((x) => x.label === "LiteLLM")!.keywords).toMatch(/virtual keys/);
     expect(l).not.toContain("Wake qwen");
     expect(l).not.toContain("Stop old");
     expect(c.find((x) => x.label === "Stop qwen")!.destructive).toBe(true);

@@ -6,6 +6,7 @@ import { api } from "@/api";
 import { useAuth, useIsAdmin } from "@/auth";
 import { CommandDialog, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList } from "@/components/ui/command";
 import { useActionMutation } from "@/hooks/use-action-mutation";
+import { nameFixHref, takenHolder } from "@/lib/litellm";
 import type { Artifact, Deployment } from "@/types";
 import { buildCommands, type CommandDef } from "./commands";
 import { ConfirmDialog } from "./confirm-dialog";
@@ -24,6 +25,10 @@ export function CommandPalette({ open, onOpenChange }: { open: boolean; onOpenCh
   const op = useActionMutation(({ id, op }: { id: number; op: string }) => api(`/deployments/${id}/${op}`, { method: "POST" }), {
     success: (_d, v) => `${v.op[0].toUpperCase()}${v.op.slice(1)} requested`,
     invalidate: [["deployments"]],
+    errorAction: (err, v) => {
+      const d = deps.data?.find((x) => x.id === v.id);
+      return !!d && !!takenHolder(err) && { label: "Set model name", onClick: () => nav(nameFixHref(d)) };
+    },
   });
   const commands = useMemo(
     () => buildCommands({ isAdmin, deployments: deps.data ?? [], artifacts: inv.data ?? [] }),

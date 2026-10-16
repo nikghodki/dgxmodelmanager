@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter } from "react-router-dom";
 import { TooltipProvider } from "@/components/ui/tooltip";
@@ -21,5 +22,31 @@ describe("DeploymentsTable", () => {
     expect(cell.className).toMatch(/truncate/);
     expect(screen.getByText("Ready")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /Actions for small/ })).toBeInTheDocument();
+  });
+
+  it("shows the LiteLLM model name and its registration status", () => {
+    const qc = new QueryClient();
+    qc.setQueryData(["live", 1], []);
+    render(
+      <QueryClientProvider client={qc}><MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}><TooltipProvider>
+        <DeploymentsTable isAdmin={false} onSwitch={vi.fn()} onReconfigure={vi.fn()}
+          deployments={[{ id: 1, name: "small", engine: "vllm", model_ref: "org/m", state: "ready", reserved_bytes: 1, actual_bytes: 1, litellm_status: "pending", model_name: "team-chat", served_name: "small", alias: "team-chat", sleep_capable: false, last_error: null } as any]} />
+      </TooltipProvider></MemoryRouter></QueryClientProvider>,
+    );
+    expect(screen.getByText("team-chat")).toBeInTheDocument();
+    expect(screen.getByText("Pending")).toBeInTheDocument();
+  });
+
+  it("explains a LiteLLM registration error in a tooltip", async () => {
+    const qc = new QueryClient();
+    qc.setQueryData(["live", 1], []);
+    render(
+      <QueryClientProvider client={qc}><MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}><TooltipProvider delayDuration={0}>
+        <DeploymentsTable isAdmin={false} onSwitch={vi.fn()} onReconfigure={vi.fn()}
+          deployments={[{ id: 1, name: "dup", engine: "vllm", model_ref: "org/m", state: "ready", reserved_bytes: 1, actual_bytes: 1, litellm_status: "error", model_name: "chat", served_name: "chat", alias: null, sleep_capable: false, last_error: null } as any]} />
+      </TooltipProvider></MemoryRouter></QueryClientProvider>,
+    );
+    await userEvent.hover(screen.getByText("Error"));
+    expect((await screen.findAllByText(/same model name/)).length).toBeGreaterThan(0);
   });
 });
