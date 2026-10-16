@@ -111,6 +111,14 @@ class DownloadService:
             s.add(row)
             s.flush()
             dl_id = row.id
+        # Re-check AFTER the queued row exists (the deleter publishes markers, then re-reads downloads):
+        # either it sees our row or we see its markers.
+        if self.delete_guard is not None and self.delete_guard(repo_id):
+            with self.db.session() as s:
+                row = s.get(Download, dl_id)
+                if row is not None:
+                    s.delete(row)
+            raise DownloadError("model_being_deleted", f"{repo_id} is being deleted from disk; try again shortly", 409)
         self._sizes[dl_id] = {f.name: f.size for f in files}
         return self.view(dl_id)
 
