@@ -5,6 +5,7 @@ import { BrowserRouter, Route, Routes } from "react-router-dom";
 import "./index.css";
 import { AuthProvider, RequireAuth } from "./auth";
 import { Layout } from "./components/Layout";
+import { Audit } from "./pages/Audit";
 import { ChangePassword } from "./pages/ChangePassword";
 import { Dashboard } from "./pages/Dashboard";
 import { DeploymentDetail } from "./pages/DeploymentDetail";
@@ -29,6 +30,7 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
               <Route path="/deploy" element={<DeployWizard />} />
               <Route path="/deployments/:id" element={<DeploymentDetail />} />
               <Route path="/users" element={<Users />} />
+              <Route path="/audit" element={<Audit />} />
             </Route>
           </Routes>
         </AuthProvider>

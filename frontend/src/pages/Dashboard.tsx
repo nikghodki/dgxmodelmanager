@@ -1,11 +1,13 @@
+import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 import { api } from "../api";
 import { useIsAdmin } from "../auth";
 import { MemoryBar } from "../components/MemoryBar";
+import { SwitchDialog } from "../components/SwitchDialog";
 import { Badge, Button, Card, ErrorBox, Stat, Table } from "../components/ui";
 import { fmtBytes, fmtNum, fmtPct, stateTone } from "../format";
-import type { Deployment, HostInfo } from "../types";
+import { type Deployment, type HostInfo } from "../types";
 
 function LiveCell({ id, field, fmt }: { id: number; field: string; fmt: (v: any) => string }) {
   const q = useQuery<any[]>({ queryKey: ["live", id], queryFn: () => Promise.resolve([]), staleTime: Infinity });
@@ -16,6 +18,7 @@ function LiveCell({ id, field, fmt }: { id: number; field: string; fmt: (v: any)
 export function Dashboard() {
   const admin = useIsAdmin();
   const qc = useQueryClient();
+  const [dialog, setDialog] = useState<Deployment | null>(null);
   const host = useQuery({ queryKey: ["host"], queryFn: () => api<HostInfo>("/host") });
   const deps = useQuery({ queryKey: ["deployments"], queryFn: () => api<Deployment[]>("/deployments") });
   const act = useMutation({
@@ -57,6 +60,9 @@ export function Dashboard() {
               <td className="td"><LiveCell id={d.id} field="waiting" fmt={(v) => (v == null ? "—" : String(v))} /></td>
               <td className="td"><Badge tone={d.litellm_status === "synced" ? "green" : d.litellm_status === "error" ? "red" : "slate"}>{d.litellm_status}</Badge></td>
               <td className="td whitespace-nowrap space-x-1">
+                {admin && d.state === "ready" && d.sleep_capable && <Button onClick={() => act.mutate({ id: d.id, action: "sleep" })}>Sleep</Button>}
+                {admin && d.state === "sleeping" && <Button onClick={() => act.mutate({ id: d.id, action: "wake" })}>Wake</Button>}
+                {admin && ["ready", "sleeping"].includes(d.state) && <Button onClick={() => setDialog(d)}>Switch…</Button>}
                 {admin && ["ready", "sleeping", "starting", "loading", "unknown"].includes(d.state) && (
                   <Button variant="danger" onClick={() => confirm(`Stop ${d.name}?`) && act.mutate({ id: d.id, action: "stop" })}>Stop</Button>
                 )}
@@ -69,6 +75,8 @@ export function Dashboard() {
         </Table>
         {deps.data?.length === 0 && <p className="text-sm text-slate-500">Nothing deployed yet.</p>}
       </Card>
+      {dialog && <SwitchDialog mode="switch" deployment={dialog} onClose={() => setDialog(null)} />}
+      <AdoptCard />
       {host.data && host.data.external_top.length > 0 && (
         <Card title="Largest external memory users (not managed; never touched)">
           <Table head={["PID", "Process", "RSS", "GPU", "Command"]}>
@@ -83,5 +91,30 @@ export function Dashboard() {
         </Card>
       )}
     </div>
+  );
+}
+
+function AdoptCard() {
+  const admin = useIsAdmin();
+  const qc = useQueryClient();
+  const rows = useQuery({ queryKey: ["adoptable"], queryFn: () => api<any[]>("/containers/adoptable") });
+  const adopt = useMutation({
+    mutationFn: (c: { name: string }) => api(`/containers/${encodeURIComponent(c.name)}/adopt`, { method: "POST", body: { name: c.name.replace(/[^a-z0-9-]/g, "-").replace(/^dmm-/, "").slice(0, 40) } }),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ["adoptable"] }); qc.invalidateQueries({ queryKey: ["deployments"] }); },
+  });
+  if (!rows.data?.length) return null;
+  return (
+    <Card title="vLLM containers not managed by DGXMM">
+      <ErrorBox error={adopt.error} />
+      <Table head={["Container", "Status", "Image", ""]}>
+        {rows.data.map((c) => (
+          <tr key={c.id}>
+            <td className="td font-mono">{c.name}</td><td className="td">{c.status}</td><td className="td text-xs">{c.image}</td>
+            <td className="td">{c.adopted_as ? <Badge tone="green">adopted as {c.adopted_as}</Badge> : admin && <Button onClick={() => adopt.mutate(c)}>Adopt settings</Button>}</td>
+          </tr>
+        ))}
+      </Table>
+      <p className="mt-2 text-xs text-slate-500">Adopting copies the container's settings into a stopped DGXMM deployment. The original container is left as it is; stop it before starting the adopted one.</p>
+    </Card>
   );
 }
