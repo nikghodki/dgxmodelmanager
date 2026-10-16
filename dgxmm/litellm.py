@@ -7,6 +7,7 @@ apply without a restart. The master key is never logged, returned or put into er
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import re
 import time
@@ -27,7 +28,7 @@ _NO_DB_RE = re.compile(r"no (connected )?(db|database)|(db|database) (is )?not c
                        re.I)
 _SK_RE = re.compile(r"sk-[A-Za-z0-9_.\-]{2,}")
 _HEX_RE = re.compile(r"\b[0-9a-fA-F]{40,}\b")
-VERSION_TTL_S = 600.0
+NOT_CONFIGURED_MESSAGE = "no LiteLLM master key is set; add one in the LiteLLM settings or the secret file"
 UNRESTRICTED = "all-proxy-models"
 
 
@@ -70,9 +71,22 @@ def _error_message(r: httpx.Response) -> str:
 
 
 class LiteLLMClient:
-    def __init__(self, http: httpx.AsyncClient, config: Callable[[], LiteLLMConfig]):
-        self.http, self._config = http, config
+    STATUS_TTL_S = 15.0       # cached connection status (GET /integrations/litellm, viewers included)
+    DB_TTL_S = 15.0           # cached "does LiteLLM have a DB" answer used before key operations
+    VERSION_TTL_S = 600.0
+    VERSION_NEG_TTL_S = 30.0  # failed version lookups are retried after this long
+    OPENAPI_MAX_BYTES = 4 * 1024 * 1024
+    probe_deadline_s = 4.0    # one overall deadline for a status probe
+
+    def __init__(self, http: httpx.AsyncClient, config: Callable[[], LiteLLMConfig],
+                 clock: Callable[[], float] = time.monotonic):
+        self.http, self._config, self.clock = http, config, clock
         self._versions: dict[str, tuple[float, str | None]] = {}
+        self._status: dict[str, tuple[float, dict]] = {}
+        self._db: dict[str, tuple[float, Any]] = {}
+        self._keys: dict[str, tuple[float, list[dict]]] = {}
+        self._status_lock = asyncio.Lock()
+        self._version_lock = asyncio.Lock()
 
     @classmethod
     def fixed(cls, base_url: str, key: str | None, http: httpx.AsyncClient) -> "LiteLLMClient":
@@ -83,13 +97,16 @@ class LiteLLMClient:
     def config(self) -> LiteLLMConfig:
         return self._config()
 
+    def _fresh(self, cache: dict, url: str, ttl: float):
+        hit = cache.get(url)
+        return hit[1] if hit is not None and self.clock() - hit[0] < ttl else None
+
     # ---------- transport ----------
     async def _request(self, method: str, path: str, *, cfg: LiteLLMConfig | None = None, auth: bool = True,
                        timeout: float = 15, **kw) -> httpx.Response:
         cfg = cfg or self.config()
         if auth and not cfg.master_key:
-            raise LiteLLMError(409, "litellm_not_configured",
-                               "no LiteLLM master key is set; add one in the LiteLLM settings or the secret file")
+            raise LiteLLMError(409, "litellm_not_configured", NOT_CONFIGURED_MESSAGE)
         headers = {"Authorization": f"Bearer {cfg.master_key}"} if auth else {}
         try:
             return await self.http.request(method, cfg.url + path, headers=headers, timeout=timeout, **kw)
@@ -112,19 +129,25 @@ class LiteLLMClient:
             return LiteLLMError(400, "litellm_rejected", f"LiteLLM rejected the request: {msg}")
         return LiteLLMError(502, "litellm_error", f"LiteLLM returned HTTP {r.status_code}: {msg}")
 
-    async def _json(self, method: str, path: str, **kw) -> Any:
+    async def _json(self, method: str, path: str, **kw) -> dict:
+        """Authenticated call that must return a JSON object (anything else is a mapped LiteLLMError)."""
         cfg = self.config()
         r = await self._request(method, path, cfg=cfg, **kw)
         if r.status_code >= 400:
             raise self._error(r, cfg)
         try:
-            return r.json()
+            j = r.json()
         except ValueError:
-            raise LiteLLMError(502, "litellm_error", f"LiteLLM returned a non-JSON response for {path}") from None
+            j = None
+        if not isinstance(j, dict):
+            raise LiteLLMError(502, "litellm_error", f"LiteLLM returned an unexpected response for {path}")
+        return j
 
     # ---------- models ----------
     async def list_models(self) -> list[dict]:
         data = (await self._json("GET", "/model/info", timeout=10)).get("data", [])
+        if not isinstance(data, list):
+            raise LiteLLMError(502, "litellm_error", "LiteLLM returned an unexpected model list")
         return [m for m in data if isinstance(m, dict)]
 
     async def list_dgxmm(self) -> list[dict]:
@@ -146,23 +169,58 @@ class LiteLLMClient:
             j = r.json()
         except ValueError:
             return {}
+        if isinstance(j, dict) and "db" in j:
+            self._db[cfg.url] = (self.clock(), j.get("db"))
         return j if isinstance(j, dict) else {}
+
+    async def _openapi_version(self, cfg: LiteLLMConfig, timeout: float) -> str | None:
+        """Read info.version from /openapi.json (streamed, capped at OPENAPI_MAX_BYTES)."""
+        buf = bytearray()
+        try:
+            async with self.http.stream("GET", cfg.url + "/openapi.json", timeout=timeout) as r:
+                if r.status_code != 200:
+                    return None
+                async for chunk in r.aiter_bytes():
+                    buf += chunk
+                    if len(buf) > self.OPENAPI_MAX_BYTES:
+                        return None
+            v = ((json.loads(bytes(buf)) or {}).get("info") or {}).get("version")
+            return str(v) if v else None
+        except (httpx.HTTPError, ValueError, AttributeError, TypeError):
+            return None
 
     async def _version(self, cfg: LiteLLMConfig, readiness: dict, timeout: float) -> str | None:
         if readiness.get("litellm_version"):
             return str(readiness["litellm_version"])
-        hit = self._versions.get(cfg.url)
-        if hit and time.monotonic() - hit[0] < VERSION_TTL_S:
-            return hit[1]
-        version = None
-        try:  # LiteLLM >= 1.7x no longer reports its version in /health/readiness; the OpenAPI document does
-            r = await self._request("GET", "/openapi.json", cfg=cfg, auth=False, timeout=timeout)
-            if r.status_code == 200:
-                version = ((r.json() or {}).get("info") or {}).get("version")
-        except (LiteLLMError, ValueError, AttributeError):
-            version = None
-        self._versions[cfg.url] = (time.monotonic(), version)
-        return version
+
+        def cached():
+            hit = self._versions.get(cfg.url)
+            if hit is None:
+                return False, None
+            ttl = self.VERSION_TTL_S if hit[1] else self.VERSION_NEG_TTL_S
+            return self.clock() - hit[0] < ttl, hit[1]
+
+        ok, v = cached()
+        if ok:
+            return v
+        async with self._version_lock:  # single flight: concurrent first lookups share one fetch
+            ok, v = cached()
+            if ok:
+                return v
+            # LiteLLM >= 1.7x no longer reports its version in /health/readiness; the OpenAPI document does
+            v = await self._openapi_version(cfg, timeout)
+            self._versions[cfg.url] = (self.clock(), v)
+            return v
+
+    async def _probe_into(self, out: dict, cfg: LiteLLMConfig, timeout: float) -> None:
+        live = await self._request("GET", "/health/liveliness", cfg=cfg, auth=False, timeout=timeout)
+        if live.status_code != 200 or "alive" not in live.text.lower():
+            out["error"] = f"{cfg.url} is not a LiteLLM endpoint (/health/liveliness answered HTTP {live.status_code})"
+            return
+        out["reachable"] = True
+        ready = await self._readiness(cfg, timeout)
+        out["db"] = ready.get("db")
+        out["version"] = await self._version(cfg, ready, timeout)
 
     async def probe(self, *, auth: bool = False, timeout: float = 5) -> dict:
         """Connection status. Never raises. With ``auth`` also checks the master key via /model/info."""
@@ -171,22 +229,17 @@ class LiteLLMClient:
         if auth:
             out.update(auth_ok=None, models=None)
         try:
-            live = await self._request("GET", "/health/liveliness", cfg=cfg, auth=False, timeout=timeout)
-            if live.status_code >= 400:
-                live = await self._request("GET", "/health/readiness", cfg=cfg, auth=False, timeout=timeout)
-            out["reachable"] = live.status_code < 500
-            if not out["reachable"]:
-                out["error"] = f"LiteLLM at {cfg.url} answered HTTP {live.status_code}"
-                return out
-            ready = await self._readiness(cfg, timeout)
-            out["db"] = ready.get("db")
-            out["version"] = await self._version(cfg, ready, timeout)
+            await asyncio.wait_for(self._probe_into(out, cfg, timeout), self.probe_deadline_s)
         except LiteLLMError as e:
             out["error"] = e.message
+        except asyncio.TimeoutError:
+            if not out["reachable"]:
+                out["error"] = f"timed out after {self.probe_deadline_s:g}s waiting for LiteLLM at {cfg.url}"
+        if not out["reachable"]:
             return out
         if auth:
             if not cfg.master_key:
-                out.update(auth_ok=False, error="no master key is set")
+                out.update(auth_ok=False, error=cfg.master_key_hint or "no master key is set")
                 return out
             try:
                 out["models"] = len(await self.list_models())
@@ -195,44 +248,81 @@ class LiteLLMClient:
                 out.update(auth_ok=False if e.code == "litellm_auth_failed" else None, error=e.message)
         return out
 
+    async def status(self, *, force: bool = False) -> dict:
+        """Unauthenticated connection status, cached STATUS_TTL_S per URL and fetched single-flight."""
+        url = self.config().url
+        if not force and (hit := self._fresh(self._status, url, self.STATUS_TTL_S)) is not None:
+            return dict(hit)
+        async with self._status_lock:
+            if not force and (hit := self._fresh(self._status, url, self.STATUS_TTL_S)) is not None:
+                return dict(hit)
+            out = await self.probe()
+            self._status[url] = (self.clock(), out)
+            return dict(out)
+
     # ---------- virtual keys (need LiteLLM's DB) ----------
     async def require_db(self) -> None:
         cfg = self.config()
         if not cfg.master_key:
-            raise LiteLLMError(409, "litellm_not_configured",
-                               "no LiteLLM master key is set; add one in the LiteLLM settings or the secret file")
-        db = (await self._readiness(cfg, 10)).get("db")
+            raise LiteLLMError(409, "litellm_not_configured", NOT_CONFIGURED_MESSAGE)
+        hit = self._db.get(cfg.url)
+        if hit is not None and self.clock() - hit[0] < self.DB_TTL_S:
+            db = hit[1]
+        else:
+            db = (await self._readiness(cfg, 10)).get("db")
         if db is not None and str(db).lower() != "connected":
             raise LiteLLMError(409, "litellm_no_db", NO_DB_MESSAGE)
 
-    async def key_list(self) -> list[dict]:
+    def invalidate_keys(self) -> None:
+        self._keys.clear()
+
+    async def key_list(self, max_age: float = 0) -> list[dict]:
+        """All keys (every page). ``max_age`` > 0 allows a cached copy that young."""
+        url = self.config().url
+        if max_age and (hit := self._fresh(self._keys, url, max_age)) is not None:
+            return list(hit)
         await self.require_db()
         out: list[dict] = []
         page = 1
         while page <= 100:
             j = await self._json("GET", "/key/list", params={"return_full_object": "true", "size": 100, "page": page})
-            out += [k for k in j.get("keys", []) if isinstance(k, dict)]
-            if page >= int(j.get("total_pages") or 1):
+            keys = j.get("keys", [])
+            out += [k for k in keys if isinstance(k, dict)] if isinstance(keys, list) else []
+            try:
+                pages = int(j.get("total_pages") or 1)
+            except (TypeError, ValueError):
+                pages = 1
+            if page >= pages:
                 break
             page += 1
-        return out
+        self._keys[url] = (self.clock(), out)
+        return list(out)
 
     async def key_generate(self, body: dict) -> dict:
         await self.require_db()
-        return await self._json("POST", "/key/generate", json=body)
+        try:
+            return await self._json("POST", "/key/generate", json=body)
+        finally:
+            self.invalidate_keys()
 
     async def key_update(self, token: str, changes: dict) -> dict:
         await self.require_db()
-        return await self._json("POST", "/key/update", json={**changes, "key": token})
+        try:
+            return await self._json("POST", "/key/update", json={**changes, "key": token})
+        finally:
+            self.invalidate_keys()
 
     async def key_info(self, token: str) -> dict:
         await self.require_db()
-        j = await self._json("GET", "/key/info", params={"key": token})
-        return {**(j.get("info") or {}), "token": token}
+        info = (await self._json("GET", "/key/info", params={"key": token})).get("info")
+        return {**(info if isinstance(info, dict) else {}), "token": token}
 
     async def key_delete(self, token: str) -> None:
         await self.require_db()
-        await self._json("POST", "/key/delete", json={"keys": [token]})
+        try:
+            await self._json("POST", "/key/delete", json={"keys": [token]})
+        finally:
+            self.invalidate_keys()
 
 
 class LiteLLMSync:
@@ -242,18 +332,33 @@ class LiteLLMSync:
         self._lock = asyncio.Lock()
         self.last: dict[str, Any] = {"ok": None, "status": None, "registered": 0, "removed": 0, "error": None,
                                      "code": None, "at": None}
+        self.conflicts: dict[int, str] = {}       # deployment id -> why it is not registered (name clash)
+        self.registrations: dict[int, str] = {}   # deployment id -> model name, as of the last successful sync
 
     def active(self) -> bool:
         return self.client is not None and self.client.config().active
 
     def desired(self) -> dict[tuple[str, str], tuple[str, str]]:
-        """(deployment id, model name) -> (api_base, served name). Exactly one entry per ready deployment."""
+        """(deployment id, model name) -> (api_base, served name). Exactly one entry per ready deployment, and
+        never two backends under one model name: the Deployer prevents that, but if it happens anyway the
+        oldest deployment keeps the name and the others are recorded in ``self.conflicts``."""
         want: dict[tuple[str, str], tuple[str, str]] = {}
-        for v in self.deployer.list_views():
+        owner: dict[str, dict] = {}
+        conflicts: dict[int, str] = {}
+        for v in sorted(self.deployer.list_views(), key=lambda v: v["id"]):
             if v["state"] != "ready" or not v["served_name"] or not v["port"]:
                 continue
+            name = v["alias"] or v["served_name"]
+            if name in owner:
+                conflicts[v["id"]] = (f"model name {name} is already registered for deployment {owner[name]['name']}; "
+                                      "give this deployment a different model name")
+                continue
+            owner[name] = v
             api_base = self.deployer.base_url(v["name"], v["port"]) + "/v1"
-            want[(str(v["id"]), v["alias"] or v["served_name"])] = (api_base, v["served_name"])
+            want[(str(v["id"]), name)] = (api_base, v["served_name"])
+        self.conflicts = conflicts
+        if conflicts:
+            log.warning("LiteLLM: %d deployment(s) not registered because of a model name clash", len(conflicts))
         return want
 
     def _set_status(self, ready_status: str) -> None:
@@ -261,6 +366,8 @@ class LiteLLMSync:
         with self.db.session() as s:
             for d in s.scalars(select(Deployment)):
                 status = ready_status if d.state == "ready" else ("disabled" if ready_status == "disabled" else "none")
+                if d.state == "ready" and ready_status == "synced" and d.id in self.conflicts:
+                    status = "error"
                 if d.litellm_status != status:
                     d.litellm_status = status
                     changed.append(d.id)
@@ -313,14 +420,17 @@ class LiteLLMSync:
             self.last = {"ok": False, "status": "pending", "registered": added, "removed": removed, "error": msg,
                          "code": code, "at": _now()}
             return False
+        self.registrations = {int(k[0]): k[1] for k in want}
         self._set_status("synced")
         self.last = {"ok": True, "status": "synced", "registered": added, "removed": removed, "error": None,
                      "code": None, "at": _now()}
         return True
 
-    async def is_registered(self, dep_id: int, model_name: str) -> bool:
-        return any(str(m["model_info"]["dgxmm_id"]) == str(dep_id) and m.get("model_name") == model_name
-                   for m in await self.client.list_dgxmm())
+    def is_registered(self, dep_id: int, model_name: str) -> bool | None:
+        """As of the last sync (no LiteLLM call); None (unknown) unless that sync succeeded."""
+        if not self.last["ok"] or self.last["status"] != "synced":
+            return None
+        return self.registrations.get(dep_id) == model_name
 
     def trigger(self) -> None:
         self._wake.set()
