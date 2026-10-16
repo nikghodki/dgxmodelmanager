@@ -153,3 +153,17 @@ def stack(settings, db, fake_hf_repo):
     deployer.budget = BudgetService(settings, probe, deployer.usage_rows)
     return SimpleNamespace(settings=settings, db=db, inv=inv, sdk=sdk, probe=probe, http=engines_http,
                            deployer=deployer, budget=deployer.budget, events=events)
+
+
+@pytest.fixture
+def api_stack(stack, settings, db):
+    """TestClient wired to the fake stack (no background loops)."""
+    from dgxmm.app import create_app
+    from dgxmm.engines.registry import build_engines
+    c = AppContext(settings=settings, db=db, events=stack.events, login_limiter=SlidingWindowLimiter(100, 60),
+                   inventory=stack.inv, budget=stack.budget, deployer=stack.deployer, docker=stack.deployer.docker,
+                   engines=stack.deployer.engines, probe=stack.probe)
+    with TestClient(create_app(c), base_url="http://testserver") as tc:
+        tc.stack = stack
+        tc.ctx = c
+        yield tc
