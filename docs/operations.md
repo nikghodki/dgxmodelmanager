@@ -5,6 +5,7 @@ checkout on the host, as the user that installed it.
 
 - [What the installer does](#what-the-installer-does)
 - [Upgrade](#upgrade)
+- [Upgrading an existing install](#upgrading-an-existing-install)
 - [Changing settings](#changing-settings)
 - [Backup and restore](#backup-and-restore)
 - [Uninstall](#uninstall)
@@ -12,6 +13,7 @@ checkout on the host, as the user that installed it.
 - [Health](#health)
 - [Freeing disk space](#freeing-disk-space)
 - [Troubleshooting](#troubleshooting)
+- [Known limitations](#known-limitations)
 - [Security hardening](#security-hardening)
 
 ## What the installer does
@@ -53,7 +55,12 @@ nothing. In order:
    password redacted) and fails.
 8. **Summary.** Prints the URLs: every LAN IPv4 address, `<hostname>.local` and `<hostname>`, or a
    loopback URL for `127.0.0.1` binds. On the very first start it also prints the generated `admin`
-   password once and saves it to `secrets/admin_password`.
+   password once and saves it to `secrets/admin_password`. On a loopback install without
+   `DGXMM_TRUSTED_PROXIES`, it prints a reverse-proxy hint with the Docker network's gateway address.
+9. **Bundled LiteLLM** (only with `--with-litellm`). Waits up to `DGXMM_LITELLM_HEALTH_TIMEOUT` seconds
+   for LiteLLM's `/health/liveliness`, then prints the single endpoint (`http://<host>:<port>/v1`) and
+   how to create API keys. If LiteLLM or its database does not start, it shows their redacted logs and
+   exits non-zero; DGXMM itself is already running at that point.
 
 Other commands: `./install.sh status`, `logs [-f]`, `upgrade` and `uninstall [--purge]`. The `Makefile`
 has the same targets (`make install`, `make status`, …).
@@ -75,14 +82,56 @@ changes into `docker-compose.override.yaml` (see [configuration](configuration.m
 run `git checkout -- docker-compose.yaml`, and upgrade again. New keys in `config.example.yaml` are not
 added to your `config.yaml`. They take their defaults until you add them.
 
+## Upgrading an existing install
+
+What changes when an install from before the weights, LiteLLM-gateway and processes release (see the
+[changelog](../CHANGELOG.md)) is upgraded with `./install.sh upgrade`. Nothing needs to be done by hand
+unless a point below applies to you.
+
+- **Database.** The new `app_settings` table, which holds the settings saved on the LiteLLM page, is
+  created automatically when DGXMM starts. There is no migration step. Until you save something on
+  the LiteLLM page, DGXMM keeps using `litellm_url` and `secrets/litellm_master_key` exactly as before.
+- **One LiteLLM entry per deployment.** Older versions registered a deployment with an alias twice:
+  under its served name and under the alias. The first sync after the upgrade deletes the served-name
+  entry and keeps the alias. Only entries DGXMM created (those with `model_info.dgxmm_id`) are changed;
+  models you added to LiteLLM yourself are never touched. Clients that called the served name of an
+  aliased deployment must switch to the model name shown on the deployment's **API access** card.
+- **Model names must be unique.** If two of your deployments share a model name (for example two
+  deployments of the same model without aliases), deploy, start, wake and rename are refused with
+  `409 model_name_taken`, naming the deployment that holds the name. If both are already ready, the
+  oldest keeps the registration and the other shows LiteLLM status `error`. To resolve it, give one of
+  them a different **Model name (LiteLLM)** on its LiteLLM tab (the error suggests
+  `<served name>-<deployment name>`), or with
+  `PATCH /api/deployments/{id}` and `{"alias": "<new name>"}`. Stopped deployments without an alias do
+  not hold their served name.
+- **New read-only mount.** `docker-compose.yaml` now mounts the host's `/etc/passwd` read-only at
+  `/host/etc/passwd`, only to show host user names on the Processes page (no other account file is
+  mounted). The upgrade recreates the container with it. If you replaced the volumes in a
+  `docker-compose.override.yaml`, add the mount there too, or accept numeric uids.
+- **Bundled LiteLLM later.** To opt in on an existing install, run `./install.sh --with-litellm` (it is
+  remembered in `.env`). Your `config.yaml` and `secrets/litellm_master_key` are kept, so DGXMM keeps
+  registering with the LiteLLM it already uses. The bundled LiteLLM always gets its own key in
+  `secrets/litellm_bundled_master_key`, so the keys of the two LiteLLMs stay separate. To move DGXMM to
+  the bundled one, open **Integrations > LiteLLM**, set the **Internal URL** to
+  `http://dgxmm-litellm:4000`, enter the bundled master key and save. DGXMM first removes its models
+  from the LiteLLM it is leaving, then registers them with the bundled one. Virtual keys of the old
+  LiteLLM are not copied. If another LiteLLM already publishes port 4000, use `--litellm-port`.
+- **New `config.yaml` keys** (`litellm_public_url`, `helper_image`, `helper_timeout_s`, `host_passwd`,
+  `trusted_proxies`) take their defaults. Set **Public endpoint URL** on the LiteLLM page, or
+  `litellm_public_url`, so the UI shows the endpoint your clients use.
+
 ## Changing settings
 
 - **`.env` values** (port, bind address, network, model paths): edit `.env`, then `./install.sh`. If you
   change paths or the network, update `config.yaml` to match (see
   [configuration](configuration.md#env-and-installer-variables)).
-- **`config.yaml`**: edit it, then `./install.sh` (or `docker restart dgxmm`, because the file is
-  mounted).
-- **Secrets**: edit the file in `secrets/`, then `docker restart dgxmm`.
+- **`config.yaml`**: edit it, then `docker restart dgxmm`. The file is mounted into the container and
+  read at start; `./install.sh` alone does not restart a container whose image and `.env` are
+  unchanged.
+- **Secrets**: edit the file in `secrets/`, then `docker restart dgxmm` (see
+  [secrets](configuration.md#secrets) for which files are read without a restart).
+- **Trusted proxies**: set `DGXMM_TRUSTED_PROXIES` in `.env`, then `./install.sh` (or set
+  `trusted_proxies` in `config.yaml`, then `docker restart dgxmm`).
 - **LiteLLM connection** (URLs, master key, on/off): change it on the LiteLLM page. It applies
   immediately and wins over `config.yaml` (see
   [configuration](configuration.md#runtime-settings-and-precedence)). Turning the integration off or
@@ -433,6 +482,29 @@ The installer refuses to start a second instance from another checkout, because 
 same engine containers. Manage the existing one from its own directory (the error names it), or
 uninstall it first.
 
+## Known limitations
+
+- **Command-line masking is best-effort.** The Processes page and the dashboard's external memory card
+  mask passwords, tokens and keys, and mask a whole value when it cannot be parsed reliably (fail
+  closed). Some rare wrapper or quoting forms may still not be recognised, so a secret passed as a
+  command-line argument can appear unmasked. Do not pass secrets as arguments; use files or
+  environment variables, which DGXMM never reads.
+- **Deletion only knows about DGXMM's deployments.** A model is protected from deletion when a DGXMM
+  deployment uses it. Containers or processes that DGXMM does not manage (a vLLM started by hand, a
+  notebook) and use the same HF cache or GGUF directory are not detected. Check the
+  [Processes](usage.md#processes) page, or `docker ps`, before you delete a model.
+- **Clearing the master key does not deregister models.** Only turning the integration off or changing
+  the internal URL removes DGXMM's models from LiteLLM. Clearing a master key stored on the LiteLLM
+  page (or removing the secret file) leaves the existing registrations in LiteLLM; turn the
+  integration off first if you want them removed.
+- **Virtual-key limits cannot be cleared.** LiteLLM's key update cannot remove a budget or rate limit once it is
+  set, so **Edit** can only change it. Set a higher value, or create a new key
+  and revoke the old one.
+- **Per-process GPU memory on GB10.** Per-process GPU figures come from NVML. When NVML reports no value
+  for a process, DGXMM shows `0`, so the GPU column on the Processes page may read 0 for a process that
+  does use the GPU. On the GB10's unified memory, the RAM column and the deployment's measured memory
+  are the more reliable figures.
+
 ## Security hardening
 
 - **Docker socket = root.** Anyone with the DGXMM admin role can start containers on the host. Only
@@ -444,8 +516,9 @@ uninstall it first.
   with `DGXMM_BIND`, not only with the firewall.
 - **Client IPs behind a proxy:** DGXMM only trusts `X-Forwarded-For` from IPs/subnets configured in
   `trusted_proxies` (default: `127.0.0.1,::1`, loopback-only). Behind a reverse proxy, set this to the
-  proxy's IP or docker network subnet (e.g., `DGXMM_TRUSTED_PROXIES=172.23.0.0/16` in `.env` for a
-  dockerized proxy on the `gateway` network) to ensure correct client IPs in logs and rate limiting. Have
+  proxy's IP or Docker network subnet (for example `DGXMM_TRUSTED_PROXIES=172.23.0.0/16` in `.env`
+  for a proxy container on the `gateway` network) so that client IPs in logs and rate limiting are
+  correct. `*` trusts every client and is not recommended. Have
   the proxy overwrite the header (`proxy_set_header X-Forwarded-For $remote_addr;` in nginx) rather than
   append to it. The per-username login limit applies either way.
 - **Engine endpoints have no authentication.** Keep `publish_bind: 127.0.0.1` and give other machines

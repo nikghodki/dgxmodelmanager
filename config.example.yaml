@@ -5,7 +5,7 @@
 #   cp config.example.yaml config.yaml
 # Every key is optional; anything left out uses the default shown here. Any key can also be set
 # with an environment variable DGXMM_<KEY_IN_UPPER_CASE> (value parsed as YAML), which wins over
-# this file. After editing, apply with: docker compose up -d   (or ./install.sh)
+# this file. After editing, apply with: docker restart dgxmm   (read at start only)
 #
 # Host paths: "~" means the home directory of the host user DGXMM runs as (DGXMM_HOST_HOME in
 # .env), NOT the home directory inside the container.
@@ -73,7 +73,8 @@ litellm_url: http://litellm-proxy:4000
 # session_ttl_s: 43200        # login session lifetime (seconds)
 # secure_cookies: auto        # auto (Secure when the request is HTTPS) | always | never
 # trusted_proxies: 127.0.0.1,::1  # IPs/CIDRs trusted to set X-Forwarded-For (comma-separated)
-#                                  # Default is loopback-only; set to your reverse proxy IP/subnet
+#                                  # Default is loopback-only; set to your reverse proxy IP/subnet.
+#                                  # DGXMM_TRUSTED_PROXIES in .env, when set, wins over this value.
 
 # --- Polling intervals (seconds) ----------------------------------------------------------
 # monitor_poll_s: 3           # deployment state checks while starting/stopping

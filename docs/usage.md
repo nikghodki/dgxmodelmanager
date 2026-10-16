@@ -74,7 +74,7 @@ Open **Deploy model** (Dashboard, Deployments, or the command palette). It needs
    container name `dgxmm-<name>` (lowercase letters, digits and `-`). **Priority** (0–100) decides
    eviction order: lower priority is suggested for sleeping or stopping first. **Model name (LiteLLM)**
    is the name clients pass as `model` to the LiteLLM endpoint, such as `default-chat`. It defaults to
-   the served name. Model names must be unique: if another deployment already uses the name, Deploy is
+   the served name. A model name is 1 to 64 letters, digits and `. _ : / -`. Model names must be unique: if another deployment already uses the name, Deploy is
    refused with a link to that deployment and a one-click suggestion (`<served name>-<deployment name>`).
 3. **Sizing and features**: context length, concurrent sequences, KV cache dtype, the shared KV pool
    size, prefix caching, sleep mode and so on. Advanced options include tool-call and reasoning parsers,
@@ -130,6 +130,9 @@ Tabs:
   failed. **Direct engine endpoints (advanced)**, collapsed by default, lists the served name and the
   engine URLs on the Docker network and on the host. Those bypass LiteLLM, so no keys, budgets or rate
   limits apply.
+
+  ![API access card with the endpoint, model name and code snippets](images/api-access.png)
+
 - **LiteLLM**: the **Model name** (admins can change it; empty means the served name), the
   **Registration** status with a **Re-sync** button, and, for admins, **Keys with access**: the virtual
   keys that can call this model (keys limited to it, and keys for all models), with **Create key for
@@ -151,9 +154,12 @@ Tabs:
 
 ## Models on disk
 
+![Models on disk with Delete and Clean up actions](images/models.png)
+
 **On disk** lists the models DGXMM found in the Hugging Face cache and the GGUF directories: format,
-architecture, quantization, size, which engines can serve them, and whether the download is complete.
-Filter by kind. **Deploy** opens the wizard with the model selected. **Rescan** (admins) rescans right
+kind, quantization, size, which engines can serve them, and whether the download is complete
+(architecture and context length are shown on wide screens). Filter by kind: **All**, **LLM**,
+**Draft** (speculative-decoding draft models such as EAGLE or Medusa) or **Other**. **Deploy** opens the wizard with the model selected. **Rescan** (admins) rescans right
 away; otherwise DGXMM rescans every 5 minutes. To add directories, see
 [configuration](configuration.md#model-directories).
 
@@ -221,6 +227,8 @@ headroom. Tick **Must include** to only see combinations that contain a model. A
 
 ## Processes
 
+![Processes page grouped by container, with masked command lines](images/processes.png)
+
 **Processes** (under Operate, also in the command palette) shows exactly what is running on the box:
 every process that uses memory, with its container, user and command line. Everyone who can sign in can
 open it; everyone sees the same masked data.
@@ -261,6 +269,8 @@ The **LiteLLM** page (admins, under Integrations) has three parts. Notices at th
 cannot be reached, no master key is set, or the integration is turned off. When LiteLLM is reachable,
 its version and database state are shown. The settings appear straight away; the connection status
 shows "Checking LiteLLM…" until the probe answers.
+
+![LiteLLM page with the connection settings and the models LiteLLM serves](images/litellm.png)
 
 **Connection**
 
