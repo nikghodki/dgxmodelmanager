@@ -1,9 +1,10 @@
 import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
+import { Navigate } from "react-router-dom";
 import type { ColumnDef } from "@tanstack/react-table";
 import { KeyRound, MoreHorizontal, Trash2, UserPlus } from "lucide-react";
 import { api } from "@/api";
-import { useAuth } from "@/auth";
+import { useAuth, useIsAdmin } from "@/auth";
 import { ConfirmDialog } from "@/components/app/confirm-dialog";
 import { DataTable } from "@/components/app/data-table";
 import { PageHeader } from "@/components/app/page-header";
@@ -21,6 +22,8 @@ import { passwordProblems } from "@/lib/validation";
 import type { User } from "@/types";
 
 export function Users() {
+  const admin = useIsAdmin();
+  if (!admin) return <Navigate to="/" replace />;
   const me = useAuth().user;
   const users = useQuery({ queryKey: ["users"], queryFn: () => api<User[]>("/users") });
   const [adding, setAdding] = useState(false);
