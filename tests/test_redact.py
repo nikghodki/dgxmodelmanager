@@ -489,3 +489,97 @@ def test_round4_env_split_beyond_depth_masks_the_rest():
         inner = "env -S " + shlex.quote(inner)
     out = format_command(["sh", "-c", inner + " " + S])[0]
     assert S not in out
+
+
+# Fix round 5: wrapper options and sshpass must not block the switch to the inner tool. Each wrapper knows which of its
+# options take a value; an option it does not know is treated as valueless (the next word may be a command: fail
+# closed). A prefix command (sudo, env, nice…) under a wrapper is skipped like at command position.
+ROUND5_CASES = {
+    "sshpass -p": ["sshpass", "-p", "X1pw", "ssh", "h", "redis-cli", "-a", S],
+    "sshpass -e": ["sshpass", "-e", "ssh", "h", "redis-cli", "-a", S],
+    "sshpass -f": ["sshpass", "-f", "/run/pw", "ssh", "h", "redis-cli", "-a", S],
+    "sshpass -p glued": ["sshpass", "-pX1pw", "ssh", "h", "redis-cli", "-a", S],
+    "sshpass sh -c": ["sh", "-c", "sshpass -e ssh h redis-cli -a " + S],
+    "ssh sudo -i": ["ssh", "host", "sudo", "-i", "mysql", "-uroot", "-p" + S],
+    "ssh sudo -n": ["ssh", "host", "sudo", "-n", "redis-cli", "-a", S],
+    "sh -c ssh sudo -n": ["sh", "-c", "ssh host sudo -n redis-cli -a " + S],
+    "docker exec sudo -E": ["docker", "exec", "c", "sudo", "-E", "mysql", "-p" + S],
+    "docker exec env": ["docker", "exec", "c", "env", "-i", "A=1", "redis-cli", "-a", S],
+    "nsenter long": ["nsenter", "--target", "1", "--mount", "--pid", "redis-cli", "-a", S],
+    "nsenter short": ["nsenter", "-t", "1", "-m", "-p", "redis-cli", "-a", S],
+    "systemd-run --scope": ["systemd-run", "--scope", "redis-cli", "-a", S],
+    "systemd-run -t": ["systemd-run", "-t", "redis-cli", "-a", S],
+    "systemd-run -p": ["systemd-run", "-p", "MemoryMax=1G", "--scope", "redis-cli", "-a", S],
+    "ssh host -t": ["ssh", "host", "-t", "redis-cli", "-a", S],
+    "ssh -tt host": ["ssh", "-tt", "host", "redis-cli", "-a", S],
+    "ssh host named like a tool": ["ssh", "mongo", "redis-cli", "-a", S],
+    "docker unknown option": ["docker", "run", "--frobnicate", "redis-cli", "-a", S],
+    "kubectl exec -it no --": ["kubectl", "exec", "-it", "pod", "redis-cli", "-a", S],
+    # minor
+    "docker --debug login": ["docker", "--debug", "login", "-u", "u", "-p", S, "r"],
+    "env -vS split": ["env", "-vS", "redis-cli -a", S],
+    "env -vS glued": ["env", "-vSredis-cli -a " + S],
+    "env -iS": ["env", "-iS", "mysql -p" + S],
+    "redis CONFIG SET requirepass": ["redis-cli", "CONFIG", "SET", "requirepass", S],
+    "redis config set requirepass": ["redis-cli", "-h", "r", "config", "set", "requirepass", S],
+    "redis CONFIG SET masterauth": ["redis-cli", "CONFIG", "SET", "masterauth", S],
+    "redis AUTH": ["redis-cli", "AUTH", S],
+    "redis auth user": ["redis-cli", "-h", "r", "auth", "user", S],
+    "redis AUTH sh -c": ["sh", "-c", "redis-cli AUTH user " + S + "; echo ok"],
+    "valkey-cli -a": ["valkey-cli", "-a", S],
+    "valkey-cli -a glued": ["valkey-cli", "-a" + S],
+    "valkey AUTH": ["valkey-cli", "AUTH", S],
+    "mongodump -p": ["mongodump", "-u", "u", "-p", S],
+    "mongorestore -p": ["mongorestore", "-p", S, "/dump"],
+    "mongoexport --password": ["mongoexport", "--password", S],
+    "mongoimport -p": ["mongoimport", "-p", S],
+    "mongodump -p glued": ["mongodump", "-p" + S],
+    "poetry http-basic": ["poetry", "config", "http-basic.myrepo", "user", S],
+    "poetry pypi-token": ["poetry", "config", "pypi-token.myrepo", S],
+    "poetry sh -c": ["sh", "-c", "poetry config http-basic.r user " + S + " && poetry install"],
+}
+
+
+@pytest.mark.parametrize("name", list(ROUND5_CASES))
+def test_round5_leak_cases(name):
+    out = format_command(ROUND5_CASES[name])[0]
+    assert S not in out and "value7" not in out and "Zq9SEC" not in out, out
+    assert "X1pw" not in out, out
+
+
+def test_round5_keeps_structure():
+    f = lambda argv: format_command(argv)[0]  # noqa: E731
+    assert f(["sshpass", "-e", "ssh", "h", "redis-cli", "-a", S]) == "sshpass -e ssh h redis-cli -a ***"
+    assert f(["sshpass", "-f", "/run/pw", "ssh", "h", "redis-cli", "-a", S]) == "sshpass -f /run/pw ssh h redis-cli -a ***"
+    assert f(["ssh", "host", "sudo", "-i", "mysql", "-uroot", "-p" + S]) == "ssh host sudo -i mysql -uroot -p***"
+    assert f(["nsenter", "-t", "1", "-m", "-p", "redis-cli", "-a", S]) == "nsenter -t 1 -m -p redis-cli -a ***"
+    assert f(["systemd-run", "--scope", "redis-cli", "-a", S]) == "systemd-run --scope redis-cli -a ***"
+    assert f(["docker", "--debug", "login", "-u", "u", "-p", S, "r"]) == "docker --debug login -u u -p *** r"
+    assert f(["env", "-vS", "redis-cli -a", S]) == "env -vS 'redis-cli -a' ***"
+    assert f(["redis-cli", "CONFIG", "SET", "requirepass", S]) == "redis-cli CONFIG SET requirepass ***"
+    assert f(["redis-cli", "CONFIG", "SET", "maxmemory", "1gb"]) == "redis-cli CONFIG SET maxmemory 1gb"
+    assert f(["redis-cli", "AUTH", S]) == "redis-cli AUTH ***"
+    assert f(["sh", "-c", "redis-cli AUTH " + S + "; echo ok"]) == "sh -c 'redis-cli AUTH ***; echo ok'"
+    assert f(["redis-cli", "GET", "k"]) == "redis-cli GET k"
+    assert f(["valkey-cli", "-a", S, "-p", "6379"]) == "valkey-cli -a *** -p 6379"
+    assert f(["mongodump", "-u", "u", "-p", S, "--db", "x"]) == "mongodump -u u -p *** --db x"
+    assert f(["poetry", "config", "http-basic.myrepo", "user", S]) == "poetry config http-basic.myrepo user ***"
+    assert f(["poetry", "config", "pypi-token.myrepo", S]) == "poetry config pypi-token.myrepo ***"
+    assert f(["poetry", "config", "virtualenvs.in-project", "true"]) == "poetry config virtualenvs.in-project true"
+    # known value options of a wrapper still mark an option value, not a command
+    assert f(["docker", "run", "--name", "mongo", "-p", "8080:80", "img"]) == "docker run --name mongo -p 8080:80 img"
+    assert f(["docker", "exec", "-u", "sudo", "c", "ls"]) == "docker exec -u sudo c ls"
+    assert f(["ssh", "-l", "mongo", "-p", "22", "h", "ls"]) == "ssh -l mongo -p 22 h ls"
+
+
+@pytest.mark.parametrize("argv", [["ssh", "h"] + ["sudo", "-n", "env", "-i"] * 4000,
+                                  ["sh", "-c", "sshpass -e ssh h sudo -i nsenter -t 1 " * 1500],
+                                  ["docker", "exec", "c"] + ["sudo", "docker", "exec", "c", "redis-cli"] * 3000,
+                                  ["env"] + ["-vS", "env -vS " * 300] * 2,
+                                  ["sh", "-c", "redis-cli AUTH " * 5000],
+                                  ["sh", "-c", "poetry config http-basic.r u " * 3000]])
+def test_round5_wrapper_walks_stay_fast(argv):
+    import time
+    t0 = time.perf_counter()
+    format_command(argv)
+    assert time.perf_counter() - t0 < 0.2
