@@ -18,31 +18,44 @@ import { Login } from "./pages/Login";
 import { Models } from "./pages/Models";
 import { Planner } from "./pages/Planner";
 import { Users } from "./pages/Users";
+import { ThemeProvider, useTheme } from "@/components/app/theme";
+import { TooltipProvider } from "@/components/ui/tooltip";
+import { Toaster } from "@/components/ui/sonner";
 
 const qc = new QueryClient({ defaultOptions: { queries: { retry: 1, refetchOnWindowFocus: false } } });
+
+function ThemedToaster() {
+  const { resolved } = useTheme();
+  return <Toaster theme={resolved} position="bottom-right" richColors />;
+}
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
     <QueryClientProvider client={qc}>
-      <BrowserRouter basename="/dgxmm">
-        <AuthProvider>
-          <Routes>
-            <Route path="/login" element={<Login />} />
-            <Route path="/change-password" element={<RequireAuth><ChangePassword /></RequireAuth>} />
-            <Route element={<RequireAuth><Layout /></RequireAuth>}>
-              <Route path="/" element={<Dashboard />} />
-              <Route path="/models" element={<Models />} />
-              <Route path="/catalog" element={<Catalog />} />
-              <Route path="/downloads" element={<Downloads />} />
-              <Route path="/planner" element={<Planner />} />
-              <Route path="/deploy" element={<DeployWizard />} />
-              <Route path="/deployments/:id" element={<DeploymentDetail />} />
-              <Route path="/users" element={<Users />} />
-              <Route path="/audit" element={<Audit />} />
-            </Route>
-          </Routes>
-        </AuthProvider>
-      </BrowserRouter>
+      <ThemeProvider>
+        <TooltipProvider delayDuration={200}>
+          <BrowserRouter basename="/dgxmm">
+            <AuthProvider>
+              <Routes>
+                <Route path="/login" element={<Login />} />
+                <Route path="/change-password" element={<RequireAuth><ChangePassword /></RequireAuth>} />
+                <Route element={<RequireAuth><Layout /></RequireAuth>}>
+                  <Route path="/" element={<Dashboard />} />
+                  <Route path="/models" element={<Models />} />
+                  <Route path="/catalog" element={<Catalog />} />
+                  <Route path="/downloads" element={<Downloads />} />
+                  <Route path="/planner" element={<Planner />} />
+                  <Route path="/deploy" element={<DeployWizard />} />
+                  <Route path="/deployments/:id" element={<DeploymentDetail />} />
+                  <Route path="/users" element={<Users />} />
+                  <Route path="/audit" element={<Audit />} />
+                </Route>
+              </Routes>
+            </AuthProvider>
+          </BrowserRouter>
+          <ThemedToaster />
+        </TooltipProvider>
+      </ThemeProvider>
     </QueryClientProvider>
   </React.StrictMode>,
 );
