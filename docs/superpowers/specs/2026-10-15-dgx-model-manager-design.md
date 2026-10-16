@@ -399,3 +399,28 @@ Each milestone ends with tests passing and an on-box check.
 ## 15. Out of scope
 
 Multiple hosts or multi-node tensor parallelism; SGLang, TensorRT-LLM and Ollama engines (the interface allows them later); quotas and billing; fine-tuning; public-internet exposure; SSO/OIDC.
+
+## 16. Amendments from implementation planning (2026-10-15)
+
+1. **Per-deployment memory** = cgroup `anon + kernel` + NVML per-process GPU memory of the container's PIDs
+   (not cgroup `memory.current`): on GB10, CUDA allocations are not charged to the container cgroup while page
+   cache is. Under-attribution shows up as "external", which only makes the gate stricter. (§4.1)
+2. **Sleep on unified memory** frees only KV/activations; weights are offloaded into the same physical pool.
+   The planner counts sleep as freeing `reserved − weights − draft − runtime`. (§4.1, §5.4)
+3. **Inventory** is kept in memory and rescanned (no `artifacts` table); deployments store `model_ref`
+   (repo id or GGUF path). Broken `refs/main` snapshots are skipped in favour of the newest complete one,
+   and vLLM is started with `--revision <snapshot>` and `HF_HUB_OFFLINE=1`. (§3.2, §7)
+4. **Apply on advice** uses an in-place *reconfigure* (same deployment row, rollback to previous config on
+   failure) rather than creating a second deployment; *switch* is for moving to a different deployment. (§5.5, §9.2)
+5. **States** gain `unknown` for managed containers found without a DB row. (§5.3, §11)
+6. **Co-location ranking**: more models first, then more favourites, then more headroom (pure headroom
+   ranking would always pick one tiny model). Favourites are stored in a `favourites` table. (§4.6)
+7. **UI kit**: Tailwind with a small in-repo component set (shadcn-style) instead of the shadcn CLI.
+8. **Ports**: engine ports and dgxmm's own `8090` are published on `127.0.0.1` only (for on-box tools and SSH tunnels); network users go through nginx `/dgxmm/` and LiteLLM reaches engines by container name on `gateway`.
+9. **Catalog config fetch** uses HTTP (not `hf_hub_download`) so browsing never creates partial repos in the cache.
+10. **Calibration** only raises estimates (exact: `max(measured×1.05, formula)`; ratio clamped to `[1.0, 1.5]`) because per-container measurement under-counts on GB10 (vLLM Qwen3-0.6B: reserved 9.56 GiB, measured ≈3.9 GiB while vLLM preallocates its share).
+11. **hf_hub_download** writes to `<cache_dir>/models--*`; DGXMM passes the hub dir and the inventory scans only `<hf_cache>/hub`. Downloads are marked done only after the inventory refresh.
+12. **Switch** credits the replaced deployment by what the switch actually frees: it escalates sleep→stop when sleep frees too little and refuses before touching anything if even stopping is not enough. Rollback failures surface as `rollback_incomplete`, and failed switch/reconfigure attempts are audited.
+13. **LiteLLM entries** are kept only when both `api_base` and `model` match; the sync loop survives unexpected errors.
+14. **`/api/containers/adoptable`** is admin-only (container commands can contain secrets); plan actions are typed so malformed input returns 422.
+15. **The deployer monitor** is exception-tolerant (fails a deployment after 5 consecutive errors); reconcile isolates per-row errors; restart reallocates ports held by others.
