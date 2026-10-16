@@ -27,7 +27,7 @@ from dgxmm.planner.plans import ActiveDep, PlanAction, base_model_name, build_pl
 
 log = logging.getLogger(__name__)
 NAME_PATTERN = r"^[a-z0-9][a-z0-9-]{0,40}$"
-ALIAS_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$"
+ALIAS_PATTERN = r"^[A-Za-z0-9._:/-]{1,64}$"  # LiteLLM model name
 
 
 class DeployRequest(BaseModel):
@@ -224,6 +224,8 @@ class Deployer:
         with self.db.session() as s:
             if s.scalar(select(Deployment).where(Deployment.name == req.name)):
                 raise DeployError("name_in_use", f"a deployment named {req.name} already exists", 409)
+        if req.alias:
+            self._check_alias_free(req.alias, None)
         async with self.mem_lock:
             budget = await self.budget.refresh()
             fit = check_fit(prep.estimate, budget)
@@ -482,6 +484,7 @@ class Deployer:
             "actual_bytes": self._actual(d.id), "estimate": d.estimate, "config": d.config,
             "litellm_status": d.litellm_status, "last_error": d.last_error, "exit_code": d.exit_code,
             "container_id": d.container_id, "served_name": served, "adopted_from": d.adopted_from,
+            "model_name": d.alias or served,  # what clients pass as "model" to the single LiteLLM endpoint
             "endpoint": f"http://{container_name(d.name)}:{d.port}/v1" if d.port else None,
             "host_endpoint": f"http://{self.settings.publish_bind}:{d.port}/v1" if d.port and self.settings.publish_bind else None,
             "sleep_capable": bool(engine and engine.supports_sleep and d.config.get("enable_sleep_mode")),
@@ -609,6 +612,27 @@ class Deployer:
                 log.exception("could not undo %s of deployment %s", typ, dep_id)
                 failures.append(f"{typ} deployment {dep_id}: {e}")
         return failures
+
+    def _check_alias_free(self, alias: str, dep_id: int | None) -> None:
+        """An alias must be unique among deployments and must not shadow the model name (served name) another
+        active deployment is registered under in LiteLLM."""
+        with self.db.session() as s:
+            for d in s.scalars(select(Deployment).where(Deployment.id != (dep_id or -1))):
+                if d.alias == alias:
+                    raise DeployError("alias_in_use", f"deployment {d.name} already uses the model name {alias}", 409)
+                if d.state in ACTIVE_STATES and not d.alias and self._view(d)["served_name"] == alias:
+                    raise DeployError("alias_in_use", f"deployment {d.name} is already served as {alias}", 409)
+
+    def set_alias(self, dep_id: int, alias: str | None) -> dict:
+        """Change the LiteLLM model name. Empty/None clears it (the served name is used)."""
+        alias = alias or None
+        if alias is not None and not re.fullmatch(ALIAS_PATTERN, alias):
+            raise DeployError("invalid_alias", "model name must be 1-64 characters: letters, digits and . _ : / -", 422)
+        self._require(dep_id)
+        if alias is not None:
+            self._check_alias_free(alias, dep_id)
+        self._set_alias(dep_id, alias)
+        return self.view(dep_id)
 
     def _set_alias(self, dep_id: int, alias: str | None) -> None:
         with self.db.session() as s:

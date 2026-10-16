@@ -185,3 +185,113 @@ def free_on_stop(deployer, probe) -> None:
             probe.available += actual
         return out
     deployer.stop = stop
+
+
+class FakeLiteLLM:
+    """In-memory LiteLLM proxy (v1.100 shapes): health, /model/*, /key/* admin API, master-key auth."""
+
+    def __init__(self, master_key: str = "sk-test", version: str = "1.100.0"):
+        self.master_key, self.version = master_key, version
+        self.models = [{"model_name": "hand-written", "litellm_params": {"model": "openai/x", "api_base": "http://ext:8000/v1"},
+                        "model_info": {"id": "keep-me", "db_model": True}}]
+        self.keys: dict[str, dict] = {}
+        self.down = False
+        self.no_db = False
+        self.readiness_version = False  # older LiteLLM builds put litellm_version in /health/readiness
+        self.auth: list[str | None] = []
+        self.calls: list[tuple[str, str]] = []
+        self.hosts: list[str] = []
+        self.bodies: list[dict] = []
+
+    def client(self) -> httpx.AsyncClient:
+        return httpx.AsyncClient(transport=httpx.MockTransport(self.handler))
+
+    def add_key(self, alias: str, models: list[str] | None = None, **extra) -> str:
+        import hashlib
+        import secrets
+        key = "sk-" + secrets.token_urlsafe(16)
+        token = hashlib.sha256(key.encode()).hexdigest()
+        self.keys[token] = {"token": token, "key_name": f"sk-...{key[-4:]}", "key_alias": alias,
+                            "models": models if models is not None else [], "spend": 0.0, "max_budget": None,
+                            "budget_duration": None, "rpm_limit": None, "tpm_limit": None, "expires": None,
+                            "created_at": "2026-10-16T12:00:00Z", "blocked": None, "metadata": {}, **extra}
+        return token
+
+    @staticmethod
+    def _err(status: int, message: str, typ: str = "error") -> httpx.Response:
+        return httpx.Response(status, json={"error": {"message": message, "type": typ, "param": "None", "code": str(status)}})
+
+    def handler(self, req: httpx.Request) -> httpx.Response:
+        import hashlib
+        import json
+        import secrets
+        path = req.url.path
+        self.calls.append((req.method, path))
+        self.hosts.append(req.url.host)
+        self.auth.append(req.headers.get("authorization"))
+        if self.down:
+            raise httpx.ConnectError("connection refused")
+        if path == "/health/liveliness":
+            return httpx.Response(200, json="I'm alive!")
+        if path == "/health/readiness":
+            body = {"status": "healthy", "db": "Not connected" if self.no_db else "connected"}
+            if self.readiness_version:
+                body["litellm_version"] = self.version
+            return httpx.Response(200, json=body)
+        if path == "/openapi.json":
+            return httpx.Response(200, json={"info": {"title": "LiteLLM API", "version": self.version}, "paths": {}})
+        if req.headers.get("authorization") != f"Bearer {self.master_key}":
+            return self._err(401, "Authentication Error, Invalid proxy server token passed. Received API Key = sk-...wxyz, "
+                                  "Key Hash (Token) =" + "ab" * 32, "token_not_found_in_db")
+        body = json.loads(req.content) if req.content else {}
+        if body:
+            self.bodies.append(body)
+        if path == "/model/info":
+            return httpx.Response(200, json={"data": self.models})
+        if path == "/model/new":
+            self.models.append({**body, "model_info": {**body.get("model_info", {}), "id": secrets.token_hex(8)}})
+            return httpx.Response(200, json={"ok": True})
+        if path == "/model/delete":
+            self.models = [m for m in self.models if m["model_info"]["id"] != body["id"]]
+            return httpx.Response(200, json={"ok": True})
+        if path.startswith("/key/") and self.no_db:
+            return self._err(500, "No connected db.", "internal_server_error")
+        if path == "/key/generate":
+            key = "sk-" + secrets.token_urlsafe(16)
+            token = hashlib.sha256(key.encode()).hexdigest()
+            rec = {"token": token, "key_name": f"sk-...{key[-4:]}", "key_alias": body.get("key_alias"),
+                   "models": body.get("models") or [], "spend": 0.0, "max_budget": body.get("max_budget"),
+                   "budget_duration": body.get("budget_duration"), "rpm_limit": body.get("rpm_limit"),
+                   "tpm_limit": body.get("tpm_limit"), "expires": "2026-11-15T12:00:00Z" if body.get("duration") else None,
+                   "created_at": "2026-10-16T12:00:00Z", "blocked": None, "metadata": body.get("metadata") or {}}
+            self.keys[token] = rec
+            return httpx.Response(200, json={**rec, "key": key, "token_id": token})
+        if path == "/key/list":
+            size, page = int(req.url.params.get("size", 10)), int(req.url.params.get("page", 1))
+            items = list(self.keys.values())
+            chunk = items[(page - 1) * size: page * size]
+            full = req.url.params.get("return_full_object") == "true"
+            return httpx.Response(200, json={"keys": chunk if full else [k["token"] for k in chunk],
+                                             "total_count": len(items), "current_page": page,
+                                             "total_pages": max(1, -(-len(items) // size))})
+        if path == "/key/info":
+            rec = self.keys.get(req.url.params.get("key", ""))
+            if rec is None:
+                return self._err(404, "Key not found in database", "not_found_error")
+            return httpx.Response(200, json={"key": rec["token"], "info": {k: v for k, v in rec.items() if k != "token"}})
+        if path == "/key/update":
+            rec = self.keys.get(body.get("key", ""))
+            if rec is None:
+                return self._err(404, "Key not found.", "not_found_error")
+            for k, v in body.items():
+                if k != "key" and v is not None:
+                    rec[k] = v
+            return httpx.Response(200, json={**rec, "key": rec["token"]})
+        if path == "/key/delete":
+            found = [t for t in body.get("keys", []) if t in self.keys]
+            if not found:
+                return self._err(404, "{'error': 'No keys found'}", "internal_server_error")
+            for t in found:
+                del self.keys[t]
+            return httpx.Response(200, json={"deleted_keys": found})
+        return httpx.Response(404, json={"detail": "Not Found"})
