@@ -16,7 +16,7 @@ vi.mock("@/api", async () => {
 const okStatus = { reachable: true, version: "1.100.0", db: "connected", error: null, checked_at: "2026-10-16T16:56:43Z" };
 const settings = (over: Record<string, any> = {}) => ({
   enabled: true, url: "http://litellm-proxy:4000", public_url: "https://llm.example.com", endpoint: "https://llm.example.com/v1",
-  master_key_set: true, master_key_source: "secret_file", status: okStatus, ...over,
+  master_key_set: true, master_key_source: "secret_file", master_key_hint: null, status: okStatus, ...over,
 });
 const key = {
   token: "a".repeat(64), key_name: "sk-...HWqw", key_alias: "team-a", models: ["chat"], spend: 1.5, max_budget: 5, budget_duration: "30d",
@@ -96,19 +96,39 @@ describe("LiteLLM page", () => {
     await waitFor(() => expect(cached(qc, "sk-master-SECRET")).toBe(false));
   });
 
-  it("forces re-entering the master key when the internal URL changes", async () => {
+  it("prompts for the master key when the internal URL changes, without blocking Save", async () => {
     setup({}, (url, opts) => (url === "/integrations/litellm" && opts?.method === "PUT" ? settings({ url: "http://other:4000" }) : undefined));
     const url = await screen.findByLabelText("Internal URL");
     await userEvent.clear(url);
     await userEvent.type(url, "http://other:4000");
-    expect(screen.getByText(/Re-enter the master key/)).toBeInTheDocument();
+    expect(screen.getByText(/Enter the master key for the new URL/)).toBeInTheDocument();
     const save = screen.getByRole("button", { name: "Save" });
-    expect(save).toBeDisabled();
-    await userEvent.type(screen.getByLabelText("New master key"), "sk-again");
     expect(save).toBeEnabled();
+    await userEvent.type(screen.getByLabelText("New master key"), "sk-again");
     await userEvent.click(save);
     await waitFor(() => expect(calls("PUT", "/integrations/litellm")).toHaveLength(1));
     expect(calls("PUT", "/integrations/litellm")[0][1]).toEqual({ method: "PUT", body: { url: "http://other:4000", master_key: "sk-again" } });
+  });
+
+  it("allows saving a URL change without a key (the old key just stops applying)", async () => {
+    setup({}, (url, opts) => (url === "/integrations/litellm" && opts?.method === "PUT" ? settings({ url: "http://other:4000" }) : undefined));
+    const url = await screen.findByLabelText("Internal URL");
+    await userEvent.clear(url);
+    await userEvent.type(url, "http://other:4000");
+    await userEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(calls("PUT", "/integrations/litellm")).toHaveLength(1));
+    expect(calls("PUT", "/integrations/litellm")[0][1]).toEqual({ method: "PUT", body: { url: "http://other:4000" } });
+  });
+
+  it("shows the server's master key hint prominently and asks for the key", async () => {
+    const hint = "the master key was entered for a different LiteLLM URL; re-enter it for this URL";
+    setup({ master_key_set: false, master_key_source: "none", master_key_hint: hint });
+    const shown = await screen.findAllByText(hint);
+    expect(shown.length).toBeGreaterThan(0);
+    expect(screen.getByTestId("master-key-hint")).toHaveTextContent(hint);
+    expect(screen.getByTestId("master-key-hint").querySelector("svg")).not.toBeNull();
+    expect(screen.getByLabelText("New master key")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
   });
 
   it("shows test connection details and sync counts", async () => {

@@ -10,6 +10,7 @@ import {
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { engineLabel, fmtBytes, fmtNum, fmtPct, shortRef } from "@/format";
 import { useActionMutation } from "@/hooks/use-action-mutation";
+import { nameFixHref, takenHolder } from "@/lib/litellm";
 import { deploymentActions } from "@/logic";
 import { useLive } from "@/stream";
 import type { Deployment } from "@/types";
@@ -35,7 +36,8 @@ export function DeploymentsTable({ deployments, isAdmin, loading, searchable, on
   const act = useActionMutation(
     ({ d, action }: { d: Deployment; action: string }) =>
       action === "remove" ? api(`/deployments/${d.id}`, { method: "DELETE" }) : api(`/deployments/${d.id}/${action}`, { method: "POST" }),
-    { success: (_r, v) => `${v.d.name}: ${v.action} requested`, invalidate: [["deployments"], ["host"]] },
+    { success: (_r, v) => `${v.d.name}: ${v.action} requested`, invalidate: [["deployments"], ["host"]],
+      errorAction: (err, v) => isAdmin && !!takenHolder(err) && { label: "Set model name", onClick: () => nav(nameFixHref(v.d)) } },
   );
 
   const columns: ColumnDef<Deployment, any>[] = [
@@ -58,7 +60,10 @@ export function DeploymentsTable({ deployments, isAdmin, loading, searchable, on
       return (
         <span className="flex flex-col items-start gap-1">
           {name && <span title={name} className="block max-w-[22ch] truncate font-mono text-xs">{name}</span>}
-          <StatusBadge state={row.original.litellm_status} />
+          {row.original.litellm_status === "error" ? (
+            <Tooltip><TooltipTrigger asChild><span tabIndex={0} className="rounded-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"><StatusBadge state="error" /></span></TooltipTrigger>
+              <TooltipContent className="max-w-xs break-words">LiteLLM registration failed, usually because another deployment uses the same model name. Open the deployment's LiteLLM tab for the reason.</TooltipContent></Tooltip>
+          ) : <StatusBadge state={row.original.litellm_status} />}
         </span>
       );
     } },

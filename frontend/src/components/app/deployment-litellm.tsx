@@ -1,17 +1,19 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
-import { AlertTriangle, KeyRound, Loader2, RefreshCw } from "lucide-react";
+import { AlertTriangle, CheckCircle2, KeyRound, Loader2, RefreshCw } from "lucide-react";
 import { api } from "@/api";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useActionMutation } from "@/hooks/use-action-mutation";
-import { aliasProblem, curlSnippet, litellmProblem, modelNameOptions, pythonSnippet } from "@/lib/litellm";
-import type { Deployment, DeploymentLiteLLM } from "@/types";
+import { aliasProblem, curlSnippet, keysScopedTo, litellmProblem, modelNameOptions, pythonSnippet, rewrittenCount, suggestAlias, takenHolder } from "@/lib/litellm";
+import type { AliasPatchResult, Deployment, DeploymentLiteLLM } from "@/types";
 import { CopyButton } from "./copy-button";
 import { CodeBlock, KeyManager } from "./litellm-keys";
+import { ModelNameTaken } from "./model-name-taken";
 import { EmptyState, ErrorState } from "./states";
 import { StatusBadge } from "./status-badge";
 
@@ -57,7 +59,7 @@ export function ApiAccessCard({ d, info, loading, error }: { d: Deployment; info
         {!!error && <ErrorState error={error} />}
         {info && !info.enabled && <Warn>The LiteLLM integration is disabled, so this model is not served through the endpoint.</Warn>}
         {info?.enabled && info.registered === false && <Warn>This model is not registered in LiteLLM yet; requests will fail until the next sync.</Warn>}
-        {info?.error && info.registered === null && <Warn>Could not check LiteLLM: {litellmProblem(info.error).description}</Warn>}
+        {info?.error && info.error.code !== "litellm_disabled" && <Warn>{litellmProblem(info.error).title}: {litellmProblem(info.error).description}</Warn>}
         {endpoint && model && (
           <div className="grid grid-cols-1 gap-3 xl:grid-cols-2">
             <div className="min-w-0 space-y-1.5"><p className="text-xs font-medium text-muted-foreground">curl</p><CodeBlock code={curlSnippet(endpoint, model)} label="curl example" /></div>
@@ -78,50 +80,91 @@ export function ApiAccessCard({ d, info, loading, error }: { d: Deployment; info
   );
 }
 
-function ModelNameForm({ d }: { d: Deployment }) {
-  const [value, setValue] = useState(d.alias ?? "");
-  useEffect(() => setValue(d.alias ?? ""), [d.alias]);
-  const save = useActionMutation((alias: string) => api<Deployment>(`/deployments/${d.id}`, { method: "PATCH", body: { alias } }), {
-    success: (_r, a) => (a ? `Model name set to ${a}` : "Model name reset to the served name"),
-    invalidate: [["deployment", d.id], ["deployments"], ["deployment-litellm", d.id], ["litellm-models"]],
+const nKeys = (n: number) => `${n} key${n === 1 ? "" : "s"}`;
+
+function ModelNameForm({ d, info, suggested }: { d: Deployment; info?: DeploymentLiteLLM; suggested?: string | null }) {
+  const [value, setValue] = useState(suggested ?? d.alias ?? "");
+  const input = useRef<HTMLInputElement>(null);
+  useEffect(() => { if (suggested) input.current?.focus(); }, [suggested]);
+  const [rewrite, setRewrite] = useState(true);
+  const [result, setResult] = useState<{ tone: "good" | "warning"; text: string } | null>(null);
+  useEffect(() => setValue(suggested ?? d.alias ?? ""), [d.alias, suggested]);
+  const oldName = modelNameOf(d, info);
+  const newName = value.trim() || d.served_name || "";
+  const scoped = keysScopedTo(info?.keys ?? [], oldName);
+  const offerRewrite = scoped.length > 0 && !!oldName && newName !== oldName;
+  const save = useActionMutation((body: { alias: string; rewrite_keys?: boolean }) =>
+    api<AliasPatchResult>(`/deployments/${d.id}`, { method: "PATCH", body }), {
+    success: (_r, b) => (b.alias ? `Model name set to ${b.alias}` : "Model name reset to the served name"),
+    invalidate: [["deployment", d.id], ["deployments"], ["deployment-litellm", d.id], ["litellm-models"], ["litellm-keys"]],
+    onSuccess: (r, b) => {
+      const name = r.model_name ?? b.alias;
+      const n = r.affected_keys?.length ?? 0;
+      const done = rewrittenCount(r.keys_rewritten, n);
+      if (r.keys_error) {
+        setResult({ tone: "warning", text: done > 0
+          ? `Renamed. Updated ${done} of ${nKeys(n)} to ${name}; the rest still list ${oldName}: ${r.keys_error.message}`
+          : `Renamed, but keys scoped to ${oldName} could not be checked or updated: ${r.keys_error.message}` });
+      } else if (done > 0 && done < n) setResult({ tone: "warning", text: `Updated ${done} of ${nKeys(n)} to ${name}; ${n - done} still list ${oldName}.` });
+      else if (done > 0) setResult({ tone: "good", text: `Updated ${nKeys(n)} to ${name}.` });
+      else if (n > 0) setResult({ tone: "warning", text: `${nKeys(n)} still list${n === 1 ? "s" : ""} ${oldName} and can no longer call this deployment. Edit ${n === 1 ? "it" : "them"} under Keys with access.` });
+      else setResult(null);
+    },
   });
   const problem = aliasProblem(value);
   const changed = value.trim() !== (d.alias ?? "");
+  const submit = () => save.mutate({ alias: value.trim(), ...(offerRewrite && { rewrite_keys: rewrite }) });
   return (
-    <form className="space-y-1.5" noValidate onSubmit={(e) => { e.preventDefault(); if (!problem && changed) save.mutate(value.trim()); }}>
+    <form className="space-y-1.5" noValidate onSubmit={(e) => { e.preventDefault(); if (!problem && changed) submit(); }}>
       <Label htmlFor="dep-model-name">Model name</Label>
       <div className="flex flex-col gap-2 sm:flex-row">
-        <Input id="dep-model-name" autoComplete="off" spellCheck={false} className="font-mono" value={value} placeholder={d.served_name ?? ""}
+        <Input ref={input} id="dep-model-name" autoComplete="off" spellCheck={false} className="font-mono" value={value} placeholder={d.served_name ?? ""}
           aria-invalid={!!problem || !!save.error} aria-describedby="dep-model-name-help"
-          onChange={(e) => { setValue(e.target.value); if (save.error) save.reset(); }} />
+          onChange={(e) => { setValue(e.target.value); setResult(null); if (save.error) save.reset(); }} />
         <Button type="submit" size="sm" className="h-9 shrink-0" aria-label="Save model name" disabled={!!problem || !changed || save.isPending}>
           {save.isPending && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}Save
         </Button>
       </div>
       <div id="dep-model-name-help">
         {problem ? <p className="text-xs text-status-critical">{problem}</p>
+          : takenHolder(save.error) ? <ModelNameTaken error={save.error} suggestion={suggestAlias(d.served_name, d.name)}
+              onUse={(a) => { setValue(a); save.reset(); input.current?.focus(); }} />
           : save.error ? <p role="alert" className="text-xs text-status-critical">{save.error.message}</p>
           : <p className="text-xs text-muted-foreground">Clients send this as model. Leave empty to use the served name ({d.served_name ?? "—"}). Renaming re-registers it in LiteLLM; clients using the old name stop working.</p>}
       </div>
+      {offerRewrite && changed && !problem && (
+        <div className="flex items-center gap-2 pt-1">
+          <Checkbox id="dep-rewrite-keys" checked={rewrite} onCheckedChange={(v) => setRewrite(v === true)} />
+          <Label htmlFor="dep-rewrite-keys" className="font-normal">Also update {nKeys(scoped.length)} scoped to {oldName}</Label>
+        </div>
+      )}
+      {result && (
+        <p role="status" className={`flex items-start gap-2 text-xs ${result.tone === "good" ? "text-status-good" : "text-status-warning"}`}>
+          {result.tone === "good" ? <CheckCircle2 aria-hidden className="mt-0.5 h-3.5 w-3.5 shrink-0" /> : <AlertTriangle aria-hidden className="mt-0.5 h-3.5 w-3.5 shrink-0" />}
+          <span>{result.text}</span>
+        </p>
+      )}
     </form>
   );
 }
 
 /** The deployment's LiteLLM tab. Admins can rename the model, re-sync and manage keys; viewers only read. */
-export function LiteLLMTab({ d, info, loading, error, admin }: { d: Deployment; info?: DeploymentLiteLLM; loading: boolean; error: unknown; admin: boolean }) {
+export function LiteLLMTab({ d, info, loading, error, admin, suggested }: {
+  d: Deployment; info?: DeploymentLiteLLM; loading: boolean; error: unknown; admin: boolean; suggested?: string | null;
+}) {
   const model = modelNameOf(d, info);
   const deps = useQuery({ queryKey: ["deployments"], queryFn: () => api<Deployment[]>("/deployments"), enabled: admin });
   const sync = useActionMutation(() => api("/integrations/litellm/sync", { method: "POST" }), {
     success: "LiteLLM sync finished", invalidate: [["deployment-litellm", d.id], ["deployment", d.id], ["deployments"]],
   });
-  const registered = info?.registered === true ? "Yes" : info?.registered === false ? "No" : loading ? "Checking…" : "Unknown";
+  const registered = info?.registered === true ? "Yes" : info?.registered === false ? "No" : loading ? "Checking…" : "Unknown — not synced yet";
   return (
     <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
       <Card className="min-w-0 shadow-card">
         <CardHeader className="pb-2"><CardTitle className="text-sm">Model name</CardTitle>
           <CardDescription className="text-xs">The name this deployment is registered under in LiteLLM.</CardDescription></CardHeader>
         <CardContent>
-          {admin ? <ModelNameForm d={d} /> : <dl><KV label="Model name" mono value={model} copy={model || null} /></dl>}
+          {admin ? <ModelNameForm d={d} info={info} suggested={suggested} /> : <dl><KV label="Model name" mono value={model} copy={model || null} /></dl>}
         </CardContent>
       </Card>
       <Card className="min-w-0 shadow-card">
@@ -139,7 +182,7 @@ export function LiteLLMTab({ d, info, loading, error, admin }: { d: Deployment; 
           </dl>
           {!!error && <ErrorState error={error} />}
           {info && !info.enabled && <Warn>The integration is disabled.{admin && <> Turn it on in <Link className="underline" to="/litellm">LiteLLM settings</Link>.</>}</Warn>}
-          {info?.error && <Warn>{litellmProblem(info.error).title}: {litellmProblem(info.error).description}</Warn>}
+          {info?.error && info.error.code !== "litellm_disabled" && <Warn>{litellmProblem(info.error).title}: {litellmProblem(info.error).description}</Warn>}
         </CardContent>
       </Card>
       {admin && info && (

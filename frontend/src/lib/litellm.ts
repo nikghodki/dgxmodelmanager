@@ -1,4 +1,4 @@
-import type { ApiProblem, Deployment, LiteLLMKey } from "@/types";
+import type { ApiProblem, Deployment, DeploymentRef, LiteLLMKey } from "@/types";
 
 /** Same rule as the backend `ALIAS_PATTERN`; the model name clients pass to LiteLLM. */
 export const ALIAS_RE = /^[A-Za-z0-9._:/-]{1,64}$/;
@@ -33,11 +33,11 @@ export interface ConnectionForm { enabled: boolean; url: string; public_url: str
 export interface ConnectionSaved { enabled: boolean; url: string; public_url: string; master_key_set: boolean }
 
 /**
- * The PUT body for the connection form (changed fields only). `needsKey` is true when the internal URL changes
- * while a master key is in effect: the backend refuses that (409 master_key_required) so the stored key can never be
- * sent to a server it was not entered for.
+ * The PUT body for the connection form (changed fields only). `keyDetaches` is true when the internal URL changes
+ * while a master key is in effect and no new key is given: the backend binds each key to the URL it was entered for,
+ * so the current key will stop being used and the user should enter the key for the new URL.
  */
-export function connectionPatch(saved: ConnectionSaved, form: ConnectionForm): { body: Record<string, unknown>; needsKey: boolean } {
+export function connectionPatch(saved: ConnectionSaved, form: ConnectionForm): { body: Record<string, unknown>; keyDetaches: boolean } {
   const body: Record<string, unknown> = {};
   if (form.enabled !== saved.enabled) body.enabled = form.enabled;
   const url = trimSlash(form.url);
@@ -48,7 +48,7 @@ export function connectionPatch(saved: ConnectionSaved, form: ConnectionForm): {
   const newKey = form.keyMode === "replace" ? form.masterKey.trim() : "";
   if (newKey) body.master_key = newKey;
   else if (form.keyMode === "clear" && saved.master_key_set) body.master_key = "";
-  return { body, needsKey: urlChanged && saved.master_key_set && !newKey };
+  return { body, keyDetaches: urlChanged && saved.master_key_set && !newKey };
 }
 
 export function aliasProblem(alias: string): string | null {
@@ -176,7 +176,9 @@ export function litellmProblem(err: unknown): { title: string; description: stri
         description: "Virtual keys need LiteLLM to run with a Postgres database: set DATABASE_URL (and STORE_MODEL_IN_DB=True so models added by DGXMM persist) on the LiteLLM proxy, then restart it.",
       };
     case "litellm_not_configured":
-      return { title: "No master key set", description: "Add the LiteLLM master key in Connection so DGXMM can manage models and keys." };
+      return { title: "No master key set", description: e.message || "Add the LiteLLM master key in Connection so DGXMM can manage models and keys." };
+    case "model_name_conflict":
+      return { title: "Model name conflict", description: message };
     case "litellm_disabled":
       return { title: "Integration disabled", description: "Turn the integration on in Connection to manage LiteLLM from DGXMM." };
     case "litellm_unreachable":
@@ -202,3 +204,38 @@ export function fmtLimits(k: Pick<LiteLLMKey, "rpm_limit" | "tpm_limit">): strin
 }
 
 export const fmtDate = (iso: string | null | undefined) => (iso ? new Date(iso).toLocaleDateString() : "—");
+
+/** The deployment that already owns a model name, from a 409 `model_name_taken` (deploy / alias / start / wake). */
+export function takenHolder(err: unknown): DeploymentRef | null {
+  const d = (err as { detail?: any } | null)?.detail;
+  return d && typeof d === "object" && d.code === "model_name_taken" && d.holder ? (d.holder as DeploymentRef) : null;
+}
+
+/** Error text for toasts: a model-name conflict always names the deployment holding the name. */
+export function apiErrorText(err: unknown): string {
+  const msg = (err as Error | null)?.message || "Request failed";
+  const h = takenHolder(err);
+  return h && !msg.includes(h.name) ? `${msg} (held by deployment ${h.name})` : msg;
+}
+
+/** Keys whose model list names `model` explicitly (unrestricted keys are not affected by a rename). */
+export const keysScopedTo = (keys: LiteLLMKey[], model: string) => keys.filter((k) => !isAllModels(k.models) && k.models.includes(model));
+
+export const MODEL_NAME_RULE = "Two deployments can't share one LiteLLM model name, otherwise LiteLLM would load-balance requests between them. Give this deployment its own model name.";
+
+/** A stable alias that cannot collide: deployment names are unique. Sanitised to the alias pattern. */
+export function suggestAlias(servedName: string | null | undefined, deploymentName: string): string {
+  const raw = servedName ? `${servedName}-${deploymentName}` : deploymentName;
+  return raw.replace(/[^A-Za-z0-9._:/-]+/g, "-").slice(0, 64) || "model";
+}
+
+/** The deployment's LiteLLM tab with a suggested model name prefilled. */
+export const nameFixHref = (d: { id: number; name: string; served_name?: string | null }) =>
+  `/deployments/${d.id}?tab=litellm&alias=${encodeURIComponent(suggestAlias(d.served_name, d.name))}`;
+
+/** `keys_rewritten` from an alias PATCH may be a bool (all affected), a count or the list actually rewritten. */
+export function rewrittenCount(v: unknown, affected: number): number {
+  if (typeof v === "number") return v;
+  if (Array.isArray(v)) return v.length;
+  return v === true ? affected : 0;
+}
