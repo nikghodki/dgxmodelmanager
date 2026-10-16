@@ -22,3 +22,19 @@ def test_server_kwargs_passthrough():
     assert kw["host"] == "0.0.0.0"
     assert kw["port"] == 8090
     assert kw["log_level"] == "info"
+
+
+def test_untrusted_xff_config():
+    """Server kwargs correctly configure uvicorn to ignore X-Forwarded-For from untrusted peers."""
+    from dgxmm.config import Settings
+    from dgxmm.__main__ import server_kwargs
+    
+    # Trust only 10.0.0.100
+    settings = Settings(trusted_proxies="10.0.0.100")
+    kw = server_kwargs(settings)
+    
+    # uvicorn ProxyHeadersMiddleware with forwarded_allow_ips="10.0.0.100":
+    # - From untrusted 10.0.0.5 with X-Forwarded-For: 8.8.8.8 → client stays 10.0.0.5 (spoofed header ignored)
+    # - From trusted 10.0.0.100 with X-Forwarded-For: 8.8.8.8 → client becomes 8.8.8.8 (header accepted)
+    assert kw["proxy_headers"] is True
+    assert kw["forwarded_allow_ips"] == "10.0.0.100"
