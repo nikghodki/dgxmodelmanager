@@ -61,6 +61,8 @@ min_free_disk_gib: 50         # downloads are refused when the HF cache disk wou
 # Registration is disabled when the master key file is empty or missing.
 litellm_url: http://litellm-proxy:4000
 # litellm_key_file: /run/secrets/litellm_master_key   # docker secret from secrets/litellm_master_key
+# litellm_public_url: http://<dgx-ip>:4000   # base URL clients use (the UI shows <url>/v1); empty = internal URL.
+#                                            # Default for the LiteLLM page; a value saved there wins.
 # hf_token_file: /run/secrets/hf_token                 # docker secret from secrets/hf_token (gated repos)
 
 # --- Web UI / sessions --------------------------------------------------------------------

@@ -132,11 +132,13 @@ async def put_settings(raw: Any = Body(...), p: Principal = Depends(require_admi
             store.set(LITELLM_URL, url)
             changes["url"] = url or "(default)"
     if "public_url" in fields and body.public_url is not None:
-        pub = _http_url("public_url", body.public_url) if body.public_url.strip() else None
-        pub = norm_url(pub) if pub else None
-        if pub != store.get(LITELLM_PUBLIC_URL):
-            store.set(LITELLM_PUBLIC_URL, pub)
-            changes["public_url"] = pub or ""
+        pub = norm_url(_http_url("public_url", body.public_url)) if body.public_url.strip() else ""
+        # The config default (litellm_public_url) is stored as "unset"; clearing it while a config default
+        # exists is stored as "" so it stays cleared instead of reverting to the default.
+        new = None if pub == norm_url(ctx.settings.litellm_public_url or "") else pub
+        if new != store.get(LITELLM_PUBLIC_URL):
+            store.set(LITELLM_PUBLIC_URL, new)
+            changes["public_url"] = pub
     if "master_key" in fields and body.master_key is not None:
         mk = body.master_key
         if mk and (len(mk) > 512 or any(c.isspace() or not c.isprintable() for c in mk)):

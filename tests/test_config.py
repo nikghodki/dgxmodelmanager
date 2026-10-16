@@ -93,3 +93,18 @@ def test_example_config_vllm_image_is_public_digest():
     example = Path(__file__).resolve().parent.parent / "config.example.yaml"
     images = yaml.safe_load(example.read_text())["images"]
     assert images["vllm"].startswith("vllm/vllm-openai@sha256:") and "pinned" not in images["vllm"]
+
+
+def test_litellm_public_url_from_yaml(tmp_path):
+    p = tmp_path / "c.yaml"
+    p.write_text("litellm_public_url: http://10.0.0.5:4000/\n")
+    assert load_settings(str(p)).litellm_public_url == "http://10.0.0.5:4000"
+    assert load_settings(str(tmp_path / "missing.yaml")).litellm_public_url == ""
+
+
+@pytest.mark.parametrize("bad", ["ftp://x", "not a url", "http://", "http://u:p@h:4000", "http://h/?q=1"])
+def test_litellm_public_url_rejects_bad_values(tmp_path, bad):
+    p = tmp_path / "c.yaml"
+    p.write_text(f"litellm_public_url: \"{bad}\"\n")
+    with pytest.raises(ValueError):
+        load_settings(str(p))

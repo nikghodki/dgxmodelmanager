@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import yaml
 import ipaddress
@@ -99,12 +100,28 @@ class Settings(BaseModel):
     inventory_interval_s: float = 300.0
     litellm_url: str = "http://litellm-proxy:4000"
     litellm_key_file: str = "/run/secrets/litellm_master_key"
+    # Base URL clients use to reach LiteLLM (UI shows <url>/v1). Default for the litellm.public_url runtime
+    # setting; a value saved on the LiteLLM page wins. install.sh --with-litellm seeds it on fresh configs.
+    litellm_public_url: str = ""
     hf_token_file: str = "/run/secrets/hf_token"
     helper_image: str | None = None  # image for root delete helpers; None → this container's image, else dgxmm:latest
     helper_timeout_s: float = 120.0
     session_ttl_s: int = 12 * 3600
     secure_cookies: str = "auto"  # auto | always | never
     trusted_proxies: str = "127.0.0.1,::1"  # IPs/CIDRs that may set X-Forwarded-For
+
+    @field_validator("litellm_public_url")
+    @classmethod
+    def _validate_public_url(cls, v: str) -> str:
+        v = (v or "").strip()
+        if not v:
+            return ""
+        parts = urlsplit(v)
+        if parts.scheme not in ("http", "https") or not parts.hostname or any(c.isspace() for c in v) \
+                or parts.query or parts.fragment or parts.username or parts.password:
+            raise ValueError("litellm_public_url must be an http:// or https:// URL without credentials or query")
+        parts.port  # noqa: B018  (raises ValueError on an invalid port)
+        return v.rstrip("/")
 
     @field_validator("trusted_proxies", mode="before")
     @classmethod

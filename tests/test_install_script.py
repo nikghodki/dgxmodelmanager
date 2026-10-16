@@ -953,3 +953,66 @@ def test_docs_cover_bundled_litellm():
                  "litellm_bundled_master_key"):
         assert word in cfg
     assert "--with-litellm" in (ROOT / "README.md").read_text()
+
+
+# --- LiteLLM public URL seeding -------------------------------------------------------------------------
+
+def _cfg_lines(box, key):
+    return [l for l in (box.repo / "config.yaml").read_text().splitlines() if l.startswith(f"{key}:")]
+
+
+def test_with_litellm_fresh_config_seeds_public_url(box):
+    _copy_litellm_files(box)
+    p = box.run("--with-litellm")
+    assert p.returncode == 0, p.out
+    assert _cfg_lines(box, "litellm_public_url") == ["litellm_public_url: http://192.168.10.20:4000"]
+
+
+def test_with_litellm_public_url_uses_custom_port_and_bind_ip(box):
+    _copy_litellm_files(box)
+    p = box.run("--with-litellm", "--bind", "192.168.10.20", DGXMM_LITELLM_PORT="4100")
+    assert p.returncode == 0, p.out
+    assert _cfg_lines(box, "litellm_public_url") == ["litellm_public_url: http://192.168.10.20:4100"]
+
+
+def test_with_litellm_loopback_bind_does_not_seed_public_url(box):
+    """127.0.0.1 is not reachable by clients; leave the public URL for the admin to set."""
+    _copy_litellm_files(box)
+    p = box.run("--with-litellm", "--bind", "127.0.0.1")
+    assert p.returncode == 0, p.out
+    assert _cfg_lines(box, "litellm_public_url") == []
+
+
+def test_with_litellm_external_url_does_not_seed_public_url(box):
+    _copy_litellm_files(box)
+    p = box.run("--with-litellm", LITELLM_URL="http://litellm-proxy:4000")
+    assert p.returncode == 0, p.out
+    assert _cfg_lines(box, "litellm_public_url") == []
+
+
+def test_with_litellm_dry_run_shows_public_url_and_writes_nothing(box):
+    _copy_litellm_files(box)
+    before = box.snapshot()
+    p = box.run("--with-litellm", "--dry-run")
+    assert p.returncode == 0, p.out
+    assert box.snapshot() == before
+    assert "litellm_public_url: http://192.168.10.20:4000" in p.out
+
+
+def test_without_litellm_no_public_url(box):
+    assert box.run().returncode == 0
+    assert _cfg_lines(box, "litellm_public_url") == []
+
+
+def test_with_litellm_existing_config_public_url_untouched(box):
+    _copy_litellm_files(box)
+    cfg = "docker_network: dgxmm\nlitellm_url: http://dgxmm-litellm:4000\n"
+    (box.repo / "config.yaml").write_text(cfg)
+    p = box.run("--with-litellm")
+    assert p.returncode == 0, p.out
+    assert (box.repo / "config.yaml").read_text() == cfg
+
+
+def test_example_config_documents_public_url():
+    text = (ROOT / "config.example.yaml").read_text()
+    assert "# litellm_public_url:" in text
