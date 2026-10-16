@@ -243,6 +243,9 @@ load_settings() {
   if ! [[ $PORT =~ ^[0-9]+$ ]] || ((PORT < 1 || PORT > 65535)); then
     die "DGXMM_PORT must be a port number 1-65535 (got '$PORT')"
   fi
+  if ! [[ ${DGXMM_HEALTH_TIMEOUT:-300} =~ ^[0-9]+$ ]] || ((${DGXMM_HEALTH_TIMEOUT:-300} < 1)); then
+    die "DGXMM_HEALTH_TIMEOUT must be a positive whole number of seconds (got '${DGXMM_HEALTH_TIMEOUT}')"
+  fi
   [[ $BIND =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || die "DGXMM_BIND must be an IPv4 address such as 0.0.0.0 or 127.0.0.1 (got '$BIND')"
   [[ $NETWORK =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] || die "DGXMM_NETWORK is not a valid docker network name (got '$NETWORK')"
   local n
@@ -321,7 +324,11 @@ check_ownership() {
 
 port_busy() {
   if command -v ss >/dev/null 2>&1; then
-    ss -Hltn 2>/dev/null | awk '{print $4}' | grep -Eq "[:.]$1\$"
+    # Capture first, then match in one awk: a pipeline into grep -q can die of SIGPIPE under
+    # pipefail and make a busy port look free.
+    local listeners
+    listeners=$(ss -Hltn 2>/dev/null) || listeners=""
+    awk -v port="$1" '{ n = split($4, a, ":"); if (a[n] == port) found = 1 } END { exit !found }' <<<"$listeners"
   else
     (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null
   fi
@@ -355,12 +362,6 @@ preflight() {
   check_not_root
   require_docker
   ok "docker daemon reachable"
-  local v major
-  v=$(docker version --format '{{.Server.Version}}' 2>/dev/null || true)
-  major=${v%%.*}
-  if [[ $major =~ ^[0-9]+$ ]] && ((major < 25)); then
-    warn "Docker $v is old; Docker Engine 25+ is recommended (faster health checks)"
-  fi
   docker compose version --short >/dev/null 2>&1 ||
     die "docker compose v2 is required ('docker compose version' failed). Install the Docker Compose plugin (package docker-compose-plugin): https://docs.docker.com/compose/install/linux/"
   ok "docker compose $(docker compose version --short 2>/dev/null)"
@@ -548,17 +549,29 @@ pull_engines() {
   [ -f "$cfg" ] || cfg=$EXAMPLE_CONFIG
   info "Pulling engine images (this can take a while)"
   while read -r img; do
-    if [ -n "$img" ]; then run docker pull "$img"; fi
+    if [ -n "$img" ]; then
+      run docker pull "$img" ||
+        die "could not pull $img. Check network access to the registry, or point images.* in config.yaml at an image that exists locally (docker images)"
+    fi
   done < <(engine_images "$cfg")
 }
 
 # capture_admin_password: on first run, save the password DGXMM generated for `admin` to
 # secrets/admin_password (600). Returns 0 and sets ADMIN_PW only when a new one was captured.
 ADMIN_PW=""
+RUN_START=""
+CREATED_THIS_RUN=0
+container_id() {
+  docker inspect --format '{{.Id}}' "$CONTAINER" 2>/dev/null || true
+}
+
+# Only a container (re)created by this run, logging after this run started, can hold a fresh
+# first-run password; anything else would be stale.
 capture_admin_password() {
   [ -e "$SECRETS_DIR/admin_password" ] && return 1
+  if ((!CREATED_THIS_RUN)) || [ -z "$RUN_START" ]; then return 1; fi
   local pw
-  pw=$(docker logs "$CONTAINER" 2>&1 |
+  pw=$(docker logs --since "$RUN_START" "$CONTAINER" 2>&1 |
        sed -n "s/.*DGXMM first run: created user 'admin' with password \([^ ]*\).*/\1/p" | tail -n 1)
   [ -n "$pw" ] || return 1
   (umask 077 && printf '%s\n' "$pw" > "$SECRETS_DIR/admin_password")
@@ -605,7 +618,13 @@ print_urls() {
       while read -r ip; do
         if [ -n "$ip" ]; then note "http://$ip:$PORT$path"; fi
       done < <(host_ipv4s)
-      note "http://$(hostname 2>/dev/null || echo localhost):$PORT$path"
+      local host
+      host=$(hostname 2>/dev/null || echo localhost)
+      case $host in
+        *.*|localhost) ;;
+        *) note "http://$host.local:$PORT$path  (mDNS)" ;;
+      esac
+      note "http://$host:$PORT$path"
       ;;
     127.0.0.1)
       note "http://127.0.0.1:$PORT$path  (loopback only: publish it through a reverse proxy, see deploy/nginx-dgxmm.conf)"
@@ -638,7 +657,12 @@ cmd_install() {
   pull_engines
   export_settings
   info "Building and starting DGXMM (docker compose up -d --build)"
-  run docker compose up -d --build
+  RUN_START=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  local id_before
+  id_before=$(container_id)
+  run docker compose up -d --build ||
+    die "docker compose up failed (image build or container start); see the output above, then run ./install.sh logs"
+  if [ "$(container_id)" != "$id_before" ]; then CREATED_THIS_RUN=1; fi
 
   if ((DRY_RUN)); then
     note "[dry-run] would wait for the healthcheck, then save a first-run admin password to secrets/admin_password"
@@ -655,9 +679,9 @@ cmd_install() {
     note "admin user: admin   password: $ADMIN_PW"
     note "(shown once; also saved to secrets/admin_password. You must change it at first login.)"
   elif [ -e "$SECRETS_DIR/admin_password" ]; then
-    note "admin password: see secrets/admin_password (if unchanged)"
+    note "admin password: see secrets/admin_password (if unchanged), or reset it (see docs/operations.md)"
   else
-    note "admin password: an admin account already exists (no first-run password to show)"
+    note "admin password: see secrets/admin_password, or reset it (see docs/operations.md)"
   fi
   note "manage: ./install.sh status | logs | upgrade | uninstall"
 }

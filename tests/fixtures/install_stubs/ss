@@ -1,3 +1,12 @@
 #!/usr/bin/env bash
-[ -n "${FAKE_PORT_BUSY:-}" ] && echo "LISTEN 0 4096 0.0.0.0:${FAKE_PORT_BUSY} 0.0.0.0:*"
+# FAKE_PORT_BUSY=PORT: report a listener on PORT (IPv6 form when FAKE_SS_V6=1).
+# FAKE_SS_FILLER=N: print N more unrelated listeners after it (provokes SIGPIPE in naive pipelines).
+if [ -n "${FAKE_PORT_BUSY:-}" ]; then
+  if [ "${FAKE_SS_V6:-0}" = 1 ]; then
+    echo "LISTEN 0 4096 [::]:${FAKE_PORT_BUSY} [::]:*"
+  else
+    echo "LISTEN 0 4096 0.0.0.0:${FAKE_PORT_BUSY} 0.0.0.0:*"
+  fi
+fi
+for ((i = 0; i < ${FAKE_SS_FILLER:-0}; i++)); do echo "LISTEN 0 4096 10.0.0.1:$((20000 + i % 10000)) 0.0.0.0:*"; done
 exit 0

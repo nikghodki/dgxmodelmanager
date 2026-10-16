@@ -9,7 +9,7 @@ Design: `docs/superpowers/specs/2026-10-15-dgx-model-manager-design.md`. Plan: `
 
 ## Install
 
-Needs: Linux (arm64 or x86_64) with an NVIDIA GPU, Docker Engine 25+ with the compose v2 plugin, and the
+Needs: Linux (arm64 or x86_64) with an NVIDIA GPU, Docker Engine with the compose v2 plugin, and the
 NVIDIA Container Toolkit (`nvidia` runtime). Run as a normal user in the `docker` group (not root).
 
     git clone https://github.com/nikghodki/dgxmodelmanager.git && cd dgxmodelmanager && ./install.sh
@@ -64,13 +64,13 @@ refuses to start a second instance from another checkout.
 ## Develop
 
     python3 -m venv .venv && .venv/bin/pip install -e '.[dev]' && .venv/bin/pytest -q
-    docker run --rm -u 1000:1000 -v $PWD/frontend:/app -w /app -e HOME=/tmp node:22-bookworm-slim sh -c "npm ci && npx vitest run && npm run build"
+    docker run --rm -u "$(id -u):$(id -g)" -v $PWD/frontend:/app -w /app -e HOME=/tmp node:22-bookworm-slim sh -c "npm ci && npx vitest run && npm run build"
     scripts/validate_on_box.sh                   # end-to-end on the DGX (deploys small models)
 
 ## Troubleshooting
 
 - *Download fails with "owned by root"*: an engine container created that HF cache folder as root;
-  run the `sudo chown -R 1000:1000 …` shown in the error.
+  run the `sudo chown -R <uid>:<gid> …` shown in the error (the uid:gid DGXMM runs as, DGXMM_UID:DGXMM_GID in `.env`).
 - *LiteLLM status stays `pending`*: check `store_model_in_db: true` and the key in `secrets/litellm_master_key`.
 - *Catalog says "llmfit unavailable"*: `docker exec dgxmm llmfit --version`; everything else keeps working.
 - *Deployment failed with exit 137*: the kernel OOM-killed it; DGXMM adds 10% to the next estimate for that config.

@@ -22,7 +22,8 @@ auto_protect: false           # true = when memory turns critical the watchdog s
 
 # --- Engine containers --------------------------------------------------------------------
 images:
-  vllm: vllm/vllm-openai:pinned-2026-08-27        # image for vLLM deployments
+  # vLLM image, pinned by digest (public multi-arch manifest list, arm64 + amd64)
+  vllm: vllm/vllm-openai@sha256:22d3b1217fda569653f32f1e00a2a4e64119c1601c67ff94cc72d7ca5ef352c8
   llamacpp: ghcr.io/ggml-org/llama.cpp:server-cuda  # image for llama.cpp (GGUF) deployments
 docker_network: dgxmm         # docker network engines join; must equal DGXMM_NETWORK in .env
 port_range: [8100, 8199]      # host ports handed to engine containers (1024-65535, ascending)
