@@ -1,11 +1,13 @@
 import { useEffect, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { useNavigate, useParams } from "react-router-dom";
-import { Activity, ArrowLeftRight, FileText, Gauge, Lightbulb, Loader2, MoreHorizontal, Moon, Play, Power, RefreshCw, Settings2, Sun, Trash2 } from "lucide-react";
+import { useNavigate, useParams, useSearchParams } from "react-router-dom";
+import { Activity, ArrowLeftRight, FileText, Network, Gauge, Lightbulb, Loader2, MoreHorizontal, Moon, Play, Power, RefreshCw, Settings2, Sun, Trash2 } from "lucide-react";
 import { api } from "@/api";
 import { useIsAdmin } from "@/auth";
 import { ConfirmDialog } from "@/components/app/confirm-dialog";
-import { CopyButton } from "@/components/app/copy-button";
+import { ApiAccessCard, KV, LiteLLMTab, useDeploymentLiteLLM } from "@/components/app/deployment-litellm";
+import { ModelNameTaken } from "@/components/app/model-name-taken";
+import { nameFixHref } from "@/lib/litellm";
 import { ChartCard } from "@/components/app/metric-chart";
 import { PageHeader } from "@/components/app/page-header";
 import { StatusBadge } from "@/components/app/status-badge";
@@ -28,6 +30,7 @@ import type { Deployment } from "@/types";
 import { SwitchDialog } from "@/components/app/switch-dialog";
 
 const WINDOWS = ["live", "24h", "7d"] as const;
+const TABS = ["overview", "litellm", "performance", "advice", "benchmarks", "events"];
 
 function WindowPicker({ value, onChange }: { value: string; onChange: (w: string) => void }) {
   return (
@@ -155,22 +158,14 @@ function LogsSheet({ id, open, onOpenChange }: { id: number; open: boolean; onOp
   );
 }
 
-function KV({ label, value, mono, copy }: { label: string; value: React.ReactNode; mono?: boolean; copy?: string | null }) {
-  return (
-    <div className="flex items-center justify-between gap-3 border-b py-2 last:border-0">
-      <dt className="shrink-0 text-sm text-muted-foreground">{label}</dt>
-      <dd className={`flex min-w-0 items-center gap-1 text-right text-sm ${mono ? "font-mono text-xs" : ""}`}>
-        <span className="min-w-0 break-all">{value ?? "—"}</span>{copy && <CopyButton value={copy} label={`Copy ${label}`} />}
-      </dd>
-    </div>
-  );
-}
-
 export function DeploymentDetail() {
   const id = Number(useParams().id);
+  const [params, setParams] = useSearchParams();
+  const tab = TABS.includes(params.get("tab") ?? "") ? params.get("tab")! : "overview";
   const admin = useIsAdmin();
   const nav = useNavigate();
   const dep = useQuery({ queryKey: ["deployment", id], queryFn: () => api<Deployment>(`/deployments/${id}`) });
+  const litellm = useDeploymentLiteLLM(id);
   const [logs, setLogs] = useState(false);
   const [dialog, setDialog] = useState<null | { mode: "switch" | "reconfigure"; patch?: Record<string, any> }>(null);
   const [confirm, setConfirm] = useState<null | "stop" | "remove">(null);
@@ -180,6 +175,10 @@ export function DeploymentDetail() {
   const remove = useActionMutation(() => api(`/deployments/${id}`, { method: "DELETE" }), {
     success: "Deployment removed", invalidate: [["deployments"]], onSuccess: () => nav("/deployments"),
   });
+
+  // A start/wake model-name conflict notice is stale once the user moves on (e.g. follows its fix link).
+  const resetAct = act.reset;
+  useEffect(() => { resetAct(); }, [tab]); // eslint-disable-line react-hooks/exhaustive-deps
 
   if (dep.isLoading) return <PageSkeleton />;
   const d = dep.data;
@@ -216,10 +215,12 @@ export function DeploymentDetail() {
         </>}
       />
       {d.last_error && <ErrorState error={new Error(d.last_error)} />}
+      <ModelNameTaken error={act.error} fixHref={admin ? nameFixHref(d) : undefined} fixLabel={`Set a model name for ${d.name}`} />
 
-      <Tabs defaultValue="overview">
+      <Tabs value={tab} onValueChange={(t) => setParams(t === "overview" ? {} : { tab: t }, { replace: true })}>
         <TabsList className="w-full justify-start overflow-x-auto sm:w-auto">
           <TabsTrigger value="overview">Overview</TabsTrigger>
+          <TabsTrigger value="litellm"><Network className="mr-1 h-3.5 w-3.5" />LiteLLM</TabsTrigger>
           <TabsTrigger value="performance"><Activity className="mr-1 h-3.5 w-3.5" />Performance</TabsTrigger>
           <TabsTrigger value="advice"><Lightbulb className="mr-1 h-3.5 w-3.5" />Advice</TabsTrigger>
           <TabsTrigger value="benchmarks"><Gauge className="mr-1 h-3.5 w-3.5" />Benchmarks</TabsTrigger>
@@ -227,15 +228,7 @@ export function DeploymentDetail() {
         </TabsList>
 
         <TabsContent value="overview" className="mt-4 grid grid-cols-1 gap-4 lg:grid-cols-3">
-          <Card className="min-w-0 shadow-card">
-            <CardHeader className="pb-2"><CardTitle className="text-sm">Endpoints</CardTitle><CardDescription className="text-xs">OpenAI-compatible</CardDescription></CardHeader>
-            <CardContent><dl>
-              <KV label="Served name" value={d.served_name} mono copy={d.served_name} />
-              <KV label="Gateway network" value={d.endpoint} mono copy={d.endpoint} />
-              <KV label="On the DGX" value={d.host_endpoint} mono copy={d.host_endpoint} />
-              <KV label="LiteLLM" value={<span className="inline-flex items-center gap-2"><StatusBadge state={d.litellm_status} />{d.alias && <span className="font-mono text-xs">{d.alias}</span>}</span>} />
-            </dl></CardContent>
-          </Card>
+          <ApiAccessCard d={d} info={litellm.data} loading={litellm.isLoading} error={litellm.error} />
           <Card className="min-w-0 shadow-card">
             <CardHeader className="pb-2"><CardTitle className="text-sm">Memory</CardTitle>
               <CardDescription className="text-xs">confidence: {(d.estimate as any)?.confidence ?? "—"}</CardDescription></CardHeader>
@@ -245,7 +238,7 @@ export function DeploymentDetail() {
               {parts.map((p) => <KV key={p.key} label={p.label} value={<span className="tabular-nums">{fmtBytes(p.bytes)}</span>} />)}
             </dl></CardContent>
           </Card>
-          <Card className="min-w-0 shadow-card">
+          <Card className="min-w-0 shadow-card lg:col-span-2">
             <CardHeader className="pb-2"><CardTitle className="text-sm">Configuration</CardTitle></CardHeader>
             <CardContent><dl>
               {Object.entries(d.config ?? {}).filter(([, v]) => v !== null && !(Array.isArray(v) && !v.length)).map(([k, v]) => (
@@ -255,6 +248,7 @@ export function DeploymentDetail() {
           </Card>
         </TabsContent>
 
+        <TabsContent value="litellm" className="mt-4"><LiteLLMTab d={d} info={litellm.data} loading={litellm.isLoading} error={litellm.error} admin={admin} suggested={params.get("alias")} onRenamed={() => act.reset()} /></TabsContent>
         <TabsContent value="performance" className="mt-4"><Performance id={id} /></TabsContent>
         <TabsContent value="advice" className="mt-4"><Advice d={d} onApply={(patch) => setDialog({ mode: "reconfigure", patch })} /></TabsContent>
         <TabsContent value="benchmarks" className="mt-4"><Benchmarks d={d} /></TabsContent>

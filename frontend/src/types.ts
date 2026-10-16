@@ -47,5 +47,42 @@ export interface Deployment {
   config: Record<string, any>; litellm_status: string; last_error: string | null; exit_code: number | null;
   container_id: string | null; served_name: string | null; endpoint: string | null; host_endpoint: string | null;
   sleep_capable: boolean; adopted_from: string | null; created_at: string; updated_at: string; events?: DeploymentEvent[];
+  /** The name clients pass as `model` to LiteLLM: alias if set, else served_name. */
+  model_name?: string | null;
 }
 export interface EngineInfo { name: string; supports_sleep: boolean; defaults: Record<string, any>; image: string | null }
+
+export interface LiteLLMStatus { reachable: boolean; version: string | null; db: string | null; error: string | null; checked_at: string }
+export interface LiteLLMSettings {
+  enabled: boolean; url: string; public_url: string; endpoint: string;
+  master_key_set: boolean; master_key_source: "settings" | "secret_file" | "none"; status: LiteLLMStatus;
+  /** Set when a key exists but is not valid for the effective URL (keys are bound to the URL they were entered for). */
+  master_key_hint: string | null;
+  /** The config default internal URL (an empty URL in the form resets to it). */
+  default_url?: string;
+}
+export interface LiteLLMTestResult extends LiteLLMStatus { auth_ok: boolean | null; models: number | null }
+export interface LiteLLMSyncResult { ok: boolean; status: string; registered: number; removed: number; error: string | null }
+export interface LiteLLMModel {
+  id: string; model_name: string; model: string; api_base: string | null; managed_by_dgxmm: boolean;
+  deployment: { id: number; name: string; state: string } | null; db_model: boolean;
+}
+/** A LiteLLM virtual key as listed: never the full key. `token` is the 64-hex hash used as the key id. */
+export interface LiteLLMKey {
+  token: string; key_name: string | null; key_alias: string | null; models: string[]; spend: number | null;
+  max_budget: number | null; budget_duration: string | null; rpm_limit: number | null; tpm_limit: number | null;
+  expires: string | null; created_at: string | null; blocked: boolean | null; metadata: Record<string, unknown> | null;
+  created_by_dgxmm: boolean;
+}
+/** Only the create response carries the full key. */
+export interface LiteLLMCreatedKey extends LiteLLMKey { key: string }
+export interface ApiProblem { code: string; message: string }
+export interface DeploymentRef { id: number; name: string; state: string }
+/** PATCH /deployments/{id} response: the deployment plus what happened to keys scoped to the old model name. */
+export interface AliasPatchResult extends Deployment {
+  affected_keys: { token: string; key_alias: string | null; models: string[] }[]; keys_rewritten: number | boolean | unknown[]; keys_error: ApiProblem | null;
+}
+export interface DeploymentLiteLLM {
+  deployment_id: number; model_name: string; endpoint: string; registered: boolean | null; status: string; enabled: boolean;
+  error: ApiProblem | null; keys: LiteLLMKey[]; keys_visible: boolean; keys_error: ApiProblem | null;
+}

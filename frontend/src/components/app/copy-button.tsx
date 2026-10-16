@@ -20,7 +20,7 @@ async function copyText(value: string) {
   }
 }
 
-export function CopyButton({ value, label = "Copy" }: { value: string; label?: string }) {
+export function CopyButton({ value, label = "Copy", onCopied }: { value: string; label?: string; onCopied?: () => void }) {
   const [done, setDone] = useState(false);
   return (
     <Button variant="ghost" size="icon" className="h-7 w-7 shrink-0" aria-label={label}
@@ -28,6 +28,7 @@ export function CopyButton({ value, label = "Copy" }: { value: string; label?: s
         try {
           await copyText(value);
           setDone(true);
+          onCopied?.();
           setTimeout(() => setDone(false), 1500);
           toast.success("Copied to clipboard");
         } catch {
