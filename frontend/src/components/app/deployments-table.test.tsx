@@ -22,4 +22,17 @@ describe("DeploymentsTable", () => {
     expect(screen.getByText("Ready")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /Actions for small/ })).toBeInTheDocument();
   });
+
+  it("shows the LiteLLM model name and its registration status", () => {
+    const qc = new QueryClient();
+    qc.setQueryData(["live", 1], []);
+    render(
+      <QueryClientProvider client={qc}><MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}><TooltipProvider>
+        <DeploymentsTable isAdmin={false} onSwitch={vi.fn()} onReconfigure={vi.fn()}
+          deployments={[{ id: 1, name: "small", engine: "vllm", model_ref: "org/m", state: "ready", reserved_bytes: 1, actual_bytes: 1, litellm_status: "pending", model_name: "team-chat", served_name: "small", alias: "team-chat", sleep_capable: false, last_error: null } as any]} />
+      </TooltipProvider></MemoryRouter></QueryClientProvider>,
+    );
+    expect(screen.getByText("team-chat")).toBeInTheDocument();
+    expect(screen.getByText("Pending")).toBeInTheDocument();
+  });
 });

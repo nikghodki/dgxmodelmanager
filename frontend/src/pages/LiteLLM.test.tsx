@@ -1,0 +1,202 @@
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { render, screen, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { MemoryRouter } from "react-router-dom";
+import { LiteLLM } from "./LiteLLM";
+import * as auth from "@/auth";
+import * as apiModule from "@/api";
+
+vi.mock("@/auth");
+vi.mock("@/api", async () => {
+  const actual = await vi.importActual<typeof import("@/api")>("@/api");
+  return { ...actual, api: vi.fn() };
+});
+
+const okStatus = { reachable: true, version: "1.100.0", db: "connected", error: null, checked_at: "2026-10-16T16:56:43Z" };
+const settings = (over: Record<string, any> = {}) => ({
+  enabled: true, url: "http://litellm-proxy:4000", public_url: "https://llm.example.com", endpoint: "https://llm.example.com/v1",
+  master_key_set: true, master_key_source: "secret_file", status: okStatus, ...over,
+});
+const key = {
+  token: "a".repeat(64), key_name: "sk-...HWqw", key_alias: "team-a", models: ["chat"], spend: 1.5, max_budget: 5, budget_duration: "30d",
+  rpm_limit: 10, tpm_limit: null, expires: null, created_at: "2026-10-01T00:00:00Z", blocked: false, metadata: {}, created_by_dgxmm: true,
+};
+const models = [
+  { id: "m1", model_name: "chat", model: "openai/qwen3", api_base: "http://dgxmm-a:8101/v1", managed_by_dgxmm: true, deployment: { id: 1, name: "qwen", state: "ready" }, db_model: true },
+  { id: "m2", model_name: "hand-written", model: "openai/x", api_base: "http://x", managed_by_dgxmm: false, deployment: null, db_model: true },
+];
+const deployments = [{ id: 1, name: "qwen", model_name: "chat", alias: "chat", served_name: "qwen" }];
+
+type Handler = (url: string, opts?: any) => any;
+function setup(over: Record<string, any> = {}, extra?: Handler) {
+  vi.mocked(auth.useIsAdmin).mockReturnValue(true);
+  vi.mocked(apiModule.api).mockImplementation(async (url: string, opts?: any) => {
+    const r = extra?.(url, opts);
+    if (r !== undefined) return r;
+    if (url === "/integrations/litellm" && !opts?.method) return settings(over);
+    if (url === "/integrations/litellm/models") return models;
+    if (url === "/integrations/litellm/keys" && !opts?.method) return [key];
+    if (url === "/deployments") return deployments;
+    return new Promise(() => undefined);
+  });
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+  render(
+    <QueryClientProvider client={qc}>
+      <MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}><LiteLLM /></MemoryRouter>
+    </QueryClientProvider>,
+  );
+  return qc;
+}
+const cached = (qc: QueryClient, secret: string) => qc.getMutationCache().getAll().some((m) => JSON.stringify(m.state).includes(secret));
+const calls = (method: string, url: string) => vi.mocked(apiModule.api).mock.calls.filter(([u, o]) => u === url && (o as any)?.method === method);
+
+afterEach(() => vi.mocked(apiModule.api).mockReset());
+
+describe("LiteLLM page", () => {
+  it("redirects viewers", () => {
+    vi.mocked(auth.useIsAdmin).mockReturnValue(false);
+    const qc = new QueryClient();
+    const { container } = render(<QueryClientProvider client={qc}><MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}><LiteLLM /></MemoryRouter></QueryClientProvider>);
+    expect(container.textContent).toBe("");
+  });
+
+  it("shows the connection, the single endpoint, models and keys", async () => {
+    setup();
+    expect(await screen.findByLabelText("Internal URL")).toHaveValue("http://litellm-proxy:4000");
+    expect(screen.getByTestId("endpoint-preview")).toHaveTextContent("https://llm.example.com/v1");
+    expect(screen.getByText(/Set \(from secret file\)/)).toBeInTheDocument();
+    expect(await screen.findByText("hand-written")).toBeInTheDocument();
+    expect(screen.getByText("external")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "qwen" })).toHaveAttribute("href", "/deployments/1");
+    expect(await screen.findByText("team-a")).toBeInTheDocument();
+    expect(screen.getByText("sk-...HWqw")).toBeInTheDocument();
+    expect(screen.getByText("$1.50 / $5.00 per 30d")).toBeInTheDocument();
+  });
+
+  it("previews the public endpoint live and falls back to the internal URL", async () => {
+    setup();
+    const pub = await screen.findByLabelText("Public endpoint URL");
+    await userEvent.clear(pub);
+    expect(screen.getByTestId("endpoint-preview")).toHaveTextContent("http://litellm-proxy:4000/v1");
+    await userEvent.type(pub, "http://10.0.0.5:4000/");
+    expect(screen.getByTestId("endpoint-preview")).toHaveTextContent("http://10.0.0.5:4000/v1");
+  });
+
+  it("never renders the master key: a replaced key is sent once and the field is cleared", async () => {
+    const qc = setup({}, (url, opts) => (url === "/integrations/litellm" && opts?.method === "PUT" ? settings({ master_key_source: "settings" }) : undefined));
+    await userEvent.click(await screen.findByRole("button", { name: "Replace" }));
+    await userEvent.type(screen.getByLabelText("New master key"), "sk-master-SECRET");
+    await userEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(calls("PUT", "/integrations/litellm")).toHaveLength(1));
+    expect(calls("PUT", "/integrations/litellm")[0][1]).toEqual({ method: "PUT", body: { master_key: "sk-master-SECRET" } });
+    expect(await screen.findByText(/Set \(from settings\)/)).toBeInTheDocument();
+    expect(screen.queryByDisplayValue("sk-master-SECRET")).toBeNull();
+    expect(document.body.innerHTML).not.toContain("sk-master-SECRET");
+    await waitFor(() => expect(cached(qc, "sk-master-SECRET")).toBe(false));
+  });
+
+  it("forces re-entering the master key when the internal URL changes", async () => {
+    setup({}, (url, opts) => (url === "/integrations/litellm" && opts?.method === "PUT" ? settings({ url: "http://other:4000" }) : undefined));
+    const url = await screen.findByLabelText("Internal URL");
+    await userEvent.clear(url);
+    await userEvent.type(url, "http://other:4000");
+    expect(screen.getByText(/Re-enter the master key/)).toBeInTheDocument();
+    const save = screen.getByRole("button", { name: "Save" });
+    expect(save).toBeDisabled();
+    await userEvent.type(screen.getByLabelText("New master key"), "sk-again");
+    expect(save).toBeEnabled();
+    await userEvent.click(save);
+    await waitFor(() => expect(calls("PUT", "/integrations/litellm")).toHaveLength(1));
+    expect(calls("PUT", "/integrations/litellm")[0][1]).toEqual({ method: "PUT", body: { url: "http://other:4000", master_key: "sk-again" } });
+  });
+
+  it("shows test connection details and sync counts", async () => {
+    setup({}, (url) => {
+      if (url === "/integrations/litellm/test") return { ...okStatus, auth_ok: false, models: null, error: "LiteLLM rejected the master key; check it in the LiteLLM settings" };
+      if (url === "/integrations/litellm/sync") return { ok: true, status: "synced", registered: 2, removed: 1, error: null };
+      return undefined;
+    });
+    await userEvent.click(await screen.findByRole("button", { name: "Test connection" }));
+    const result = await screen.findByRole("status", { name: "Connection test result" });
+    expect(within(result).getByText(/rejected the master key/)).toBeInTheDocument();
+    expect(within(result).getByText("1.100.0")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Sync now" }));
+    expect(await screen.findByText(/2 registered, 1 removed/)).toBeInTheDocument();
+  });
+
+  it("explains an unreachable LiteLLM", async () => {
+    setup({ status: { reachable: false, version: null, db: null, error: "could not reach LiteLLM at http://litellm-proxy:4000: ConnectError", checked_at: "" } },
+      (url) => (url === "/integrations/litellm/models" || url === "/integrations/litellm/keys"
+        ? Promise.reject(new apiModule.ApiError(502, { code: "litellm_unreachable", message: "could not reach LiteLLM" })) : undefined));
+    expect((await screen.findAllByText("Cannot reach LiteLLM")).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/ConnectError/).length).toBeGreaterThan(0);
+  });
+
+  it("explains a LiteLLM without a database instead of listing keys", async () => {
+    setup({ status: { ...okStatus, db: "Not connected" } });
+    expect(await screen.findByText("LiteLLM has no database")).toBeInTheDocument();
+    expect(screen.getByText(/DATABASE_URL/)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Create key" })).toBeNull();
+    expect(vi.mocked(apiModule.api).mock.calls.some(([u]) => u === "/integrations/litellm/keys")).toBe(false);
+  });
+
+  it("explains a missing master key", async () => {
+    setup({ master_key_set: false, master_key_source: "none" });
+    expect(await screen.findByText("Not set")).toBeInTheDocument();
+    expect(screen.getAllByText("No master key set").length).toBeGreaterThan(0);
+    expect(screen.getByRole("button", { name: "Set key" })).toBeInTheDocument();
+    expect(vi.mocked(apiModule.api).mock.calls.some(([u]) => u === "/integrations/litellm/keys")).toBe(false);
+  });
+
+  it("shows a created key once, with a curl example, and forgets it after closing", async () => {
+    const full = "sk-FULLKEY-0123456789";
+    const qc = setup({}, (url, opts) => (url === "/integrations/litellm/keys" && opts?.method === "POST"
+      ? { ...key, key_alias: "ci-bot", models: ["chat"], key: full } : undefined));
+    await userEvent.click(await screen.findByRole("button", { name: "Create key" }));
+    await userEvent.type(screen.getByLabelText("Alias"), "ci-bot");
+    await userEvent.click(screen.getByLabelText("All models (including ones added later)"));
+    await userEvent.click(screen.getByLabelText("chat"));
+    await userEvent.type(screen.getByLabelText("Requests per minute"), "60");
+    await userEvent.type(screen.getByLabelText("Expires after"), "30d");
+    await userEvent.click(screen.getByRole("button", { name: "Create key" }));
+    await waitFor(() => expect(calls("POST", "/integrations/litellm/keys")).toHaveLength(1));
+    expect(calls("POST", "/integrations/litellm/keys")[0][1]).toEqual({ method: "POST", body: { key_alias: "ci-bot", models: ["chat"], rpm_limit: 60, duration: "30d" } });
+    expect(await screen.findByDisplayValue(full)).toBeInTheDocument();
+    expect(screen.getByLabelText("curl example")).toHaveTextContent(`Bearer ${full}`);
+    expect(screen.getByLabelText("curl example")).toHaveTextContent("https://llm.example.com/v1/chat/completions");
+    expect(screen.getByText(/only time the full key is shown/)).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Done" }));
+    await waitFor(() => expect(screen.queryByDisplayValue(full)).toBeNull());
+    expect(document.body.innerHTML).not.toContain(full);
+    await waitFor(() => expect(cached(qc, full)).toBe(false));
+  });
+
+  it("revokes a key only after the alias is typed", async () => {
+    setup({}, (_url, opts) => (opts?.method === "DELETE" ? null : undefined));
+    await userEvent.click(await screen.findByRole("button", { name: "Actions for key team-a" }));
+    await userEvent.click(await screen.findByRole("menuitem", { name: /Revoke/ }));
+    const confirm = await screen.findByRole("button", { name: "Revoke key" });
+    expect(confirm).toBeDisabled();
+    await userEvent.type(screen.getByLabelText("Type team-a to confirm"), "team-");
+    expect(confirm).toBeDisabled();
+    await userEvent.type(screen.getByLabelText("Type team-a to confirm"), "a");
+    expect(confirm).toBeEnabled();
+    await userEvent.click(confirm);
+    await waitFor(() => expect(calls("DELETE", `/integrations/litellm/keys/${key.token}`)).toHaveLength(1));
+  });
+
+  it("edits a key and sends only the changes", async () => {
+    setup({}, (_url, opts) => (opts?.method === "PATCH" ? key : undefined));
+    await userEvent.click(await screen.findByRole("button", { name: "Actions for key team-a" }));
+    await userEvent.click(await screen.findByRole("menuitem", { name: /Edit/ }));
+    const rpm = await screen.findByLabelText("Requests per minute");
+    expect(rpm).toHaveValue("10");
+    await userEvent.clear(rpm);
+    expect(screen.getByText(/cannot remove a limit/)).toBeInTheDocument();
+    await userEvent.type(screen.getByLabelText("Tokens per minute"), "5000");
+    await userEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    await waitFor(() => expect(calls("PATCH", `/integrations/litellm/keys/${key.token}`)).toHaveLength(1));
+    expect(calls("PATCH", `/integrations/litellm/keys/${key.token}`)[0][1]).toEqual({ method: "PATCH", body: { tpm_limit: 5000 } });
+  });
+});

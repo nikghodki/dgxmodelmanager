@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter, Outlet, useLocation } from "react-router-dom";
 import { AuthProvider } from "@/auth";
@@ -42,5 +42,22 @@ describe("routes", () => {
     renderAt("/");
     expect(await screen.findByText("Set a new password")).toBeInTheDocument();
     expect(screen.getByTestId("where")).toHaveTextContent("/change-password");
+  });
+
+  it("serves the admin LiteLLM page at /litellm", async () => {
+    vi.mocked(apiModule.api).mockImplementation((url: string) => {
+      if (url === "/auth/me") return Promise.resolve({ csrf_token: "t", user: { id: 1, username: "admin", role: "admin", must_change_pw: false } });
+      return new Promise(() => undefined);
+    });
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={qc}>
+        <MemoryRouter initialEntries={["/litellm"]} future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
+          <AuthProvider><AppRoutes /><Where /></AuthProvider>
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+    await waitFor(() => expect(vi.mocked(apiModule.api).mock.calls.some(([u]) => u === "/integrations/litellm")).toBe(true));
+    expect(screen.getByTestId("where")).toHaveTextContent("/litellm");
   });
 });
