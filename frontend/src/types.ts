@@ -19,7 +19,7 @@ export interface Estimate {
 }
 export interface Fit { fits: boolean; required: number; free_for_new: number; headroom: number; estimate: Estimate }
 export interface PlanAction { type: "sleep" | "stop" | "patch"; deployment_id?: number | null; patch?: Record<string, unknown> | null }
-export interface PlanOption { id: string; title: string; detail: string; new_required: number; frees: number; fits: boolean; actions: PlanAction[]; patch: Record<string, unknown> | null }
+export interface PlanOption { id: string; title: string; detail: string; new_required: number; frees: number; fits: boolean; actions: PlanAction[]; patch: Record<string, unknown> | null; model_ref?: string | null }
 export interface Preview {
   estimate: Estimate; fit: Fit; budget: Budget; served_name: string; config: Record<string, unknown>;
   gpu_memory_utilization?: number; plans?: PlanOption[]; llmfit?: Record<string, any> | null;
