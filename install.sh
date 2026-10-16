@@ -704,7 +704,12 @@ cmd_status() {
   info "Managed engine containers (dgxmm.managed=true)"
   local engines
   engines=$(docker ps --filter label=dgxmm.managed=true --format '{{.Names}}  {{.Status}}')
-  if [ -n "$engines" ]; then sed 's/^/    /' <<<"$engines"; else note "none running"; fi
+  if [ -n "$engines" ]; then
+    local line
+    while IFS= read -r line; do note "$line"; done <<<"$engines"
+  else
+    note "none running"
+  fi
   PORT=$(env_file_get DGXMM_PORT || echo 8090)
   BIND=$(env_file_get DGXMM_BIND || echo 0.0.0.0)
   info "URLs"
