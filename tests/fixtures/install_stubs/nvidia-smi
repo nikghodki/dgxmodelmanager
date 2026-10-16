@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+echo "nvidia-smi $*" >> "${FAKE_LOG:-/dev/null}"
+[ "${FAKE_GPU:-ok}" = ok ] || { echo "NVIDIA-SMI has failed because it couldn't communicate with the NVIDIA driver." >&2; exit 9; }
+echo "GPU 0: NVIDIA GB10 (UUID: GPU-00000000-0000-0000-0000-000000000000)"

@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+# Fake docker CLI for tests/test_install_script.py. Behaviour is driven by FAKE_* env vars and
+# every invocation is appended to $FAKE_LOG.
+# shellcheck disable=SC2086  # FAKE_MANAGED_IDS is split into one id per line on purpose
+echo "docker $*" >> "${FAKE_LOG:-/dev/null}"
+case "$*" in
+  "info --format {{json .Runtimes}}")
+    case "${FAKE_DAEMON:-up}" in
+      down) echo "Cannot connect to the Docker daemon at unix:///var/run/docker.sock." >&2; exit 1 ;;
+      denied) echo "permission denied while trying to connect to the Docker daemon socket" >&2; exit 1 ;;
+    esac
+    default_rt='{"nvidia":{"path":"nvidia-container-runtime"},"runc":{"path":"runc"}}'
+    echo "${FAKE_RUNTIMES:-$default_rt}" ;;
+  "version --format {{.Server.Version}}") echo "${FAKE_SERVER_VERSION:-29.2.1}" ;;
+  "compose version --short") [ "${FAKE_COMPOSE:-ok}" = ok ] || { echo "docker: 'compose' is not a docker command." >&2; exit 1; }; echo "2.40.0" ;;
+  "inspect --format {{.State.Status}}|{{index .Config.Labels \"com.docker.compose.project.working_dir\"}} dgxmm")
+    [ -n "${FAKE_DGXMM_STATE:-}" ] || { echo "Error: No such object: dgxmm" >&2; exit 1; }
+    echo "${FAKE_DGXMM_STATE}|${FAKE_DGXMM_WORKDIR:-}" ;;
+  "inspect --format {{.State.Status}}/{{if .State.Health}}{{.State.Health.Status}}{{end}} dgxmm")
+    echo "${FAKE_HEALTH:-running/healthy}" ;;
+  "logs dgxmm"|"logs --tail 40 dgxmm") printf '%s\n' "${FAKE_LOGS:-}" ;;
+  network\ inspect\ --format*) [ "${FAKE_NETWORK:-missing}" = exists ] || exit 1; echo "${FAKE_NETWORK_LABEL:-}" ;;
+  network\ inspect*) [ "${FAKE_NETWORK:-missing}" = exists ] || { echo "Error: No such network" >&2; exit 1; } ;;
+  "ps -aq --filter label=dgxmm.managed=true"|"ps -q --filter label=dgxmm.managed=true") printf '%s\n' ${FAKE_MANAGED_IDS:-} ;;
+  ps\ --filter\ label=dgxmm.managed=true*) printf '%s\n' ${FAKE_MANAGED_IDS:-} ;;
+  "ps -q --filter name=^litellm-proxy$") [ -n "${FAKE_LITELLM:-}" ] && echo "abc123" ;;
+  exec\ litellm-proxy*) echo "${FAKE_LITELLM_KEY:-sk-fake-master}" ;;
+  "inspect --format {{json .NetworkSettings.Networks}} litellm-proxy") echo "{\"${FAKE_LITELLM_NET:-gateway}\":{}}" ;;
+  *) : ;;
+esac
+exit 0

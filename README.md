@@ -1,25 +1,44 @@
 # DGX Model Manager (DGXMM)
 
-Web UI + API for running LLMs on the DGX Spark (`dgx-host`, GB10, 128 GB unified memory):
+Web UI + API for running LLMs on an NVIDIA DGX Spark (GB10, 128 GB unified memory) or similar GPU host:
 see what is on disk, deploy vLLM or llama.cpp containers behind an out-of-memory gate, switch models with
 automatic rollback, keep LiteLLM in sync, watch tok/s, TTFT and KV usage, plan which models fit together,
 browse/download from Hugging Face (with llmfit scores) and get benchmark-backed tuning advice.
 
 Design: `docs/superpowers/specs/2026-10-15-dgx-model-manager-design.md`. Plan: `docs/superpowers/plans/`.
 
-## Run
+## Install
 
-    cp config.example.yaml config.yaml          # adjust if needed
-    mkdir -p data secrets && chmod 700 secrets
-    touch secrets/hf_token                      # optional: paste an HF token for gated repos
-    # LiteLLM master key (never printed):
-    docker exec litellm-proxy sh -c 'grep -E "^\s*master_key:" /app/config.yaml | sed -E "s/.*master_key:\s*//"' > secrets/litellm_master_key
-    chmod 600 secrets/*
-    docker compose up -d --build
-    docker compose logs dgxmm | grep "first run"   # one-time admin password
+Needs: Linux (arm64 or x86_64) with an NVIDIA GPU, Docker Engine 25+ with the compose v2 plugin, and the
+NVIDIA Container Toolkit (`nvidia` runtime). Run as a normal user in the `docker` group (not root).
 
-Open `http://<dgx>/dgxmm/` (via nginx-gateway) or `http://127.0.0.1:8090/dgxmm/` on the box.
-LiteLLM must have `store_model_in_db: true` for automatic registration.
+    git clone https://github.com/nikghodki/dgxmodelmanager.git && cd dgxmodelmanager && ./install.sh
+
+The installer checks the host, writes `.env` (compose settings) and `config.yaml` (rendered from
+`config.example.yaml` with your paths), creates `data/`, `secrets/` and the docker network, builds and starts
+the container, waits for the health check and prints the URLs plus the one-time `admin` password (also saved
+in `secrets/admin_password`). Open `http://<host>:8090/` (redirects to `/dgxmm/`).
+
+Re-running `./install.sh` upgrades in place; existing `.env`, `config.yaml`, `data/` and `secrets/` are never
+overwritten. Other commands: `./install.sh upgrade` (git pull + install), `status`, `logs [-f]`,
+`uninstall [--purge]`, and `--dry-run` with any of them. Settings (env vars or flags, see `./install.sh --help`):
+
+| Variable | Default | |
+|---|---|---|
+| `DGXMM_PORT` | `8090` | host port of the UI |
+| `DGXMM_BIND` | `0.0.0.0` | `127.0.0.1` when a reverse proxy fronts DGXMM (example: `deploy/nginx-dgxmm.conf`) |
+| `DGXMM_NETWORK` | `dgxmm` | docker network shared with engine containers (and LiteLLM / your proxy) |
+| `DGXMM_HF_CACHE` | `~/.cache/huggingface` | Hugging Face cache |
+| `DGXMM_MODELS_DIR` | `~/models` | GGUF files |
+| `HF_TOKEN` | | written to `secrets/hf_token` (gated models) |
+| `LITELLM_URL`, `LITELLM_MASTER_KEY` | | LiteLLM registration (needs `store_model_in_db: true`); the key is read from a running `litellm-proxy` container when not given |
+| `DGXMM_PULL_ENGINES=1` | off | pre-pull the vLLM and llama.cpp images |
+
+Behind an existing reverse proxy on its own network, e.g.:
+`DGXMM_BIND=127.0.0.1 DGXMM_NETWORK=gateway ./install.sh`.
+
+Only one DGXMM may run per host: it adopts every container labelled `dgxmm.managed=true`, so the installer
+refuses to start a second instance from another checkout.
 
 ## How memory safety works
 
