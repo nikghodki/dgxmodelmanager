@@ -44,15 +44,40 @@ def test_litellm_settings_take_precedence(settings, db, tmp_path):
     st = SettingsStore(db, settings)
     st.set("litellm.url", "http://other:4000/")
     st.set("litellm.public_url", "https://llm.example.com/")
-    st.set("litellm.master_key", "sk-from-db")
+    st.set_master_key("sk-from-db", "http://other:4000")
     st.set_bool("litellm.enabled", False)
     c = st.litellm()
     assert (c.enabled, c.url, c.public_url, c.master_key, c.master_key_source) == \
         (False, "http://other:4000", "https://llm.example.com", "sk-from-db", "settings")
     assert c.endpoint == "https://llm.example.com/v1"
-    st.set("litellm.master_key", None)
+    st.set_master_key(None)
+    assert st.litellm().master_key_source == "none"  # the file key belongs to the default URL only
+    st.set("litellm.url", None)
     assert st.litellm().master_key_source == "secret_file"
 
 
 def test_app_context_has_store(ctx):
     assert isinstance(ctx.settings_store, SettingsStore)
+
+
+def test_file_key_only_for_default_url(settings, db, tmp_path):
+    (tmp_path / "litellm_key").write_text("sk-from-file")
+    st = SettingsStore(db, settings)
+    st.set("litellm.url", "http://elsewhere:4000")
+    c = st.litellm()
+    assert (c.master_key, c.master_key_source) == (None, "none")
+    assert c.master_key_hint and "re-enter" in c.master_key_hint
+    st.set("litellm.url", settings.litellm_url + "/")  # same URL, trailing slash
+    assert st.litellm().master_key == "sk-from-file"
+
+
+def test_stored_key_bound_to_its_url(settings, db):
+    st = SettingsStore(db, settings)
+    st.set_master_key("sk-db", "http://a:4000/")
+    st.set("litellm.url", "http://a:4000")
+    assert (st.litellm().master_key, st.litellm().master_key_source) == ("sk-db", "settings")
+    st.set("litellm.url", "http://b:4000")
+    c = st.litellm()
+    assert c.master_key is None and c.master_key_source == "none" and "re-enter" in c.master_key_hint
+    st.set_master_key(None)
+    assert st.get("litellm.master_key") is None and st.get("litellm.master_key_url") is None
