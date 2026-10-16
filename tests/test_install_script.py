@@ -540,7 +540,23 @@ def test_trusted_proxies_written_to_env(box):
 
 def test_trusted_proxies_hint_when_bind_loopback(box):
     """Installer prints hint when BIND=127.0.0.1 and TRUSTED_PROXIES unset."""
-    p = box.run("--dry-run", DGXMM_BIND="127.0.0.1")
+    p = box.run("--dry-run", DGXMM_BIND="127.0.0.1", FAKE_NETWORK="exists")
     assert p.returncode == 0, p.out
-    # Should warn about missing DGXMM_TRUSTED_PROXIES
-    assert "DGXMM_TRUSTED_PROXIES" in p.out or "proxy" in p.out.lower()
+    # Should print specific hint about reverse proxy
+    assert "Behind a reverse proxy?" in p.out
+    assert "DGXMM_TRUSTED_PROXIES" in p.out
+    assert "172.99.0.1" in p.out  # stub gateway IP from fake docker
+
+
+def test_trusted_proxies_hint_not_shown_when_set(box):
+    """No hint when DGXMM_TRUSTED_PROXIES is already set."""
+    p = box.run("--dry-run", DGXMM_BIND="127.0.0.1", DGXMM_TRUSTED_PROXIES="10.0.0.1", FAKE_NETWORK="exists")
+    assert p.returncode == 0, p.out
+    assert "Behind a reverse proxy?" not in p.out
+
+
+def test_trusted_proxies_hint_not_shown_for_lan_bind(box):
+    """No hint when BIND is 0.0.0.0 (LAN accessible)."""
+    p = box.run("--dry-run", DGXMM_BIND="0.0.0.0")
+    assert p.returncode == 0, p.out
+    assert "Behind a reverse proxy?" not in p.out

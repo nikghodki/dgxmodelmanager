@@ -254,7 +254,9 @@ response buffering for the event stream, allow long-lived connections, and pass 
 
 **Important**: Configure `trusted_proxies` to match your proxy's IP or network:
 - **Proxy container on the DGXMM network**: set to the proxy container's IP or the docker network subnet (e.g., `DGXMM_TRUSTED_PROXIES=<network-subnet>`)
-- **Proxy on the host** (docker port publishing): set to the DGXMM network's gateway IP (find with `docker network inspect <network> -f '{{(index .IPAM.Config 0).Gateway}}'`) The proxy must disable
+- **Proxy on the host** (docker port publishing): set to the DGXMM network's gateway IP (find with `docker network inspect <network> -f '{{(index .IPAM.Config 0).Gateway}}'`).
+
+The proxy must disable
 
 
 **nginx in a Docker container on the DGXMM network**: the shipped `deploy/nginx-dgxmm.conf`. It
