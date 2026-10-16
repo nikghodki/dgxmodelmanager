@@ -7,6 +7,7 @@ export interface ProcessGroup {
   name: string;           // display label
   image: string | null;
   managed: ManagedRef | null;
+  label: ManagedRef | null;  // DGXMM-labelled, not an active deployment
   rss: number;
   gpu: number;
   processes: ProcessInfo[];
@@ -27,7 +28,7 @@ export function groupByContainer(ps: ProcessInfo[]): ProcessGroup[] {
     const key = p.container?.id ?? "host";
     let g = groups.get(key);
     if (!g) {
-      g = { key, name: containerLabel(p.container), image: p.container?.image ?? null, managed: p.managed, rss: 0, gpu: 0, processes: [] };
+      g = { key, name: containerLabel(p.container), image: p.container?.image ?? null, managed: p.managed, label: p.dgxmm_label ?? null, rss: 0, gpu: 0, processes: [] };
       groups.set(key, g);
     }
     g.rss += p.rss;
@@ -46,3 +47,6 @@ export const CONTAINER_UID_TITLE = "uid as seen inside the container; not a host
 export function userLabel(user: string, scope: UserScope | undefined): { text: string; title: string | undefined } {
   return scope === "container" ? { text: `${user} (in container)`, title: CONTAINER_UID_TITLE } : { text: user, title: undefined };
 }
+
+export const labelTitle = (l: ManagedRef) =>
+  `Labelled by DGXMM (deployment ${l.name ?? l.deployment_id}) but not an active deployment; its memory counts as external`;

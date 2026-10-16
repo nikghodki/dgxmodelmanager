@@ -25,19 +25,24 @@ _EXACT_SENSITIVE = frozenset({"pw", "sig", "signature"})
 _COUNT_WORDS = frozenset({"max", "min", "num", "batched", "new", "prompt", "draft", "speculative", "budget", "output",
                           "input", "context", "total", "lookahead", "reasoning"})
 _SAFE_PASS_WORDS = frozenset({"passthrough", "bypass", "compass", "passive", "passes", "multipass", "pass-through"})
-_FLAG = re.compile(r"^(--?)([A-Za-z][\w.-]*)(?:(=)(.*))?$", re.S)
+_FLAG = re.compile(r"^(--?)([A-Za-z][\w.-]*)(?:([=:])(.*))?$", re.S)  # --password=S and --password:S
 
 # Tool-specific options (argv[0] basename, or a later token naming the tool inside sh -c)
 _TOOL_VALUE_FLAGS = {  # option → the NEXT argument is a secret
     "redis-cli": {"-a"}, "curl": {"-u", "--user", "-U", "--proxy-user"}, "sshpass": {"-p"},
-    "wget": {"--user", "--http-user"}, "htpasswd": set(),
+    "wget": {"--user", "--http-user"}, "openssl": {"-k"},
 }
 _TOOL_EQ_FLAGS = {"curl": {"--user", "--proxy-user"}}  # --user=u:S
-_TOOL_GLUED = {  # option glued to its secret value (mysql -pS); a bare option means "prompt"
-    t: "-p" for t in ("mysql", "mysqldump", "mysqladmin", "mysqlimport", "mysqlcheck", "mariadb", "mariadb-dump",
-                      "mariadb-admin", "mysqlsh")
+_TOOL_GLUED: dict[str, tuple[str, ...]] = {  # option glued to its secret value (mysql -pS, curl -uu:S)
+    **{t: ("-p",) for t in ("mysql", "mysqldump", "mysqladmin", "mysqlimport", "mysqlcheck", "mariadb", "mariadb-dump",
+                            "mariadb-admin", "mysqlsh")},
+    "sshpass": ("-p",), "curl": ("-u", "-U"), "redis-cli": ("-a",),
 }
-_KNOWN_TOOLS = set(_TOOL_VALUE_FLAGS) | set(_TOOL_GLUED)
+_KNOWN_TOOLS = set(_TOOL_VALUE_FLAGS) | set(_TOOL_GLUED) | {"htpasswd"}
+# Words that run the following word as a command (tool detection inside sh -c strings)
+_PREFIX_COMMANDS = frozenset({"sudo", "exec", "env", "nohup", "time", "nice", "command", "xargs", "timeout"})
+_SHELL_OP_CHARS = ";|&()\n"
+MAX_SCRIPT_DEPTH = 3  # nested sh -c "sh -c '…'" strings are tokenised and redacted this many levels deep
 
 _URL_USERINFO = re.compile(r"([A-Za-z][A-Za-z0-9+.-]*://)[^\s'\"]*@")  # greedy: up to the LAST @ in the token
 _HEADER = re.compile(r"(?i)(?<![\w-])((?:proxy-)?authorization|(?:set-)?cookie|x-[\w-]*(?:key|token|auth|secret)[\w-]*"
@@ -55,7 +60,11 @@ _TOKEN_SHAPES = [re.compile(p) for p in (
 _QUOTED = r"\"(?:[^\"\\]|\\.)*\"|'(?:[^'\\]|\\.)*'"
 _VALUE = r"(" + _QUOTED + r"|[^\s&'\",;(){}\[\]]+)"
 _INLINE_FLAG = re.compile(r"(?<![\w-])(--?([A-Za-z][\w.-]*))(=|[ \t]+)(?!--)" + _VALUE)
-_LIST_FLAG = re.compile(r"([\"'])(--?([A-Za-z][\w.-]*))\1(\s*,\s*)(" + _QUOTED + r")")  # ['--api-key', 'S']
+# ['--api-key', 'S'], setdefault('HF_TOKEN', 'S'), ("password", "S")
+_LIST_FLAG = re.compile(r"([\"'])(-{0,2}([A-Za-z_][\w.-]*))\1(\s*,\s*)(" + _QUOTED + r")")
+_SUBSCRIPT = re.compile(r"\[\s*([\"']?)([A-Za-z_][\w.-]*)\1\s*\](\s*=\s*)" + _VALUE)  # os.environ['API_KEY'] = 'S'
+_LIST_LITERAL = re.compile(r"\[([^\[\]]*)\]")
+_PASS_ARG = re.compile(r"(?<![\w-])pass:[^\s'\"]+")  # openssl -passin pass:S
 # Only keys that might be sensitive start a match, so a harmless pair (e.g. a URL scheme) never swallows the
 # text after it; the callback applies the exact rule (allowlist included).
 _PAIR = re.compile(r"(?<![\w-])([\"']?)((?=[\w.-]*?(?i:key|token|secret|pass|pw|auth|credential|cookie|sig))"
@@ -92,6 +101,11 @@ def redact_text(text: str) -> str:
     text = _AUTH_SCHEME.sub(lambda m: m.group(1) + m.group(2) + MASK, text)
     for rx in _TOKEN_SHAPES:
         text = rx.sub(MASK, text)
+    text = _PASS_ARG.sub("pass:" + MASK, text)
+    text = _LIST_LITERAL.sub(_redact_list_literal, text)
+    text = _SUBSCRIPT.sub(
+        lambda m: m.group(0)[:-len(m.group(4))] + _mask_value(m.group(4)) if is_sensitive_name(m.group(2)) else m.group(0),
+        text)
     text = _LIST_FLAG.sub(
         lambda m: m.group(0)[:-len(m.group(5))] + _mask_value(m.group(5)) if is_sensitive_name(m.group(3)) else m.group(0),
         text)
@@ -107,22 +121,100 @@ def redact_text(text: str) -> str:
     return _PAIR.sub(_pair, text)
 
 
-def _redact_script(text: str, redacted: str) -> str:
-    """Tokenise a shell/code string and redact it as argv; remove every masked token's original text."""
-    try:
-        tokens = shlex.split(text, posix=True)
-    except ValueError:
-        return redacted
-    if len(tokens) < 2:
-        return redacted
-    for orig, new in zip(tokens, redact_argv(tokens, _depth=1)):
-        if new == orig or not orig:
+def _redact_list_literal(m: re.Match) -> str:
+    """A Python/JSON list of strings is an argv (subprocess.run([...])): redact it item by item."""
+    inner = m.group(1)
+    items = list(re.finditer(_QUOTED, inner))
+    if len(items) < 2 or re.sub(_QUOTED, "", inner).strip(" \t,"):
+        return m.group(0)
+    values = [it.group(0)[1:-1].replace("\\" + it.group(0)[0], it.group(0)[0]) for it in items]
+    red = redact_argv(values, _depth=MAX_SCRIPT_DEPTH)
+    out, last = [], 0
+    for it, v, r in zip(items, values, red):
+        if r != v:
+            q = it.group(0)[0]
+            out += [inner[last:it.start()], q + r.replace(q, "\\" + q) + q]
+            last = it.end()
+    return "[" + "".join(out) + inner[last:] + "]"
+
+
+def shell_tokens(text: str) -> list[tuple[str, int, int]]:
+    """Lenient POSIX-shell tokenizer: (value, start, end) per word, with quotes/backslashes resolved and control
+    operators (; | & ( ) newline) as their own tokens. Unterminated quotes run to the end (never raises)."""
+    out: list[tuple[str, int, int]] = []
+    i, n = 0, len(text)
+    while i < n:
+        c = text[i]
+        if c.isspace() and c != "\n":
+            i += 1
             continue
-        secret = orig[len(new) - len(MASK):] if new.endswith(MASK) and orig.startswith(new[:-len(MASK)]) else orig
-        if secret:
-            redacted = re.sub(r"(?<![\w-])" + re.escape(secret) + r"(?![\w-])", MASK, redacted)
-            redacted = redacted.replace(secret, MASK) if len(secret) >= 6 else redacted
-    return redacted
+        start = i
+        if c in _SHELL_OP_CHARS:
+            while i < n and text[i] in _SHELL_OP_CHARS:
+                i += 1
+            out.append((text[start:i], start, i))
+            continue
+        buf: list[str] = []
+        while i < n and not text[i].isspace() and text[i] not in _SHELL_OP_CHARS:
+            c = text[i]
+            if c == "'":
+                j = text.find("'", i + 1)
+                j = n if j < 0 else j
+                buf.append(text[i + 1:j])
+                i = j + 1
+            elif c == '"':
+                i += 1
+                while i < n and text[i] != '"':
+                    if text[i] == "\\" and i + 1 < n and text[i + 1] in '"\\$`\n':
+                        i += 1
+                    buf.append(text[i])
+                    i += 1
+                i += 1
+            elif c == "\\":
+                buf.append(text[i + 1:i + 2])
+                i += 2
+            else:
+                buf.append(c)
+                i += 1
+        out.append(("".join(buf), start, min(i, n)))
+    return out
+
+
+def _secret_of(orig: str, new: str) -> str:
+    if new.endswith(MASK) and orig.startswith(new[:-len(MASK)]):
+        return orig[len(new) - len(MASK):]
+    return orig
+
+
+def _redact_script(text: str, depth: int) -> str:
+    """Redact a shell/code string: tokenise it (with source spans), redact the tokens as argv (tool options,
+    sensitive flags, nested sh -c up to MAX_SCRIPT_DEPTH) and rewrite the changed spans, then apply the text rules.
+    The result must be a fixed point of redaction; if it is not, every changed token span is masked (fail closed)."""
+    toks = shell_tokens(text)
+    if len(toks) < 2:
+        return redact_text(text)
+    values = [v for v, _, _ in toks]
+    red = redact_argv(values, _depth=depth + 1)
+
+    def rewrite(spans_only_structural: bool) -> str:
+        out, last, secrets = [], 0, []
+        for (v, s, e), r in zip(toks, red):
+            if r == v or (spans_only_structural and r == redact_text(v)):
+                continue
+            out += [text[last:s], _quote(r)]
+            last = e
+            secrets.append(_secret_of(v, r))
+        result = redact_text("".join(out) + text[last:])
+        for sec in secrets:
+            if len(sec) >= 6:
+                result = result.replace(sec, MASK)
+        return result
+
+    result = rewrite(True)
+    check = [v for v, _, _ in shell_tokens(result)]
+    if redact_argv(check, _depth=depth + 1) != check:
+        result = rewrite(False)
+    return result
 
 
 def _looks_like_long_flag(arg: str) -> bool:
@@ -133,17 +225,41 @@ def redact_argv(argv: list[str], _depth: int = 0) -> list[str]:
     out: list[str] = []
     pending = False  # previous arg was a sensitive option without "=": this arg is its value
     tool = os.path.basename(argv[0]) if argv else ""
+    new_cmd = False  # previous token was a shell operator / prefix command: this token names the command
+    ht = {"b": False, "n": False, "pos": 0}  # htpasswd -b FILE USER PASSWORD / -nb USER PASSWORD
     for idx, arg in enumerate(argv):
+        if arg and all(c in _SHELL_OP_CHARS for c in arg):
+            out.append(arg)
+            pending, new_cmd, tool = False, True, ""
+            continue
         base = os.path.basename(arg)
-        if idx and base in _KNOWN_TOOLS:
-            tool = base
+        cmd_pos = (idx == 0 or new_cmd) and not arg.startswith("-")
+        if cmd_pos and re.match(r"^\w+=", arg):  # VAR=value before the command: still in command position
+            out.append(redact_text(arg))
+            continue
+        if cmd_pos or ("/" not in arg and base in _KNOWN_TOOLS):
+            if base != tool or idx == 0:
+                tool, ht = base, {"b": False, "n": False, "pos": 0}
+            new_cmd = base in _PREFIX_COMMANDS
+            if cmd_pos and not any(c.isspace() for c in arg):
+                out.append(redact_text(arg))
+                continue
         if pending:
             pending = False
             if not _looks_like_long_flag(arg):
                 out.append(MASK)
                 continue
-        glued = _TOOL_GLUED.get(tool)
-        if glued and arg.startswith(glued) and len(arg) > len(glued) and not arg.startswith("--"):
+        if tool == "htpasswd" and idx:
+            if re.fullmatch(r"-[A-Za-z]+", arg):
+                ht["b"] |= "b" in arg
+                ht["n"] |= "n" in arg
+            else:
+                ht["pos"] += 1
+                if ht["b"] and ht["pos"] >= (2 if ht["n"] else 3):
+                    out.append(MASK)
+                    continue
+        glued = next((g for g in _TOOL_GLUED.get(tool, ()) if arg.startswith(g) and len(arg) > len(g)), None)
+        if glued and not arg.startswith("--"):
             out.append(glued + MASK)
             continue
         m = _FLAG.match(arg)
@@ -153,17 +269,17 @@ def redact_argv(argv: list[str], _depth: int = 0) -> list[str]:
                 out.append(arg)
                 pending = True
                 continue
-            if is_sensitive_name(m.group(2)) or (m.group(3) and flag in _TOOL_EQ_FLAGS.get(tool, ())):
+            if is_sensitive_name(m.group(2)) or (m.group(3) == "=" and flag in _TOOL_EQ_FLAGS.get(tool, ())):
                 if m.group(3):
-                    out.append(f"{flag}={MASK}")
+                    out.append(f"{flag}{m.group(3)}{MASK}")
                 else:
                     out.append(arg)
                     pending = True
                 continue
-        red = redact_text(arg)
-        if _depth == 0 and any(c.isspace() for c in arg):
-            red = _redact_script(arg, red)
-        out.append(red)
+        if _depth < MAX_SCRIPT_DEPTH and any(c.isspace() for c in arg):
+            out.append(_redact_script(arg, _depth))
+        else:
+            out.append(redact_text(arg))
     return out
 
 

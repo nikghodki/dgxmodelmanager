@@ -7,14 +7,16 @@ export interface Budget {
 export interface ContainerRef { id: string; name: string | null; image: string | null }
 export interface ManagedRef { deployment_id: number; name: string | null }
 /** Largest external memory users (GET /host). `command` is redacted server-side; older servers omit the extras. */
-export interface ProcMem { pid: number; name: string; rss: number; gpu: number; command?: string; user?: string; user_scope?: UserScope; container?: ContainerRef | null }
+export interface ProcMem { pid: number; name: string; rss: number; gpu: number; command?: string; user?: string; user_scope?: UserScope; container?: ContainerRef | null; dgxmm_label?: ManagedRef | null }
 /** "container": uid as seen inside the container (root / "uid N"), not a host account. */
 export type UserScope = "host" | "container";
 export interface ProcessInfo {
   pid: number; ppid: number; uid: number | null; user: string; user_scope: UserScope; name: string; exe: string;
-  command: string; command_truncated: boolean; container: ContainerRef | null; managed: ManagedRef | null; rss: number; gpu: number;
+  command: string; command_truncated: boolean; container: ContainerRef | null; managed: ManagedRef | null;
+  /** DGXMM-labelled container that is not an active deployment: its memory counts as external. */
+  dgxmm_label: ManagedRef | null; rss: number; gpu: number;
 }
-export interface ProcessGroupSummary extends ContainerRef { rss: number; gpu: number; process_count: number; managed: ManagedRef | null }
+export interface ProcessGroupSummary extends ContainerRef { rss: number; gpu: number; process_count: number; managed: ManagedRef | null; dgxmm_label: ManagedRef | null }
 export interface ProcessesResponse {
   scope: "all" | "external" | "managed"; total: number; processes: ProcessInfo[]; containers: ProcessGroupSummary[];
   host: { rss: number; gpu: number; process_count: number }; duration_ms: number;

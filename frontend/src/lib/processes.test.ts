@@ -4,7 +4,7 @@ import type { ProcessInfo } from "@/types";
 
 const P = (pid: number, over: Partial<ProcessInfo> = {}): ProcessInfo => ({
   pid, ppid: 1, uid: 0, user: "root", user_scope: "host", name: "python3", exe: "python3", command: `python3 app.py --id ${pid}`,
-  command_truncated: false, container: null, managed: null, rss: 100, gpu: 0, ...over,
+  command_truncated: false, container: null, managed: null, dgxmm_label: null, rss: 100, gpu: 0, ...over,
 });
 const LITE = { id: "bbbbbbbbbbbb", name: "litellm-proxy", image: "ghcr.io/berriai/litellm:main-latest" };
 const QWEN = { id: "aaaaaaaaaaaa", name: "dgxmm-qwen", image: "vllm/vllm-openai:v0.11" };
