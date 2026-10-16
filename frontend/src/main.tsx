@@ -3,7 +3,7 @@ import "@fontsource-variable/jetbrains-mono";
 import React from "react";
 import ReactDOM from "react-dom/client";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
+import { BrowserRouter, Route, Routes } from "react-router-dom";
 import "./index.css";
 import { AuthProvider, RequireAuth } from "./auth";
 import { AppShell } from "@/components/app/app-shell";
@@ -12,6 +12,7 @@ import { Catalog } from "./pages/Catalog";
 import { ChangePassword } from "./pages/ChangePassword";
 import { Dashboard } from "./pages/Dashboard";
 import { DeploymentDetail } from "./pages/DeploymentDetail";
+import { Deployments } from "./pages/Deployments";
 import { DeployWizard } from "./pages/DeployWizard";
 import { Downloads } from "./pages/Downloads";
 import { Login } from "./pages/Login";
@@ -40,7 +41,7 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
                 <Route path="/login" element={<Login />} />
                 <Route element={<RequireAuth><AppShell /></RequireAuth>}>
                   <Route path="/" element={<Dashboard />} />
-                  <Route path="/deployments" element={<Navigate to="/" replace />} />
+                  <Route path="/deployments" element={<Deployments />} />
                   <Route path="/models" element={<Models />} />
                   <Route path="/catalog" element={<Catalog />} />
                   <Route path="/downloads" element={<Downloads />} />

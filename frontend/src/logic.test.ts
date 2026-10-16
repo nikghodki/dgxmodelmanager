@@ -35,3 +35,21 @@ describe("charts (M12)", () => {
     expect(out).toEqual([{ ts: 1, a: null, b: 2, c: null, d: null }]);
   });
 });
+
+import { deploymentActions } from "./logic";
+
+describe("deploymentActions", () => {
+  const d = (state: string, sleep_capable = true) => ({ state, sleep_capable });
+  it("viewers can only open", () => {
+    for (const s of ["ready", "sleeping", "failed", "stopped"]) expect(deploymentActions(d(s), false)).toEqual(["open"]);
+  });
+  it("admins get state-appropriate actions", () => {
+    expect(deploymentActions(d("ready"), true)).toEqual(["open", "sleep", "switch", "reconfigure", "stop"]);
+    expect(deploymentActions(d("ready", false), true)).toEqual(["open", "switch", "reconfigure", "stop"]);
+    expect(deploymentActions(d("sleeping"), true)).toEqual(["open", "wake", "switch", "reconfigure", "stop"]);
+    expect(deploymentActions(d("loading"), true)).toEqual(["open", "stop"]);
+    expect(deploymentActions(d("failed"), true)).toEqual(["open", "reconfigure", "start", "remove"]);
+    expect(deploymentActions(d("stopped"), true)).toEqual(["open", "reconfigure", "start", "remove"]);
+    expect(deploymentActions(d("unknown"), true)).toEqual(["open", "stop"]);
+  });
+});
