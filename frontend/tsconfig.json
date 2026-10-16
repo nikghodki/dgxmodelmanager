@@ -9,7 +9,11 @@
     "noUnusedLocals": true,
     "noUnusedParameters": true,
     "skipLibCheck": true,
-    "types": ["vite/client"]
+    "resolveJsonModule": true,
+    "allowSyntheticDefaultImports": true,
+    "types": ["vite/client", "node"],
+    "baseUrl": ".",
+    "paths": { "@/*": ["src/*"] }
   },
   "include": ["src", "vite.config.ts"]
 }
