@@ -97,6 +97,11 @@ class SettingsStore:
             self.set(LITELLM_MASTER_KEY, None)
             self.set(LITELLM_MASTER_KEY_URL, None)
 
+    def public_url(self) -> str:
+        """Stored value (an empty string means explicitly cleared) > config ``litellm_public_url``."""
+        stored = self.get(LITELLM_PUBLIC_URL)
+        return norm_url(stored if stored is not None else self.settings.litellm_public_url or "")
+
     def litellm(self) -> LiteLLMConfig:
         """Resolve the LiteLLM settings. A key is only ever used with the URL it belongs to: a stored key with
         the URL it was entered for, the secret-file key with the configured default ``litellm_url``. So
@@ -119,5 +124,5 @@ class SettingsStore:
         return LiteLLMConfig(
             enabled=self.get_bool(LITELLM_ENABLED, bool(key)),
             url=url,
-            public_url=norm_url(self.get(LITELLM_PUBLIC_URL) or ""),
+            public_url=self.public_url(),
             master_key=key, master_key_source=source, master_key_hint=hint)
