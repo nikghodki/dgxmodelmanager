@@ -8,6 +8,7 @@ from dgxmm.audit import audit
 from dgxmm.auth.deps import Principal, current_principal, get_ctx, require_admin
 from dgxmm.context import AppContext
 from dgxmm.deployer.service import DeployError, DeployRequest, InsufficientMemory
+from dgxmm.planner.plans import PlanAction
 
 router = APIRouter(prefix="/api/deployments", tags=["deployments"])
 
@@ -20,7 +21,7 @@ class PreviewIn(BaseModel):
 
 
 class DeployIn(DeployRequest):
-    actions: list[dict] = []
+    actions: list[PlanAction] = []
 
 
 def deploy_error(e: DeployError):
@@ -114,13 +115,13 @@ async def logs(dep_id: int, tail: int = Query(200, ge=1, le=5000), p: Principal 
 
 class SwitchIn(BaseModel):
     request: DeployRequest
-    actions: list[dict] = []
+    actions: list[PlanAction] = []
 
 
 class ReconfigureIn(BaseModel):
     config: dict
     model_ref: str | None = None
-    actions: list[dict] = []
+    actions: list[PlanAction] = []
 
 
 async def _run(ctx, p, action: str, target: str, coro, detail: dict | None = None):
@@ -129,6 +130,8 @@ async def _run(ctx, p, action: str, target: str, coro, detail: dict | None = Non
     except InsufficientMemory as e:
         raise api_error(409, e.code, e.message, fit=e.fit.as_dict())
     except DeployError as e:
+        if action in ("switch", "reconfigure"):
+            audit(ctx.db, p.user.id, f"{action}_failed", target, {**(detail or {}), "code": e.code})
         raise deploy_error(e)
     audit(ctx.db, p.user.id, action, target, detail)
     return view
@@ -146,9 +149,20 @@ async def wake(dep_id: int, p: Principal = Depends(require_admin), ctx: AppConte
 
 @router.post("/{dep_id}/switch")
 async def switch(dep_id: int, body: SwitchIn, p: Principal = Depends(require_admin), ctx: AppContext = Depends(get_ctx)):
-    return await _run(ctx, p, "switch", f"{dep_id}->{body.request.name}",
-                      ctx.deployer.switch(dep_id, body.request, body.actions, p.user.id),
-                      {"model": body.request.model_ref, "actions": body.actions})
+    try:
+        view = await ctx.deployer.switch(dep_id, body.request, body.actions, p.user.id)
+    except InsufficientMemory as e:
+        try:
+            plans = (await ctx.deployer.preview(body.request.engine, body.request.model_ref, body.request.config, replacing=dep_id))["plans"]
+        except DeployError:
+            plans = []
+        raise api_error(409, e.code, e.message, fit=e.fit.as_dict(), plans=plans)
+    except DeployError as e:
+        audit(ctx.db, p.user.id, "switch_failed", f"{dep_id}->{body.request.name}",
+              {"model": body.request.model_ref, "actions": body.actions, "code": e.code})
+        raise deploy_error(e)
+    audit(ctx.db, p.user.id, "switch", f"{dep_id}->{body.request.name}", {"model": body.request.model_ref, "actions": body.actions})
+    return view
 
 
 @router.post("/{dep_id}/reconfigure")
