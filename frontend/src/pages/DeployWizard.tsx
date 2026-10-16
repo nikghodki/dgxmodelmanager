@@ -158,7 +158,7 @@ export function DeployWizard() {
             </CardContent>
           </Card>
         </div>
-        <div className="lg:hidden">{artifact && <Card className="shadow-card"><CardHeader className="pb-3"><CardTitle className="text-sm">Memory check</CardTitle></CardHeader><CardContent className="space-y-4">{check}<Button className="w-full md:hidden" disabled={submit.disabled} onClick={() => deploy.mutate(undefined)}>{deploy.isPending && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}{submit.label}</Button></CardContent></Card>}</div>
+        <div className="lg:hidden">{artifact && <Card className="shadow-card"><CardHeader className="pb-3"><CardTitle className="text-sm">Memory check</CardTitle></CardHeader><CardContent className="space-y-4">{check}<Button className="hidden w-full md:flex lg:hidden" disabled={submit.disabled} onClick={() => deploy.mutate(undefined)}>{deploy.isPending && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}{submit.label}</Button></CardContent></Card>}</div>
       </div>
       {artifact && (
         <div className="fixed inset-x-0 bottom-[calc(44px+env(safe-area-inset-bottom))] z-30 border-t bg-background/95 px-4 py-3 backdrop-blur md:hidden">
