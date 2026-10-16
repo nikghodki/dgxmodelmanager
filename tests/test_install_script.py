@@ -546,6 +546,8 @@ def test_trusted_proxies_hint_when_bind_loopback(box):
     assert "Behind a reverse proxy?" in p.out
     assert "DGXMM_TRUSTED_PROXIES" in p.out
     assert "172.99.0.1" in p.out  # stub gateway IP from fake docker
+    # Hint should not have [dry-run] prefix
+    assert "[dry-run] Behind a reverse proxy?" not in p.out
 
 
 def test_trusted_proxies_hint_not_shown_when_set(box):
