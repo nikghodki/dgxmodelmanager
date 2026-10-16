@@ -78,7 +78,7 @@ def test_container_spec(settings, tiny):
     assert spec.environment["VLLM_SERVER_DEV_MODE"] == "1" and spec.environment["HF_HUB_OFFLINE"] == "1"
     assert spec.labels == {"dgxmm.managed": "true", "dgxmm.deployment_id": "7", "dgxmm.engine": "vllm"}
     assert spec.mounts[0].host == settings.hf_cache.host and spec.mounts[0].target == "/root/.cache/huggingface"
-    assert spec.publish_bind == "127.0.0.1" and spec.network == "gateway"
+    assert spec.publish_bind == "127.0.0.1" and spec.network == settings.docker_network == "dgxmm"
 
 
 def test_parse_metrics(settings):
