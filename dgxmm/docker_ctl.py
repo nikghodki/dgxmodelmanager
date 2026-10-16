@@ -1,6 +1,10 @@
-"""The only module that talks to the Docker daemon. Writes are limited to dgxmm-managed containers."""
+"""The only module that talks to the Docker daemon. Writes are limited to dgxmm-managed containers,
+plus short-lived delete helpers (``dgxmm.helper=true``) that this process creates itself."""
 from __future__ import annotations
 
+import logging
+import posixpath
+import socket
 from dataclasses import dataclass, field
 
 import docker
@@ -8,6 +12,10 @@ import docker.errors
 from docker.types import DeviceRequest
 
 from dgxmm.engines.base import MANAGED_LABEL, ContainerSpec
+
+log = logging.getLogger(__name__)
+HELPER_LABEL = "dgxmm.helper"
+HELPER_MOUNT = "/x"  # where a helper sees the single host directory it may touch
 
 
 @dataclass
@@ -135,3 +143,37 @@ class DockerController:
                                          stdout=True, stderr=False,
                                          labels={MANAGED_LABEL: "true", "dgxmm.oneshot": "true"})
         return out.decode(errors="replace") if isinstance(out, bytes) else str(out)
+
+    def self_image(self) -> str | None:
+        """Image of the container this process runs in (docker sets the hostname to the short id)."""
+        try:
+            c = self.client.containers.get(socket.gethostname())
+            return (c.attrs.get("Config") or {}).get("Image") or None
+        except Exception:
+            return None
+
+    def run_helper(self, image: str, host_dir: str, command: list[str], timeout: float = 120) -> int | None:
+        """Run ``command`` as root in a throwaway, network-less container that bind-mounts ONLY ``host_dir``
+        (at HELPER_MOUNT). Returns the exit code, or None if unknown (timed out / already removed)."""
+        norm = posixpath.normpath(host_dir) if host_dir else ""
+        if not host_dir or not posixpath.isabs(host_dir) or norm == "/" or ".." in host_dir.split("/"):
+            raise ValueError(f"refusing to mount {host_dir!r} into a helper container")
+        if not command:
+            raise ValueError("helper needs a command")
+        c = self.client.containers.run(
+            image, entrypoint=[command[0]], command=list(command[1:]), detach=True, auto_remove=True,
+            user="0:0", network_mode="none", labels={HELPER_LABEL: "true"},
+            volumes={norm: {"bind": HELPER_MOUNT, "mode": "rw"}}, security_opt=["no-new-privileges"],
+        )
+        try:
+            res = c.wait(timeout=timeout, condition="removed")
+        except docker.errors.NotFound:
+            return None  # exited and auto-removed before we started waiting
+        except Exception as e:  # timeout or daemon trouble: make sure it does not linger
+            log.warning("delete helper did not finish: %s", e)
+            try:
+                c.remove(force=True)
+            except Exception:
+                pass
+            return None
+        return int((res or {}).get("StatusCode", -1))

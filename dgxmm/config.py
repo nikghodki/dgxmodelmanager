@@ -98,6 +98,8 @@ class Settings(BaseModel):
     litellm_url: str = "http://litellm-proxy:4000"
     litellm_key_file: str = "/run/secrets/litellm_master_key"
     hf_token_file: str = "/run/secrets/hf_token"
+    helper_image: str | None = None  # image for root delete helpers; None → this container's image, else dgxmm:latest
+    helper_timeout_s: float = 120.0
     session_ttl_s: int = 12 * 3600
     secure_cookies: str = "auto"  # auto | always | never
     trusted_proxies: str = "127.0.0.1,::1"  # IPs/CIDRs that may set X-Forwarded-For
