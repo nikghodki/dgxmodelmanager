@@ -103,3 +103,80 @@ async def test_successful_run_is_recorded_done(db):
     with db.session() as s:
         run = s.scalars(select(BenchmarkRun)).one()
         assert run.status == "done" and run.failed_concurrency is None and run.error is None
+
+
+# ---- review round 1 ----
+class RecordingEvents:
+    def __init__(self):
+        self.seen = []
+
+    def publish(self, kind, data):
+        self.seen.append((kind, data))
+
+
+async def test_run_insert_failure_does_not_leave_runner_busy(db):
+    class FlakyDb:
+        def __init__(self, inner):
+            self.inner, self.calls = inner, 0
+
+        def session(self):
+            self.calls += 1
+            if self.calls == 1:
+                raise RuntimeError("database is locked")
+            return self.inner.session()
+    r = BenchmarkRunner(FlakyDb(db), EventBroker(),
+                        http_factory=lambda: httpx.AsyncClient(transport=httpx.MockTransport(sse_handler([]))))
+    kw = dict(deployment_id=1, engine="vllm", model_ref="m/m", config={}, base_url="http://h:1", served_name="q",
+              levels=(1,), input_len=8, output_len=5, duration_s=1, max_requests=1)
+    with pytest.raises(RuntimeError):
+        await r.run(**kw)
+    assert r.busy() is None
+    assert len(await r.run(**kw)) == 1  # not stuck "busy" (409) until restart
+
+
+async def test_level_with_mostly_errors_is_not_a_measurement(db):
+    n = {"i": 0}
+    ok = sse_handler([])
+
+    def handler(req):
+        n["i"] += 1
+        return ok(req) if n["i"] % 4 == 0 else httpx.Response(500)  # 75 % errors
+    r = BenchmarkRunner(db, EventBroker(), http_factory=lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    rows = await r.run(deployment_id=1, engine="vllm", model_ref="m/m", config={}, base_url="http://h:1",
+                       served_name="q", levels=(1, 2), input_len=8, output_len=5, duration_s=5, max_requests=8)
+    assert rows[0]["failed"] is True and rows[0]["requests"] == 2 and rows[0]["errors"] == 6 and len(rows) == 1
+    with db.session() as s:
+        assert s.scalars(select(Benchmark)).all() == []
+        run = s.scalars(select(BenchmarkRun)).one()
+        assert run.failed_concurrency == 1 and "6 of 8" in run.error
+
+
+async def test_stored_levels_record_their_error_count(db):
+    n = {"i": 0}
+    ok = sse_handler([])
+
+    def handler(req):
+        n["i"] += 1
+        return httpx.Response(500) if n["i"] == 1 else ok(req)  # 1 of 4 fails
+    r = BenchmarkRunner(db, EventBroker(), http_factory=lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    await r.run(deployment_id=1, engine="vllm", model_ref="m/m", config={}, base_url="http://h:1", served_name="q",
+                levels=(1,), input_len=8, output_len=5, duration_s=5, max_requests=4)
+    with db.session() as s:
+        b = s.scalars(select(Benchmark)).one()
+        assert b.requests == 3 and b.errors == 1
+
+
+async def test_exception_publishes_final_failed_event(db):
+    ev = RecordingEvents()
+
+    def boom():
+        raise RuntimeError("no client")
+    r = BenchmarkRunner(db, ev, http_factory=boom)
+    with pytest.raises(RuntimeError):
+        await r.run(deployment_id=5, engine="vllm", model_ref="m/m", config={}, base_url="http://h:1", served_name="q",
+                    levels=(1,), input_len=8, output_len=5, duration_s=1, max_requests=1)
+    kind, data = ev.seen[-1]
+    assert kind == "benchmark" and data["deployment_id"] == 5 and data["done"] is True and data["failed"] is True
+    assert "no client" in data["error"]
+    with db.session() as s:
+        assert s.scalars(select(BenchmarkRun)).one().status == "failed"

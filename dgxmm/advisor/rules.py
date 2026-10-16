@@ -293,7 +293,8 @@ class AdvisorService:
         variants = [a for a in others if a.kind == "llm" and base_model_name(a.ref) == base]
         drafts = [a for a in others if a.kind == "draft" and base_model_name(a.ref).startswith(base)]
         with self.db.session() as s:
-            rows = s.scalars(select(Benchmark).where(Benchmark.model_ref == v["model_ref"], Benchmark.requests > 0)
+            rows = s.scalars(select(Benchmark).where(Benchmark.model_ref == v["model_ref"], Benchmark.requests > 0,
+                                                    Benchmark.tps_per_req > 0)
                              .order_by(Benchmark.id.desc()))
             benches = [{"config_hash": b.config_hash, "concurrency": b.concurrency, "tps_per_req": b.tps_per_req,
                         "tps_total": b.tps_total, "requests": b.requests} for b in rows]
