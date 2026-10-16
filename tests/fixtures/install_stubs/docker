@@ -24,9 +24,17 @@ case "$*" in
     if [ -f "$FAKE_LOG.id" ]; then cat "$FAKE_LOG.id"
     elif [ -n "${FAKE_DGXMM_STATE:-}" ]; then echo "old-id"
     else exit 1; fi ;;
-  "compose up -d --build")
+  "compose up -d --build"|"compose --profile litellm up -d --build")
     [ "${FAKE_COMPOSE_UP:-ok}" = ok ] || { echo "failed to solve: process did not complete" >&2; exit 17; }
+    case "$*" in *litellm*) touch "$FAKE_LOG.bundled" ;; esac
     [ "${FAKE_RECREATE:-1}" = 1 ] && echo "id-$RANDOM-$$" > "$FAKE_LOG.id" ;;
+  ps\ -aq\ --filter\ label=com.docker.compose.project.working_dir=*\ --filter\ label=com.docker.compose.service=*)
+    # Bundled LiteLLM containers exist after a profile up, or when FAKE_BUNDLED=1.
+    if [ -e "$FAKE_LOG.bundled" ] || [ "${FAKE_BUNDLED:-0}" = 1 ]; then last=${!#}; echo "id-${last##*service=}"; fi ;;
+  "inspect --format {{.State.Status}}/{{if .State.Health}}{{.State.Health.Status}}{{end}} id-dgxmm-litellm")
+    echo "${FAKE_LITELLM_HEALTH:-running/healthy}" ;;
+  "inspect --format {{.Name}}"*" id-"*) last=${!#}; echo "/repo-${last#id-}-1  running (healthy)" ;;
+  "logs --tail 30 id-dgxmm-litellm") printf '%s\n' "${FAKE_LITELLM_LOGS:-}" ;;
   pull\ *) [ "${FAKE_PULL:-ok}" = ok ] || { echo "manifest unknown" >&2; exit 1; } ;;
   network\ inspect\ *\ -f\ *Gateway*) [ "${FAKE_NETWORK:-missing}" = exists ] || { echo "Error: No such network" >&2; exit 1; }; echo "172.99.0.1" ;;
   network\ inspect\ --format*) [ "${FAKE_NETWORK:-missing}" = exists ] || exit 1; echo "${FAKE_NETWORK_LABEL:-}" ;;

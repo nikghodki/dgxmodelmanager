@@ -20,6 +20,12 @@ EXAMPLE_CONFIG="$REPO_DIR/config.example.yaml"
 SECRETS_DIR="$REPO_DIR/secrets"
 DATA_DIR="$REPO_DIR/data"
 ENV_KEYS=(DGXMM_UID DGXMM_GID DOCKER_GID DGXMM_PORT DGXMM_BIND DGXMM_HF_CACHE DGXMM_MODELS_DIR DGXMM_NETWORK DGXMM_HOST_HOME DGXMM_TRUSTED_PROXIES)
+# Written to .env only when the bundled LiteLLM is enabled (--with-litellm / DGXMM_WITH_LITELLM=1).
+LITELLM_ENV_KEYS=(DGXMM_WITH_LITELLM DGXMM_LITELLM_PORT COMPOSE_PROFILES)
+LITELLM_SERVICE=dgxmm-litellm
+LITELLM_DB_SERVICE=dgxmm-litellm-db
+LITELLM_INTERNAL_URL=http://dgxmm-litellm:4000
+LITELLM_DB_DIR="$DATA_DIR/litellm-db"
 
 usage() {
   cat <<'EOF'
@@ -33,8 +39,9 @@ Commands:
   upgrade      git pull --ff-only (when this is a git checkout), then install.
   status       Show container state/health, URLs, managed engine containers.
   logs         Show the dgxmm container logs (-f to follow).
-  uninstall    Stop and remove the dgxmm container and image. Keeps data/, secrets/,
-               config.yaml and .env, and leaves engine containers running.
+  uninstall    Stop and remove the dgxmm container and image (and the bundled LiteLLM
+               containers, if any). Keeps data/ (incl. the LiteLLM database data/litellm-db),
+               secrets/, config.yaml and .env, and leaves engine containers running.
                With --purge also removes those files, the engine containers DGXMM manages
                (label dgxmm.managed=true) and the docker network if install.sh created it.
                Model caches (HF cache, models dir) are never touched.
@@ -48,6 +55,11 @@ Options:
   --hf-cache DIR       Hugging Face cache on the host  (env DGXMM_HF_CACHE,
                        default $HOME/.cache/huggingface)
   --models-dir DIR     GGUF models directory           (env DGXMM_MODELS_DIR, default $HOME/models)
+  --with-litellm       Also run a bundled LiteLLM proxy + Postgres (compose profile "litellm"):
+                       one OpenAI-compatible endpoint http://<host>:<litellm port>/v1 for all
+                       DGXMM deployments (env DGXMM_WITH_LITELLM=1). Remembered in .env.
+  --litellm-port PORT  Host port for the bundled LiteLLM (env DGXMM_LITELLM_PORT, default 4000;
+                       bound to the same address as the UI)
   --allow-root         Allow running as root (not recommended).
   --purge              With uninstall: also delete DGXMM state (see above).
   -f, --follow         With logs: follow the log.
@@ -56,9 +68,18 @@ Options:
 Environment (all optional; non-interactive, nothing is prompted):
   DGXMM_PORT, DGXMM_BIND, DGXMM_NETWORK, DGXMM_HF_CACHE, DGXMM_MODELS_DIR   as above
   HF_TOKEN             Hugging Face token, written to secrets/hf_token (gated models).
-  LITELLM_URL          LiteLLM proxy URL for model registration (default http://litellm-proxy:4000).
+  DGXMM_WITH_LITELLM=1 Same as --with-litellm. On a fresh config.yaml, litellm_url is then
+                       http://dgxmm-litellm:4000; random secrets/litellm_master_key (sk-...),
+                       secrets/litellm_salt_key and secrets/litellm_db_password are generated
+                       (mode 600, never printed, never overwritten). The database lives in
+                       data/litellm-db. To turn it off later, set DGXMM_WITH_LITELLM=0 and remove
+                       COMPOSE_PROFILES=litellm in .env.
+  DGXMM_LITELLM_PORT   as --litellm-port
+  LITELLM_URL          LiteLLM proxy URL for model registration (default http://litellm-proxy:4000,
+                       or http://dgxmm-litellm:4000 with --with-litellm).
   LITELLM_MASTER_KEY   LiteLLM master key, written to secrets/litellm_master_key. If unset and a
-                       running container named litellm-proxy exists, the key is read from it.
+                       running container named litellm-proxy exists, the key is read from it
+                       (with --with-litellm a new random key is generated instead).
   DGXMM_TRUSTED_PROXIES  Comma-separated IPs/CIDRs trusted to set X-Forwarded-For (default
                        127.0.0.1,::1). Behind a reverse proxy, set to the proxy's IP or docker
                        network subnet.
@@ -71,6 +92,7 @@ Examples:
   ./install.sh                                    # install / upgrade, reachable on the LAN
   DGXMM_BIND=127.0.0.1 DGXMM_NETWORK=gateway ./install.sh   # behind an existing reverse proxy
   HF_TOKEN=hf_xxx ./install.sh --port 8091
+  ./install.sh --with-litellm                     # fresh box: DGXMM + its own LiteLLM endpoint
   ./install.sh status
   ./install.sh uninstall            # keeps your data; add --purge to delete it
 EOF
@@ -136,7 +158,7 @@ DRY_RUN=0
 PURGE=0
 ALLOW_ROOT=0
 FOLLOW=0
-FLAG_PORT="" FLAG_BIND="" FLAG_NETWORK="" FLAG_HF="" FLAG_MODELS=""
+FLAG_PORT="" FLAG_BIND="" FLAG_NETWORK="" FLAG_HF="" FLAG_MODELS="" FLAG_WITH_LITELLM="" FLAG_LITELLM_PORT=""
 PASSTHRU=()   # options re-applied when upgrade re-executes the updated installer
 
 parse_args() {
@@ -153,7 +175,8 @@ parse_args() {
       --purge) PURGE=1 ;;
       --allow-root) ALLOW_ROOT=1; PASSTHRU+=("$1") ;;
       -f|--follow) FOLLOW=1 ;;
-      --port|--bind|--network|--hf-cache|--models-dir)
+      --with-litellm) FLAG_WITH_LITELLM=1; PASSTHRU+=("$1") ;;
+      --port|--bind|--network|--hf-cache|--models-dir|--litellm-port)
         (($# >= 2)) || { printf 'option %s needs a value\n' "$1" >&2; exit 2; }
         case $1 in
           --port) FLAG_PORT=$2 ;;
@@ -161,6 +184,7 @@ parse_args() {
           --network) FLAG_NETWORK=$2 ;;
           --hf-cache) FLAG_HF=$2 ;;
           --models-dir) FLAG_MODELS=$2 ;;
+          --litellm-port) FLAG_LITELLM_PORT=$2 ;;
         esac
         PASSTHRU+=("$1" "$2"); shift ;;
       -h|--help) usage; exit 0 ;;
@@ -243,9 +267,24 @@ load_settings() {
   HF_CACHE=$(expand_tilde "$(resolve DGXMM_HF_CACHE "$FLAG_HF" "$HOST_HOME/.cache/huggingface")")
   MODELS_DIR=$(expand_tilde "$(resolve DGXMM_MODELS_DIR "$FLAG_MODELS" "$HOST_HOME/models")")
   TRUSTED_PROXIES=$(resolve DGXMM_TRUSTED_PROXIES "" "")
+  WITH_LITELLM=$(resolve DGXMM_WITH_LITELLM "$FLAG_WITH_LITELLM" 0)
+  case $WITH_LITELLM in
+    1|true|yes) WITH_LITELLM=1 ;;
+    0|false|no|"") WITH_LITELLM=0 ;;
+    *) die "DGXMM_WITH_LITELLM must be 1 or 0 (got '$WITH_LITELLM')" ;;
+  esac
+  LITELLM_PORT=$(resolve DGXMM_LITELLM_PORT "$FLAG_LITELLM_PORT" 4000)
+  COMPOSE_PROFILES_VALUE=$(resolve COMPOSE_PROFILES "" litellm)
 
   if ! [[ $PORT =~ ^[0-9]+$ ]] || ((PORT < 1 || PORT > 65535)); then
     die "DGXMM_PORT must be a port number 1-65535 (got '$PORT')"
+  fi
+  if ((WITH_LITELLM)); then
+    if ! [[ $LITELLM_PORT =~ ^[0-9]+$ ]] || ((LITELLM_PORT < 1 || LITELLM_PORT > 65535)); then
+      die "DGXMM_LITELLM_PORT must be a port number 1-65535 (got '$LITELLM_PORT')"
+    fi
+    ((LITELLM_PORT != PORT)) || die "DGXMM_LITELLM_PORT and DGXMM_PORT must differ (both $PORT)"
+    ENV_KEYS+=("${LITELLM_ENV_KEYS[@]}")
   fi
   if ! [[ ${DGXMM_HEALTH_TIMEOUT:-300} =~ ^[0-9]+$ ]] || ((${DGXMM_HEALTH_TIMEOUT:-300} < 1)); then
     die "DGXMM_HEALTH_TIMEOUT must be a positive whole number of seconds (got '${DGXMM_HEALTH_TIMEOUT}')"
@@ -279,6 +318,9 @@ env_value() {  # env_value KEY -> effective value for .env
     DGXMM_NETWORK) printf '%s' "$NETWORK" ;;
     DGXMM_HOST_HOME) printf '%s' "$HOST_HOME" ;;
     DGXMM_TRUSTED_PROXIES) printf '%s' "$TRUSTED_PROXIES" ;;
+    DGXMM_WITH_LITELLM) printf '%s' "$WITH_LITELLM" ;;
+    DGXMM_LITELLM_PORT) printf '%s' "$LITELLM_PORT" ;;
+    COMPOSE_PROFILES) printf '%s' "$COMPOSE_PROFILES_VALUE" ;;
   esac
 }
 
@@ -325,6 +367,29 @@ check_ownership() {
     die "another DGXMM instance exists on this host: container '$CONTAINER' ($state) was created from ${workdir:-outside docker compose}, not $REPO_DIR. Two instances would both adopt the same engine containers. Manage that installation from its own checkout (cd ${workdir:-<its checkout>} && ./install.sh ...), or remove it first."
   fi
   OWN_STATE=$state
+}
+
+# litellm_ids [SERVICE...]: ids of this checkout's bundled LiteLLM containers (compose labels; they
+# have no fixed container_name, so their names derive from the compose project).
+litellm_ids() {
+  local svc
+  for svc in "${@:-$LITELLM_SERVICE}"; do
+    docker ps -aq --filter "label=com.docker.compose.project.working_dir=$REPO_DIR" \
+      --filter "label=com.docker.compose.service=$svc" 2>/dev/null || true
+  done
+}
+
+# litellm_health: STATE/HEALTH of this checkout's dgxmm-litellm container ("missing/" if none).
+litellm_health() {
+  local id
+  id=$(litellm_ids "$LITELLM_SERVICE" | head -n 1)
+  [ -n "$id" ] || { printf 'missing/'; return 0; }
+  docker inspect --format '{{.State.Status}}/{{if .State.Health}}{{.State.Health.Status}}{{end}}' "$id" 2>/dev/null ||
+    printf 'missing/'
+}
+
+external_litellm_running() {
+  [ -n "$(docker ps -q --filter 'name=^litellm-proxy$' 2>/dev/null)" ]
 }
 
 port_busy() {
@@ -387,6 +452,20 @@ preflight() {
   else
     ok "port $PORT free"
   fi
+  if ((WITH_LITELLM)); then
+    if external_litellm_running; then
+      warn "a LiteLLM container named litellm-proxy is already running; --with-litellm starts a second, separate LiteLLM ($LITELLM_SERVICE) on port $LITELLM_PORT. DGXMM registers models only with the LiteLLM that litellm_url in config.yaml points at."
+    fi
+    local lstate
+    lstate=$(litellm_health)
+    if [[ $lstate == running/* ]]; then
+      ok "port $LITELLM_PORT (in use by this DGXMM's LiteLLM; it will be updated)"
+    elif port_busy "$LITELLM_PORT"; then
+      die "port $LITELLM_PORT (LiteLLM) is already in use on this host by another process. Pick a free one, e.g. DGXMM_LITELLM_PORT=4001 ./install.sh --with-litellm (or --litellm-port 4001)"
+    else
+      ok "port $LITELLM_PORT free (LiteLLM)"
+    fi
+  fi
   local probe=$HF_CACHE avail_kb gib
   while [ ! -e "$probe" ] && [ "$probe" != / ]; do probe=$(dirname "$probe"); done
   avail_kb=$(df -Pk "$probe" 2>/dev/null | awk 'NR == 2 { print $4 }')
@@ -430,8 +509,17 @@ ensure_env_file() {
   write_file "$ENV_FILE" 644 "$content"
 }
 
+# effective_litellm_url: litellm_url for a freshly rendered config.yaml ("" = keep the example's).
+effective_litellm_url() {
+  if [ -n "${LITELLM_URL:-}" ]; then
+    printf '%s' "$LITELLM_URL"
+  elif ((WITH_LITELLM)); then
+    printf '%s' "$LITELLM_INTERNAL_URL"
+  fi
+}
+
 render_config() {
-  R_HF=$HF_CACHE R_MODELS=$MODELS_DIR R_HOME=$HOST_HOME R_NET=$NETWORK R_LITELLM=${LITELLM_URL:-} \
+  R_HF=$HF_CACHE R_MODELS=$MODELS_DIR R_HOME=$HOST_HOME R_NET=$NETWORK R_LITELLM=$(effective_litellm_url) \
   awk '
     function repl(s, old, new,   i) {
       i = index(s, old)
@@ -454,6 +542,13 @@ ensure_config() {
     cfg_net=$(awk '/^docker_network:/ { print $2; exit }' "$CONFIG_FILE")
     if [ -n "$cfg_net" ] && [ "$cfg_net" != "$NETWORK" ]; then
       warn "config.yaml has docker_network: $cfg_net but DGXMM_NETWORK is $NETWORK; engines would join a different network than DGXMM. Make them match."
+    fi
+    if ((WITH_LITELLM)); then
+      local cfg_url
+      cfg_url=$(awk '/^litellm_url:/ { print $2; exit }' "$CONFIG_FILE")
+      if [ "${cfg_url:-http://litellm-proxy:4000}" != "$LITELLM_INTERNAL_URL" ]; then
+        note "note: config.yaml keeps litellm_url: ${cfg_url:-http://litellm-proxy:4000 (default)}, so DGXMM keeps registering models there, not with the bundled LiteLLM. To use the bundled one, set litellm_url: $LITELLM_INTERNAL_URL in config.yaml (or on DGXMM's LiteLLM page) and put its key (secrets/litellm_master_key) in place."
+      fi
     fi
     return
   fi
@@ -499,6 +594,15 @@ detect_litellm_key() {
   printf '%s' "$raw"
 }
 
+# random_token LENGTH: LENGTH random [A-Za-z0-9] characters (no pipe is closed early: safe under
+# pipefail).
+random_token() {
+  local raw
+  raw=$(head -c 4096 /dev/urandom | LC_ALL=C tr -dc 'A-Za-z0-9')
+  ((${#raw} >= $1)) || die "could not read enough random bytes from /dev/urandom"
+  printf '%s' "${raw:0:$1}"
+}
+
 # ensure_secret NAME VALUE SOURCE: create secrets/NAME (or fill it when it exists but is empty).
 ensure_secret() {
   local path=$SECRETS_DIR/$1 value=$2 source=$3
@@ -518,6 +622,24 @@ ensure_secrets() {
   ensure_dir "$SECRETS_DIR" 700
   ensure_secret hf_token "${HF_TOKEN:-}" "from HF_TOKEN"
   local key="${LITELLM_MASTER_KEY:-}" source="from LITELLM_MASTER_KEY"
+  if ((WITH_LITELLM)); then
+    # The bundled LiteLLM gets its own random keys; existing (non-empty) files are never replaced.
+    if [ -z "$key" ] && [ ! -s "$SECRETS_DIR/litellm_master_key" ]; then
+      key="sk-$(random_token 48)"; source="generated for the bundled LiteLLM"
+    fi
+    ensure_secret litellm_master_key "$key" "$source"
+    local name
+    for name in litellm_salt_key litellm_db_password; do
+      if [ -s "$SECRETS_DIR/$name" ]; then
+        ensure_secret "$name" "" ""
+      elif [ "$name" = litellm_salt_key ]; then
+        ensure_secret "$name" "sk-$(random_token 48)" "generated"
+      else
+        ensure_secret "$name" "$(random_token 40)" "generated"
+      fi
+    done
+    return 0
+  fi
   if [ -z "$key" ] && [ ! -s "$SECRETS_DIR/litellm_master_key" ]; then
     if key=$(detect_litellm_key); then
       source="read from the running litellm-proxy container"
@@ -616,26 +738,71 @@ wait_healthy() {
   done
 }
 
-print_urls() {
-  local path=/dgxmm/ ip
+# print_endpoints PORT PATH LOOPBACK_NOTE: the URLs a published port is reachable at.
+print_endpoints() {
+  local port=$1 path=$2 loopback_note=$3 ip
   case $BIND in
     0.0.0.0)
       while read -r ip; do
-        if [ -n "$ip" ]; then note "http://$ip:$PORT$path"; fi
+        if [ -n "$ip" ]; then note "http://$ip:$port$path"; fi
       done < <(host_ipv4s)
       local host
       host=$(hostname 2>/dev/null || echo localhost)
       case $host in
         *.*|localhost) ;;
-        *) note "http://$host.local:$PORT$path  (mDNS)" ;;
+        *) note "http://$host.local:$port$path  (mDNS)" ;;
       esac
-      note "http://$host:$PORT$path"
+      note "http://$host:$port$path"
       ;;
     127.0.0.1)
-      note "http://127.0.0.1:$PORT$path  (loopback only: publish it through a reverse proxy, see deploy/nginx-dgxmm.conf)"
+      note "http://127.0.0.1:$port$path  ($loopback_note)"
       ;;
-    *) note "http://$BIND:$PORT$path" ;;
+    *) note "http://$BIND:$port$path" ;;
   esac
+}
+
+print_urls() {
+  print_endpoints "$PORT" /dgxmm/ "loopback only: publish it through a reverse proxy, see deploy/nginx-dgxmm.conf"
+}
+
+print_litellm_endpoint() {
+  print_endpoints "$LITELLM_PORT" /v1 "loopback only: publish it through a reverse proxy"
+  note "from containers on network $NETWORK: $LITELLM_INTERNAL_URL/v1"
+  note "every ready DGXMM deployment is one model on this endpoint: pass \"model\": \"<model name>\""
+  note "API keys: create virtual keys on DGXMM's LiteLLM page (Integrations > LiteLLM), or call"
+  note "  POST /key/generate on the endpoint with the master key from secrets/litellm_master_key"
+}
+
+wait_litellm_healthy() {
+  local timeout=${DGXMM_LITELLM_HEALTH_TIMEOUT:-300} poll=${DGXMM_HEALTH_POLL:-3} start=$SECONDS state fail
+  info "Waiting for LiteLLM to become healthy (/health/liveliness, up to ${timeout}s)"
+  while :; do
+    state=$(litellm_health)
+    case $state in
+      running/healthy)
+        if [ -t 1 ]; then printf '\n'; fi
+        ok "LiteLLM healthy after $((SECONDS - start))s"
+        return 0 ;;
+      running/unhealthy) fail="the $LITELLM_SERVICE container is unhealthy" ;;
+      running/*|created/*|restarting/*) fail="" ;;
+      *) fail="the $LITELLM_SERVICE container is not running (state: ${state%/})" ;;
+    esac
+    if [ -z "$fail" ] && ((SECONDS - start >= timeout)); then
+      fail="LiteLLM did not become healthy within ${timeout}s (state: $state)"
+    fi
+    if [ -n "$fail" ]; then
+      local id
+      id=$(litellm_ids "$LITELLM_SERVICE" | head -n 1)
+      warn "$fail"
+      if [ -n "$id" ]; then
+        warn "last LiteLLM log lines:"
+        docker logs --tail 30 "$id" 2>&1 | sed -E 's/(sk-)[A-Za-z0-9_-]+/\1***/g' | sed 's/^/    /' >&2 || true
+      fi
+      return 1
+    fi
+    if [ -t 1 ]; then printf '.'; fi
+    sleep "$poll"
+  done
 }
 
 proxy_hint() {
@@ -664,22 +831,37 @@ cmd_install() {
   ensure_config
   ensure_dir "$DATA_DIR"
   ensure_secrets
+  if ((WITH_LITELLM)) && [ ! -f "$REPO_DIR/deploy/litellm/config.yaml" ]; then
+    die "deploy/litellm/config.yaml is missing (needed by --with-litellm); is this a complete checkout?"
+  fi
 
   info "Host directories"
   local d
   for d in "$HF_CACHE" "$MODELS_DIR" "$HOST_HOME/.cache/vllm" "$HOST_HOME/.cache/flashinfer" "$HOST_HOME/.triton"; do
     if [ -d "$d" ]; then ok "exists: $d"; else ensure_dir "$d"; fi
   done
+  if ((WITH_LITELLM)); then
+    # Created here (not by docker, which would make it root-owned): Postgres runs as DGXMM_UID.
+    if [ -d "$LITELLM_DB_DIR" ]; then ok "exists: ${LITELLM_DB_DIR#"$REPO_DIR"/}"; else ensure_dir "$LITELLM_DB_DIR" 700; fi
+  fi
 
   info "Docker"
   ensure_network
   pull_engines
   export_settings
-  info "Building and starting DGXMM (docker compose up -d --build)"
+  local compose=(docker compose)
+  if ((WITH_LITELLM)); then
+    compose+=(--profile litellm)
+    case ",$COMPOSE_PROFILES_VALUE," in
+      *,litellm,*) ;;
+      *) warn ".env has COMPOSE_PROFILES=$COMPOSE_PROFILES_VALUE without litellm: a plain 'docker compose up -d' will not start the bundled LiteLLM (install.sh still does)" ;;
+    esac
+  fi
+  info "Building and starting DGXMM (${compose[*]} up -d --build)"
   RUN_START=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   local id_before
   id_before=$(container_id)
-  run docker compose up -d --build ||
+  run "${compose[@]}" up -d --build ||
     die "docker compose up failed (image build or container start); see the output above, then run ./install.sh logs"
   if [ "$(container_id)" != "$id_before" ]; then CREATED_THIS_RUN=1; fi
 
@@ -687,6 +869,10 @@ cmd_install() {
     note "[dry-run] would wait for the healthcheck, then save a first-run admin password to secrets/admin_password"
     info "Dry run complete: nothing was changed. DGXMM would be reachable at:"
     print_urls
+    if ((WITH_LITELLM)); then
+      info "The bundled LiteLLM endpoint would be:"
+      print_litellm_endpoint
+    fi
     proxy_hint
     return 0
   fi
@@ -705,6 +891,13 @@ cmd_install() {
   fi
   note "manage: ./install.sh status | logs | upgrade | uninstall"
   proxy_hint
+  if ((WITH_LITELLM)); then
+    printf '\n'
+    wait_litellm_healthy ||
+      die "the bundled LiteLLM did not start; DGXMM itself is running. Check: docker compose --profile litellm logs $LITELLM_SERVICE $LITELLM_DB_SERVICE, then re-run ./install.sh"
+    info "LiteLLM is running. Single OpenAI-compatible endpoint for all DGXMM models:"
+    print_litellm_endpoint
+  fi
 }
 
 cmd_upgrade() {
@@ -743,9 +936,28 @@ cmd_status() {
   for f in .env config.yaml; do
     if [ -f "$REPO_DIR/$f" ]; then note "$f: present"; else note "$f: missing"; fi
   done
-  for f in hf_token litellm_master_key admin_password; do
+  local with_litellm
+  with_litellm=$(env_file_get DGXMM_WITH_LITELLM || echo 0)
+  local secret_names=(hf_token litellm_master_key admin_password)
+  if [ "$with_litellm" = 1 ]; then secret_names+=(litellm_salt_key litellm_db_password); fi
+  for f in "${secret_names[@]}"; do
     if [ -s "$SECRETS_DIR/$f" ]; then note "secrets/$f: set"; else note "secrets/$f: not set"; fi
   done
+  local lids=() lid line
+  mapfile -t lids < <(litellm_ids "$LITELLM_SERVICE" "$LITELLM_DB_SERVICE")
+  if [ "$with_litellm" = 1 ] || ((${#lids[@]})); then
+    info "Bundled LiteLLM containers (profile litellm)"
+    if ((${#lids[@]})); then
+      for lid in "${lids[@]}"; do
+        [ -n "$lid" ] || continue
+        line=$(docker inspect --format '{{.Name}}  {{.State.Status}}{{if .State.Health}} ({{.State.Health.Status}}){{end}}' "$lid" 2>/dev/null) || continue
+        note "${line#/}"
+      done
+    else
+      note "none (DGXMM_WITH_LITELLM=1 in .env: run ./install.sh to start them)"
+    fi
+    if [ "$with_litellm" = 1 ] && [ "$(litellm_health)" != running/healthy ]; then rc=1; fi
+  fi
   info "Managed engine containers (dgxmm.managed=true)"
   local engines
   engines=$(docker ps --filter label=dgxmm.managed=true --format '{{.Names}}  {{.Status}}')
@@ -759,6 +971,12 @@ cmd_status() {
   BIND=$(env_file_get DGXMM_BIND || echo 0.0.0.0)
   info "URLs"
   print_urls
+  if [ "$with_litellm" = 1 ]; then
+    LITELLM_PORT=$(env_file_get DGXMM_LITELLM_PORT || echo 4000)
+    NETWORK=$(env_file_get DGXMM_NETWORK || echo dgxmm)
+    info "LiteLLM endpoint"
+    print_litellm_endpoint
+  fi
   return "$rc"
 }
 
@@ -786,12 +1004,20 @@ cmd_uninstall() {
   if docker image inspect "$IMAGE" >/dev/null 2>&1; then
     run_q docker image rm "$IMAGE"
   fi
+  local lids=()
+  mapfile -t lids < <(litellm_ids "$LITELLM_SERVICE" "$LITELLM_DB_SERVICE" | grep . || true)
+  if ((${#lids[@]})); then
+    info "Removing the bundled LiteLLM containers"
+    run_q docker stop -t 30 "${lids[@]}"
+    run_q docker rm "${lids[@]}"
+  fi
   local network
   network=$(env_file_get DGXMM_NETWORK || echo dgxmm)
   if ((!PURGE)); then
     local n
     n=$(docker ps -q --filter label=dgxmm.managed=true | grep -c . || true)
     note "kept data/, secrets/, config.yaml and .env (re-run ./install.sh to reinstall)"
+    if [ -d "$LITELLM_DB_DIR" ]; then note "kept the LiteLLM database in data/litellm-db (--purge removes it)"; fi
     if ((n > 0)); then
       note "$n engine container(s) labelled dgxmm.managed=true are still running; a reinstall re-adopts them (--purge removes them)"
     fi
@@ -806,6 +1032,9 @@ cmd_uninstall() {
   fi
   if [ "$(docker network inspect --format '{{index .Labels "dgxmm.created"}}' "$network" 2>/dev/null || true)" = true ]; then
     run_q docker network rm "$network" || warn "could not remove network $network (still in use?)"
+  fi
+  if [ -d "$LITELLM_DB_DIR" ]; then
+    run rm -rf "$LITELLM_DB_DIR" || die "could not remove data/litellm-db (files owned by another user?); remove it by hand"
   fi
   run rm -rf "$DATA_DIR" "$SECRETS_DIR" "$CONFIG_FILE" "$ENV_FILE"
   note "model caches were not touched"

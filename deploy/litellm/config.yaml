@@ -1,0 +1,10 @@
+# Minimal config for the bundled LiteLLM (./install.sh --with-litellm; compose profile "litellm").
+# Models are not listed here: DGXMM registers every ready deployment through LiteLLM's admin API,
+# which stores them in the database (store_model_in_db). Keys come from the environment, which the
+# container entrypoint loads from secrets/ (see docker-compose.yaml).
+model_list: []
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY
+  database_url: os.environ/DATABASE_URL
+  store_model_in_db: true
