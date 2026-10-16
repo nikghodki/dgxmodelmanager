@@ -10,7 +10,7 @@ import { EmptyState, ErrorState } from "@/components/app/states";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import type { Deployment } from "@/types";
-import { SwitchDialog } from "../components/SwitchDialog";
+import { SwitchDialog } from "@/components/app/switch-dialog";
 
 const FACETS = [
   { key: "all", label: "All", match: () => true },

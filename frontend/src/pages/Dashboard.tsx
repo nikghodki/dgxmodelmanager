@@ -19,7 +19,7 @@ import { useActionMutation } from "@/hooks/use-action-mutation";
 import { fleetKpis } from "@/lib/fleet";
 import { cn } from "@/lib/utils";
 import type { Deployment, HostInfo } from "@/types";
-import { SwitchDialog } from "../components/SwitchDialog";
+import { SwitchDialog } from "@/components/app/switch-dialog";
 
 export function Dashboard() {
   const admin = useIsAdmin();
