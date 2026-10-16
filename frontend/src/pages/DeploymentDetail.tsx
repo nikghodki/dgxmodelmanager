@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
-import { useParams } from "react-router-dom";
+import { useNavigate, useParams } from "react-router-dom";
 import { api } from "../api";
 import { useIsAdmin } from "../auth";
 import { SwitchDialog } from "../components/SwitchDialog";
@@ -9,6 +9,7 @@ import { Badge, Button, Card, ErrorBox, Table } from "../components/ui";
 import { fmtBytes, fmtMs, fmtNum, stateTone } from "../format";
 import type { Deployment } from "../types";
 import { useLive } from "../stream";
+import { adviceApplicable, canRemove } from "../logic";
 
 function Performance({ id }: { id: number }) {
   const [win, setWin] = useState("live");
@@ -31,7 +32,7 @@ function Performance({ id }: { id: number }) {
   );
 }
 
-function AdviceCard({ id, onApply }: { id: number; onApply: (patch: Record<string, any>) => void }) {
+function AdviceCard({ id, engine, onApply }: { id: number; engine: string; onApply: (patch: Record<string, any>) => void }) {
   const q = useQuery({ queryKey: ["advice", id], queryFn: () => api<any[]>(`/deployments/${id}/advice`), refetchInterval: 60000 });
   const admin = useIsAdmin();
   return (
@@ -45,7 +46,7 @@ function AdviceCard({ id, onApply }: { id: number; onApply: (patch: Record<strin
               <Badge tone={a.severity === "warning" ? "red" : a.severity === "info" ? "slate" : "blue"}>{a.severity}</Badge>
               <span className="font-medium">{a.title}</span>
               <Badge tone={a.confidence === "measured" ? "green" : "slate"}>{a.confidence}</Badge>
-              {admin && (a.patch || a.model_ref) && <Button className="ml-auto" onClick={() => onApply({ ...(a.patch ?? {}), ...(a.model_ref ? { model_ref: a.model_ref } : {}) })}>Apply…</Button>}
+              {admin && adviceApplicable(a, { engine }) && <Button className="ml-auto" onClick={() => onApply({ ...(a.patch ?? {}), ...(a.model_ref ? { model_ref: a.model_ref } : {}) })}>Apply…</Button>}
             </div>
             <p className="mt-1 text-slate-600">{a.rationale}</p>
             <p className="text-xs text-slate-500">Expected: {a.expected_effect}</p>
@@ -90,9 +91,14 @@ export function DeploymentDetail() {
   const dep = useQuery({ queryKey: ["deployment", id], queryFn: () => api<Deployment>(`/deployments/${id}`) });
   const [logs, setLogs] = useState<string | null>(null);
   const [dialog, setDialog] = useState<null | { patch?: Record<string, any> }>(null);
+  const navigate = useNavigate();
   const act = useMutation({
     mutationFn: (action: string) => api(`/deployments/${id}/${action}`, { method: "POST" }),
     onSettled: () => qc.invalidateQueries({ queryKey: ["deployment", id] }),
+  });
+  const remove = useMutation({
+    mutationFn: () => api(`/deployments/${id}`, { method: "DELETE" }),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ["deployments"] }); navigate("/"); },
   });
   const d = dep.data;
   if (!d) return <ErrorBox error={dep.error} />;
@@ -108,10 +114,11 @@ export function DeploymentDetail() {
           {admin && <Button onClick={() => setDialog({})}>Reconfigure…</Button>}
           {admin && ["ready", "sleeping", "starting", "loading", "unknown"].includes(d.state) && <Button variant="danger" onClick={() => act.mutate("stop")}>Stop</Button>}
           {admin && ["stopped", "failed"].includes(d.state) && <Button onClick={() => act.mutate("start")}>Start</Button>}
+          {admin && canRemove(d.state) && <Button variant="danger" onClick={() => confirm(`Remove ${d.name}? Its settings and history are deleted.`) && remove.mutate()}>Remove</Button>}
           {admin && <Button onClick={async () => setLogs((await api<{ logs: string }>(`/deployments/${id}/logs?tail=300`)).logs)}>Logs</Button>}
         </div>
       </div>
-      <ErrorBox error={act.error} />
+      <ErrorBox error={act.error || remove.error} />
       {d.last_error && <div className="rounded-md bg-rose-50 px-3 py-2 text-sm text-rose-800">{d.last_error}</div>}
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
         <Card title="Endpoint">
@@ -131,7 +138,7 @@ export function DeploymentDetail() {
         </Card>
       </div>
       <Performance id={id} />
-      <AdviceCard id={id} onApply={(patch) => setDialog({ patch })} />
+      <AdviceCard id={id} engine={d.engine} onApply={(patch) => setDialog({ patch })} />
       <Benchmarks id={id} ready={d.state === "ready"} />
       <Card title="Events">
         <ol className="space-y-2 text-sm">

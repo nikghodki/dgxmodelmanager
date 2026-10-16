@@ -4,6 +4,7 @@ import { api } from "../api";
 import { useIsAdmin } from "../auth";
 import { Badge, Button, Card, ErrorBox, Input, Table } from "../components/ui";
 import { fmtBytes } from "../format";
+import { favouritePath } from "../logic";
 
 export function Planner() {
   const admin = useIsAdmin();
@@ -12,7 +13,7 @@ export function Planner() {
   const [must, setMust] = useState<string[]>([]);
   const q = useQuery({ queryKey: ["planner", ctx, must], queryFn: () => api<any>(`/planner?ctx=${ctx}${must.map((m) => `&must=${encodeURIComponent(m)}`).join("")}`) });
   const fav = useMutation({
-    mutationFn: ({ ref, on }: { ref: string; on: boolean }) => api(`/planner/favourites/${ref}`, { method: on ? "PUT" : "DELETE" }),
+    mutationFn: ({ ref, on }: { ref: string; on: boolean }) => api(favouritePath(ref), { method: on ? "PUT" : "DELETE" }),
     onSettled: () => qc.invalidateQueries({ queryKey: ["planner"] }),
   });
   const v = q.data;
@@ -21,7 +22,7 @@ export function Planner() {
       <Card title="What can run together?">
         <div className="flex items-end gap-3 text-sm">
           <label>Context per model <Input className="!w-28" type="number" value={ctx} onChange={(e) => setCtx(parseInt(e.target.value || "32768", 10))} /></label>
-          {v && <span className="text-slate-600">Capacity {fmtBytes(v.capacity)} (total minus margin, OS reserve and {fmtBytes(v.external)} external use; ignores what is deployed now)</span>}
+          {v && <span className="text-slate-600">Capacity {fmtBytes(v.capacity)} (total minus margin, OS reserve and {fmtBytes(v.external)} external use; ignores what is deployed and ready now)</span>}
         </div>
         <ErrorBox error={q.error} />
       </Card>
