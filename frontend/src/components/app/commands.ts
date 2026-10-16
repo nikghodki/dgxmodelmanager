@@ -23,7 +23,7 @@ interface Art { ref: string; complete: boolean; kind: string; engines: string[] 
 export function buildCommands({ isAdmin, deployments, artifacts }: { isAdmin: boolean; deployments: Dep[]; artifacts: Art[] }): CommandDef[] {
   const out: CommandDef[] = [];
   for (const g of visibleGroups(isAdmin)) for (const i of g.items) {
-    out.push({ id: `page:${i.to}`, group: "Pages", label: i.label, keywords: `${g.label} page go`, action: { type: "navigate", to: i.to } });
+    out.push({ id: `page:${i.to}`, group: "Pages", label: i.label, keywords: `${g.label} page go${i.keywords ? ` ${i.keywords}` : ""}`, action: { type: "navigate", to: i.to } });
   }
   if (isAdmin) out.push({ id: "page:/deploy", group: "Pages", label: "Deploy a model", keywords: "new create launch", action: { type: "navigate", to: "/deploy" } });
   out.push({ id: "page:/change-password", group: "Pages", label: "Change password", keywords: "account", action: { type: "navigate", to: "/change-password" } });

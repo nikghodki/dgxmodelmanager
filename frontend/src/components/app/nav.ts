@@ -1,7 +1,7 @@
 import type { LucideIcon } from "lucide-react";
-import { Download, HardDrive, LayoutDashboard, Puzzle, ScrollText, Search, Server, Users } from "lucide-react";
+import { Download, HardDrive, LayoutDashboard, Network, Puzzle, ScrollText, Search, Server, Users } from "lucide-react";
 
-export interface NavItem { to: string; label: string; icon: LucideIcon; end?: boolean }
+export interface NavItem { to: string; label: string; icon: LucideIcon; end?: boolean; /** Extra ⌘K search words. */ keywords?: string }
 export interface NavGroup { label: string; admin?: boolean; items: NavItem[] }
 
 export const NAV_GROUPS: NavGroup[] = [
@@ -14,6 +14,9 @@ export const NAV_GROUPS: NavGroup[] = [
     { to: "/models", label: "On disk", icon: HardDrive },
     { to: "/catalog", label: "Catalog", icon: Search },
     { to: "/downloads", label: "Downloads", icon: Download },
+  ] },
+  { label: "Integrations", admin: true, items: [
+    { to: "/litellm", label: "LiteLLM", icon: Network, keywords: "virtual keys api endpoint proxy openai master key" },
   ] },
   { label: "Admin", admin: true, items: [
     { to: "/users", label: "Users", icon: Users },
