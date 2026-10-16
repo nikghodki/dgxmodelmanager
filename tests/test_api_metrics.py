@@ -68,3 +68,26 @@ def test_benchmarks_route_hides_failed_rows_and_reports_runs(api_stack):
     assert [r["concurrency"] for r in rows] == [1]
     runs = api_stack.get(f"/dgxmm/api/deployments/{d['id']}/benchmark-runs").json()
     assert runs[0]["status"] == "failed" and runs[0]["failed_concurrency"] == 4 and "concurrency 4" in runs[0]["error"]
+
+
+def test_reset_calibration_route_is_admin_only_and_audited(api_stack):
+    from sqlalchemy import select
+
+    from dgxmm.db import AuditLog
+    from dgxmm.memory.calibration import Calibration
+    h = admin(api_stack)
+    cal = Calibration(api_stack.ctx.db)
+    cal.record("vllm", "Qwen/Qwen3-Tiny", "h", 10, 12, method="engine_log")
+    cal.record("vllm", "Qwen/Qwen3-Tiny", "h2", 10, 12, method="engine_log")
+    r = api_stack.delete("/dgxmm/api/calibration?repo=Qwen/Qwen3-Tiny&engine=vllm", headers=h)
+    assert r.status_code == 200 and r.json() == {"deleted": 2}
+    assert cal.summary("vllm", "Qwen/Qwen3-Tiny") == []
+    with api_stack.ctx.db.session() as s:
+        row = s.scalar(select(AuditLog).where(AuditLog.action == "calibration_reset"))
+        assert row.target == "Qwen/Qwen3-Tiny" and row.detail == {"engine": "vllm", "deleted": 2}
+    assert api_stack.delete("/dgxmm/api/calibration", headers=h).status_code == 422  # repo is required
+    # viewer is refused
+    api_stack.post("/dgxmm/api/auth/logout", headers=h)
+    v = api_stack.post("/dgxmm/api/auth/login", json={"username": "vic", "password": "viewer-password-1"}).json()
+    r = api_stack.delete("/dgxmm/api/calibration?repo=Qwen/Qwen3-Tiny", headers={"X-CSRF-Token": v["csrf_token"]})
+    assert r.status_code == 403

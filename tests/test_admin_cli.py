@@ -97,3 +97,25 @@ def test_module_entry_point(tmp_path, settings, db, make_user):
     r = subprocess.run([sys.executable, "-m", "dgxmm.admin", "list-users"], env=env,
                        capture_output=True, text=True, timeout=60, cwd=Path(__file__).resolve().parents[1])
     assert r.returncode == 0 and r.stdout.strip() == "admin\tadmin"
+
+
+def test_reset_calibration_cli(db, capsys):
+    from dgxmm.admin import reset_calibration
+    from dgxmm.memory.calibration import Calibration
+    cal = Calibration(db)
+    cal.record("vllm", "Qwen/Qwen3-0.6B", "h", 10, 12, method="engine_log")
+    cal.record("llamacpp", "Qwen/Qwen3-0.6B", "h", 10, 12, method="engine_log")
+    assert reset_calibration(db, "Qwen/Qwen3-0.6B", engine="vllm") == 1
+    assert reset_calibration(db, "Qwen/Qwen3-0.6B") == 1
+    with db.session() as s:
+        rows = s.scalars(select(AuditLog).where(AuditLog.action == "calibration_reset_cli")).all()
+        assert [r.target for r in rows] == ["Qwen/Qwen3-0.6B"] * 2
+
+
+def test_reset_calibration_cli_main(db, settings, monkeypatch, capsys):
+    import dgxmm.admin as adm
+    from dgxmm.memory.calibration import Calibration
+    Calibration(db).record("vllm", "Qwen/Qwen3-0.6B", "h", 10, 12, method="engine_log")
+    monkeypatch.setattr(adm, "_db", lambda config: db)
+    assert main(["reset-calibration", "Qwen/Qwen3-0.6B"]) == 0
+    assert "deleted 1 calibration row" in capsys.readouterr().out
