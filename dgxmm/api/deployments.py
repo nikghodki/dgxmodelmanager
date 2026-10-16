@@ -4,10 +4,12 @@ from fastapi import APIRouter, Depends, Query, Response
 from pydantic import BaseModel
 
 from dgxmm.api.errors import api_error
+from dgxmm.api.integrations import key_allows, key_out
 from dgxmm.audit import audit
 from dgxmm.auth.deps import Principal, current_principal, get_ctx, require_admin
 from dgxmm.context import AppContext
 from dgxmm.deployer.service import DeployError, DeployRequest, InsufficientMemory
+from dgxmm.litellm import LiteLLMError
 from dgxmm.planner.plans import PlanAction
 
 router = APIRouter(prefix="/api/deployments", tags=["deployments"])
@@ -70,6 +72,56 @@ def get_deployment(dep_id: int, p: Principal = Depends(current_principal), ctx: 
         return ctx.deployer.view(dep_id, with_events=True)
     except DeployError as e:
         raise deploy_error(e)
+
+
+class DeploymentPatch(BaseModel):
+    alias: str | None = None  # LiteLLM model name; null or "" = use the served name
+
+
+@router.patch("/{dep_id}")
+async def patch_deployment(dep_id: int, body: DeploymentPatch, p: Principal = Depends(require_admin),
+                           ctx: AppContext = Depends(get_ctx)):
+    if "alias" not in body.model_fields_set:
+        raise api_error(422, "nothing_to_update", "send {\"alias\": ...}")
+    try:
+        before = ctx.deployer.view(dep_id)
+        view = ctx.deployer.set_alias(dep_id, body.alias)
+    except DeployError as e:
+        raise deploy_error(e)
+    if before["alias"] != view["alias"]:
+        audit(ctx.db, p.user.id, "deployment_alias", view["name"], {"from": before["alias"], "to": view["alias"]})
+        if ctx.litellm is not None:
+            ctx.litellm.trigger()  # re-register under the new name, drop the old one
+    return view
+
+
+@router.get("/{dep_id}/litellm")
+async def deployment_litellm(dep_id: int, p: Principal = Depends(current_principal), ctx: AppContext = Depends(get_ctx)):
+    try:
+        view = ctx.deployer.view(dep_id)
+    except DeployError as e:
+        raise deploy_error(e)
+    cfg = ctx.settings_store.litellm()
+    model_name = view["model_name"]
+    out = {"deployment_id": dep_id, "model_name": model_name, "endpoint": cfg.endpoint, "registered": None,
+           "status": view["litellm_status"], "enabled": cfg.enabled, "error": None, "keys": [],
+           "keys_visible": p.user.role == "admin", "keys_error": None}
+    client = ctx.litellm.client if ctx.litellm is not None else None
+    if client is None or not cfg.enabled:
+        err = ("litellm_disabled", "the LiteLLM integration is disabled") if not cfg.enabled else \
+            ("litellm_unavailable", "the LiteLLM integration is not initialised")
+        out["error"] = {"code": err[0], "message": err[1]}
+        return out
+    try:
+        out["registered"] = await ctx.litellm.is_registered(dep_id, model_name) if model_name else False
+    except LiteLLMError as e:
+        out["error"] = {"code": e.code, "message": e.message}
+    if out["keys_visible"]:
+        try:
+            out["keys"] = [key_out(k) for k in await client.key_list() if model_name and key_allows(k, model_name)]
+        except LiteLLMError as e:
+            out["keys_error"] = {"code": e.code, "message": e.message}
+    return out
 
 
 @router.post("/{dep_id}/stop")
