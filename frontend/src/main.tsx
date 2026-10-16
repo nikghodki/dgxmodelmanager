@@ -6,12 +6,15 @@ import "./index.css";
 import { AuthProvider, RequireAuth } from "./auth";
 import { Layout } from "./components/Layout";
 import { Audit } from "./pages/Audit";
+import { Catalog } from "./pages/Catalog";
 import { ChangePassword } from "./pages/ChangePassword";
 import { Dashboard } from "./pages/Dashboard";
 import { DeploymentDetail } from "./pages/DeploymentDetail";
 import { DeployWizard } from "./pages/DeployWizard";
+import { Downloads } from "./pages/Downloads";
 import { Login } from "./pages/Login";
 import { Models } from "./pages/Models";
+import { Planner } from "./pages/Planner";
 import { Users } from "./pages/Users";
 
 const qc = new QueryClient({ defaultOptions: { queries: { retry: 1, refetchOnWindowFocus: false } } });
@@ -27,6 +30,9 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
             <Route element={<RequireAuth><Layout /></RequireAuth>}>
               <Route path="/" element={<Dashboard />} />
               <Route path="/models" element={<Models />} />
+              <Route path="/catalog" element={<Catalog />} />
+              <Route path="/downloads" element={<Downloads />} />
+              <Route path="/planner" element={<Planner />} />
               <Route path="/deploy" element={<DeployWizard />} />
               <Route path="/deployments/:id" element={<DeploymentDetail />} />
               <Route path="/users" element={<Users />} />

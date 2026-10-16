@@ -33,6 +33,8 @@ class AppContext:
     catalog: Any = None
     downloads: Any = None
     metrics: Any = None
+    archs: Any = None
+    hub: Any = None
     advisor: Any = None
     benchmarks: Any = None
     startup: list = field(default_factory=list)          # awaited once, in order, before serving
@@ -109,6 +111,26 @@ def build_context(settings: Settings) -> AppContext:
     from dgxmm.watchdog import Watchdog
     ctx.watchdog = Watchdog(settings, deployer, events, db)
     ctx.budget_listeners.append(ctx.watchdog.check)
+
+    from dgxmm.catalog.support import VllmArchRegistry
+    archs = VllmArchRegistry(settings, docker)
+    engines["vllm"].arch_source = archs.get
+    ctx.archs = archs
+
+    async def _archs():
+        await archs.ensure()
+    ctx.background.append(_archs)
+
+    from dgxmm.catalog.hub import HfHubClient
+    from dgxmm.catalog.llmfit import Llmfit
+    from dgxmm.catalog.service import CatalogService
+    hf_token = settings.read_secret(settings.hf_token_file)
+    hub = HfHubClient(token=hf_token)
+    ctx.catalog = CatalogService(settings, hub, Llmfit(settings.llmfit_bin), inventory, budget, deployer, archs)
+    ctx.hub = hub
+
+    from dgxmm.downloads import DownloadService
+    ctx.downloads = DownloadService(settings, db, inventory, hub, events, token=hf_token)
 
     ctx.startup += [_bootstrap, _inventory, _reconcile]
     ctx.background += [_budget_loop, _inventory_loop]
