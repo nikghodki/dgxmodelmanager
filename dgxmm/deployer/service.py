@@ -176,6 +176,8 @@ class Deployer:
         return Prepared(engine, artifact, cfg, draft, est)
 
     def _replacing_credit(self, replacing: int | None) -> int:
+        # Credit stop-equivalent memory (max(reserved, actual)) since switch() auto-escalates
+        # from sleep to stop when sleep won't free enough. This makes preview accurate.
         if replacing is None:
             return 0
         dep = self._get(replacing)
@@ -547,15 +549,18 @@ class Deployer:
             raise
         return applied
 
-    async def undo_actions(self, applied: list[tuple[str, int]]) -> None:
+    async def undo_actions(self, applied: list[tuple[str, int]]) -> list[str]:
+        failures = []
         for typ, dep_id in reversed(applied):
             try:
                 if typ == "sleep":
                     await self.wake(dep_id)
                 else:
                     await self.restart(dep_id)
-            except Exception:
+            except Exception as e:
                 log.exception("could not undo %s of deployment %s", typ, dep_id)
+                failures.append(f"{typ} deployment {dep_id}: {e}")
+        return failures
 
     def _set_alias(self, dep_id: int, alias: str | None) -> None:
         with self.db.session() as s:
@@ -569,9 +574,50 @@ class Deployer:
     async def switch(self, old_id: int, req: DeployRequest, actions, user_id: int | None) -> dict:
         old = self._require(old_id)
         acts = [a if isinstance(a, PlanAction) else PlanAction.model_validate(a) for a in actions]
+
+        # Check memory fit before touching anything; auto-escalate sleep→stop if needed
+        prep = self.prepare(req.engine, req.model_ref, req.config)
+        budget = await self.budget.refresh()
+
+        # Determine what we'll actually free
         if not any(a.deployment_id == old_id for a in acts) and old.state in ("ready", "sleeping", "unknown"):
-            if old.state != "sleeping":
-                acts.insert(0, PlanAction(type="sleep" if self._can_sleep(old) else "stop", deployment_id=old_id))
+            if old.state == "sleeping":
+                freed = 0  # already sleeping
+            elif self._can_sleep(old):
+                # Compute sleep_frees
+                est = old.estimate or {}
+                sleep_frees = max(old.reserved_bytes - est.get("weights", 0) - est.get("draft_weights", 0)
+                                  - est.get("runtime", 0), 0)
+                # Check if sleep is enough
+                fit_with_sleep = check_fit(prep.estimate, budget, extra_free=sleep_frees)
+                if fit_with_sleep.fits:
+                    acts.insert(0, PlanAction(type="sleep", deployment_id=old_id))
+                    freed = sleep_frees
+                else:
+                    # Sleep not enough; escalate to stop
+                    stop_frees = max(old.reserved_bytes, next((u.actual for u in budget.deployments
+                                                               if u.deployment_id == old_id), 0))
+                    acts.insert(0, PlanAction(type="stop", deployment_id=old_id))
+                    freed = stop_frees
+            else:
+                # Can't sleep; must stop
+                stop_frees = max(old.reserved_bytes, next((u.actual for u in budget.deployments
+                                                           if u.deployment_id == old_id), 0))
+                acts.insert(0, PlanAction(type="stop", deployment_id=old_id))
+                freed = stop_frees
+        else:
+            # Explicit actions provided; compute total freed
+            freed = sum(
+                (max(d.reserved_bytes, next((u.actual for u in budget.deployments if u.deployment_id == a.deployment_id), 0))
+                 if a.type == "stop" else 0)
+                for a in acts for d in [self._get(a.deployment_id)] if d
+            )
+
+        # Final fit check
+        fit = check_fit(prep.estimate, budget, extra_free=freed)
+        if not fit.fits:
+            raise InsufficientMemory(fit)
+
         alias = old.alias
         applied = await self.apply_actions(acts, user_id)
         new_id = None
@@ -584,21 +630,33 @@ class Deployer:
             if state != "ready":
                 raise DeployError("switch_failed", f"new deployment ended in state {state}; rolled back", 502)
             return self.view(new_id)
-        except Exception:
+        except Exception as original_error:
+            rollback_failures = []
             if new_id is not None:
                 try:
                     await self.stop(new_id, user_id, reason="switch rollback")
-                except Exception:
+                except Exception as e:
                     log.exception("rollback: could not stop %s", new_id)
+                    rollback_failures.append(f"stop new deployment {new_id}: {e}")
             if alias:
-                self._set_alias(old_id, alias)
-            await self.undo_actions(applied)
+                try:
+                    self._set_alias(old_id, alias)
+                except Exception as e:
+                    log.exception("rollback: could not restore alias %s", alias)
+                    rollback_failures.append(f"restore alias {alias}: {e}")
+            undo_failures = await self.undo_actions(applied)
+            rollback_failures.extend(undo_failures)
+            if rollback_failures:
+                raise DeployError("rollback_incomplete",
+                                  f"switch failed ({original_error}); rollback incomplete: {', '.join(rollback_failures)}",
+                                  502)
             raise
 
     async def reconfigure(self, dep_id: int, new_config: dict, model_ref: str | None = None, actions=(),
                           user_id: int | None = None) -> dict:
         dep = self._require(dep_id)
         old_cfg, old_ref = dict(dep.config), dep.model_ref
+        old_reserved, old_estimate, old_port = dep.reserved_bytes, dict(dep.estimate), dep.port
         was_active = dep.state in ("ready", "sleeping", "unknown", "starting", "loading")
         prep = self.prepare(dep.engine, model_ref or old_ref, new_config)
         if not actions:
@@ -615,17 +673,34 @@ class Deployer:
             if state != "ready":
                 raise DeployError("reconfigure_failed", f"new configuration ended in state {state}; rolled back", 502)
             return self.view(dep_id)
-        except Exception:
+        except Exception as original_error:
+            rollback_failures = []
             now = self._get(dep_id)
             if now is not None and now.state not in ("stopped", "failed"):
-                await self.stop(dep_id, user_id, reason="reconfigure rollback")
-            with self.db.session() as s:  # always restore the old config, even if we cannot restart it
-                row = s.get(Deployment, dep_id)
-                row.config, row.model_ref = old_cfg, old_ref
+                try:
+                    await self.stop(dep_id, user_id, reason="reconfigure rollback")
+                except Exception as e:
+                    log.exception("rollback stop of %s failed", dep_id)
+                    rollback_failures.append(f"stop deployment {dep_id}: {e}")
+            try:
+                with self.db.session() as s:  # always restore the old config, even if we cannot restart it
+                    row = s.get(Deployment, dep_id)
+                    row.config, row.model_ref = old_cfg, old_ref
+                    if not was_active:
+                        row.reserved_bytes, row.estimate, row.port = old_reserved, old_estimate, old_port
+            except Exception as e:
+                log.exception("rollback config restore of %s failed", dep_id)
+                rollback_failures.append(f"restore config: {e}")
             if was_active:
                 try:
                     await self.restart(dep_id, user_id, config_override=old_cfg, model_ref=old_ref)
-                except Exception:
+                except Exception as e:
                     log.exception("rollback restart of %s failed", dep_id)
-            await self.undo_actions(applied)
+                    rollback_failures.append(f"restart deployment {dep_id}: {e}")
+            undo_failures = await self.undo_actions(applied)
+            rollback_failures.extend(undo_failures)
+            if rollback_failures:
+                raise DeployError("rollback_incomplete",
+                                  f"reconfigure failed ({original_error}); rollback incomplete: {', '.join(rollback_failures)}",
+                                  502)
             raise
