@@ -1,4 +1,6 @@
 """Command-line redaction for the processes view (spec §5). Secrets must never reach the client."""
+import pytest
+
 from dgxmm.memory.redact import MAX_COMMAND_BYTES, format_command, redact_argv
 
 HF = "hf_" + "AbCdEfGhIjKlMnOpQrStUvWxYz012345"
@@ -60,8 +62,10 @@ def test_password_flags_and_short_flags():
 
 def test_bearer_headers():
     out = cmd(["curl", "-H", "Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.payload.sig", "http://x/v1/models"])
-    assert "Bearer ***" in out and "http://x/v1/models" in out
-    assert "bearer ***" in cmd(["sh", "-c", "curl -H 'authorization: bearer tok123456789' http://x"])
+    assert "'Authorization: ***'" in out and "http://x/v1/models" in out
+    out = cmd(["sh", "-c", "curl -H 'authorization: bearer tok123456789' http://x"])
+    assert "authorization: ***" in out and "http://x" in out
+    assert cmd(["app", "--auth-header-value", "x", "Bearer tok123456789"]).endswith("'Bearer ***'")
 
 
 def test_flags_inside_shell_strings():
@@ -109,15 +113,91 @@ def test_redact_argv_keeps_argument_count():
 
 def test_sensitive_name_rules():
     from dgxmm.memory.redact import is_sensitive_name
-    for name in ("api-key", "api_key", "apikey", "hf-token", "HF_TOKEN", "use-auth-token", "authorization", "secret",
+    for name in ("api-tokens", "hf-tokens", "tokens", "requirepass", "passphrase", "dbpass", "sig", "x-amz-signature",
+                 "api-key", "api_key", "apikey", "hf-token", "HF_TOKEN", "use-auth-token", "authorization", "secret",
                  "client-secret", "password", "PGPASSWORD", "passwd", "pass", "credentials", "LITELLM_MASTER_KEY",
                  "tokenizer-secret", "ssl-keyfile"):
         assert is_sensitive_name(name), name
     for name in ("model", "port", "tokenizer", "tokenizer-mode", "max-tokens", "max-num-batched-tokens",
-                 "enable-auto-tool-choice", "served-model-name", "passthrough", "host", "config"):
+                 "enable-auto-tool-choice", "served-model-name", "passthrough", "host", "config",
+                 "tokenizers", "tokenizer-revision", "num-speculative-tokens", "max-new-tokens", "bypass-cache"):
         assert not is_sensitive_name(name), name
 
 
 def test_trailing_sensitive_flag_and_negative_number_value():
     assert cmd(["svc", "--api-key"]) == "svc --api-key"
     assert cmd(["svc", "--token", "-123"]) == "svc --token ***"
+
+
+# Reviewer probe cases (fix round 1): every one of these leaked or was at risk. S must never survive.
+S = "Zq9SECRETvalue7"
+LEAK_CASES = {
+    "api-tokens": ["svc", "--api-tokens", S],
+    "hf-tokens": ["svc", "--hf-tokens", S],
+    "tokens": ["svc", "--tokens", S],
+    "dash-leading-secret": ["vllm", "--api-key", "-" + S],
+    "dash-leading-eq": ["vllm", "--api-key=-" + S],
+    "mysql -p glued": ["mysql", "-uroot", "-p" + S],
+    "mysqldump -p glued": ["/usr/bin/mysqldump", "-p" + S, "db"],
+    "curl -u": ["curl", "-u", "user:" + S, "http://x"],
+    "curl --user=": ["curl", "--user=user:" + S, "http://x"],
+    "passphrase": ["gpg", "--passphrase", S],
+    "requirepass": ["redis-server", "--requirepass", S],
+    "dbpass": ["app", "--dbpass=" + S],
+    "Authorization token (github)": ["curl", "-H", "Authorization: token ghp_" + S],
+    "Authorization ApiKey": ["curl", "-H", "Authorization: ApiKey " + S],
+    "Proxy-Authorization": ["curl", "-H", "Proxy-Authorization: Digest a=" + S],
+    "url userinfo slash": ["x", "postgres://u:ab/" + S + "@db/x"],
+    "url userinfo at": ["x", "postgres://u:ab@" + S + "@db/x"],
+    "url userinfo hash": ["x", "https://u:ab#" + S + "@h/x"],
+    "ghp bare": ["x", "ghp_" + S * 3],
+    "github_pat bare": ["x", "github_pat_" + S * 3],
+    "AKIA bare": ["x", "AKIAABCDEFGHIJKLMNOP"],
+    "json escaped quote": ["x", "--hf-overrides", '{"token": "ab\\"' + S + '"}'],
+    "json nested": ["x", "--hf-overrides", '{"auth":{"token":"' + S + '"}}'],
+    "python list argv": ["python", "-c", "subprocess.run(['x','--api-key','" + S + "'])"],
+    "python list argv dq": ["python", "-c", 'run(["x", "--api-key", "' + S + '"])'],
+    "sas sig": ["curl", "https://a.blob/x?sv=1&sig=" + S],
+    "query token": ["wget", "https://h/x?a=1&token=" + S],
+    "query key": ["wget", "https://h/x?key=" + S + "&b=2"],
+    "query access_token": ["wget", "https://h/x?access_token=" + S],
+    "base64 after --secret": ["x", "--secret", "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo=" + S],
+    "sh -c dash secret": ["sh", "-c", "vllm --api-key -" + S],
+    "env X=": ["env", "MYSQL_PWD=" + S, "PGPASSWORD=" + S],
+    "Cookie": ["curl", "-H", "Cookie: session=" + S],
+    "Cookie in sh": ["sh", "-c", "curl -H 'Cookie: a=1; session=" + S + "' http://x"],
+    "-H X-Api-Key": ["curl", "-H", "X-Api-Key: " + S],
+    "--header=Authorization": ["curl", "--header=Authorization: Bearer " + S],
+    "token json no space": ["x", '{"hf_token":"' + S + '"}'],
+    "--key value with spaces in sh": ["sh", "-c", "app --api-key '" + S + " more'"],
+    "sh -c --api-key double": ["sh", "-c", 'app --api-key "' + S + '"'],
+    "redis-cli -a": ["redis-cli", "-a", S],
+    "redis-cli -a in sh": ["sh", "-c", "redis-cli -h redis -a " + S + " ping"],
+    "mysql -p in sh": ["bash", "-c", "mysql -uroot -p" + S + " -e 'select 1'"],
+    "sshpass -p": ["sshpass", "-p", S, "ssh", "host"],
+    "slack token": ["x", "xoxb-" + S + "-" + S],
+}
+
+
+@pytest.mark.parametrize("name", list(LEAK_CASES))
+def test_reviewer_leak_cases(name):
+    out = format_command(LEAK_CASES[name])[0]
+    assert S not in out, out
+    for prefix in ("ghp_", "github_pat_", "AKIA", "xoxb-"):
+        assert prefix not in out, out
+
+
+def test_reviewer_cases_keep_the_non_secret_parts():
+    assert format_command(["mysql", "-uroot", "-p" + S])[0] == "mysql -uroot -p***"
+    assert format_command(["mysql", "-p", "db"])[0] == "mysql -p db"  # bare -p prompts; next arg is the database
+    assert format_command(["curl", "-u", "user:" + S, "http://x"])[0] == "curl -u *** http://x"
+    assert format_command(["redis-cli", "-a", S, "-p", "6379"])[0] == "redis-cli -a *** -p 6379"
+    assert format_command(["vllm", "--api-key", "-" + S, "--port", "1"])[0] == "vllm --api-key *** --port 1"
+    assert format_command(["curl", "https://a.blob/x?sv=1&sig=" + S])[0] == "curl 'https://a.blob/x?sv=1&sig=***'"
+    out = format_command(["sh", "-c", "redis-cli -h redis -a " + S + " ping"])[0]
+    assert out == "sh -c 'redis-cli -h redis -a *** ping'"
+
+
+def test_curl_dash_k_is_insecure_not_a_key():
+    # curl -k is --insecure (boolean): the next arg is the URL and must stay visible
+    assert format_command(["curl", "-k", "https://h/x"])[0] == "curl -k https://h/x"

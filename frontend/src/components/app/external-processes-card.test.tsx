@@ -12,7 +12,7 @@ describe("ExternalProcessesCard", () => {
       <MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
         <ExternalProcessesCard items={[
           { pid: 1, name: "python", rss: 48 * GIB, gpu: 27 * GIB, command: long, user: "nik", container: null },
-          { pid: 2, name: "python3", rss: GIB, gpu: 0, command: "litellm --port 4000", user: "root",
+          { pid: 2, name: "python3", rss: GIB, gpu: 0, command: "litellm --port 4000", user: "uid 1000", user_scope: "container",
             container: { id: "bbbbbbbbbbbb", name: "litellm-proxy", image: "ghcr.io/berriai/litellm:main-latest" } },
           { pid: 3, name: "oldserver", rss: GIB, gpu: 0 },
         ]} />
@@ -23,6 +23,7 @@ describe("ExternalProcessesCard", () => {
     expect(screen.getByTitle(long)).toBeInTheDocument();
     expect(screen.getByText(/RAM 48\.0 GiB/)).toBeInTheDocument();
     expect(screen.getByText(/GPU 27\.0 GiB/)).toBeInTheDocument();
+    expect(screen.getByText(/uid 1000 \(in container\)/)).toHaveAttribute("title", "uid as seen inside the container; not a host account");
     expect(screen.getByText("oldserver")).toBeInTheDocument(); // older servers: falls back to the process name
     expect(screen.getByRole("link", { name: /view all processes/i })).toHaveAttribute("href", "/processes");
   });

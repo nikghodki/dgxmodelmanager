@@ -74,6 +74,50 @@ def test_lookup_is_read_only():
     assert not sdk.run_calls and not sdk.container(c.id).stopped and c.id in sdk._containers
 
 
+def test_cache_only_lookup_never_calls_docker():
+    sdk, clock = CountingClient(), Clock()
+    c = sdk.add_unmanaged("kokoro-tts")
+    d = ContainerDirectory(sdk, clock=clock)
+    assert d.lookup(c.id, refresh=False) is None and sdk.list_calls == 0  # cold cache: unnamed, no network
+    d.refresh()
+    clock.t += 3600
+    assert d.lookup(c.id, refresh=False)["name"] == "kokoro-tts" and sdk.list_calls == 1  # stale is fine
+
+
+def test_slow_docker_does_not_block_cache_readers():
+    import threading
+    gate, started = threading.Event(), threading.Event()
+    sdk = CountingClient()
+    c = sdk.add_unmanaged("litellm-proxy")
+    d = ContainerDirectory(sdk, clock=Clock())
+    d.refresh()
+    real = sdk.containers.list
+
+    def slow(*a, **kw):
+        started.set()
+        gate.wait(5)
+        return real(*a, **kw)
+    sdk.containers.list = slow
+    t = threading.Thread(target=d.refresh)
+    t.start()
+    assert started.wait(5)
+    done = threading.Event()
+    threading.Thread(target=lambda: (d.lookup(c.id, refresh=False), done.set())).start()
+    assert done.wait(1), "cache read blocked behind a Docker call"
+    d.refresh()  # a second refresh while one is running returns immediately instead of queueing
+    gate.set()
+    t.join(5)
+
+
+def test_from_env_uses_a_short_timeout_client_for_lookups(monkeypatch):
+    import docker
+    calls = []
+    monkeypatch.setattr(docker, "from_env", lambda **kw: (calls.append(kw), FakeDockerClient())[1])
+    ctl = DockerController.from_env()
+    assert {} in calls and any(kw.get("timeout") == 3 for kw in calls)
+    assert ctl.directory.client is not ctl.client
+
+
 def test_sparse_listing_shape_is_understood():
     class Sparse:
         id = "d" * 64

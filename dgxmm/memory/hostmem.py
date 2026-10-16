@@ -16,8 +16,9 @@ _DOCKER_SCOPE = re.compile(r"(?:docker-|/docker/)([0-9a-f]{64})")
 CMDLINE_READ_CAP = 64 * 1024  # bytes read from /proc/<pid>/cmdline; the output is capped at 4 KiB anyway
 # Never read /proc/<pid>/environ: it holds secrets and nothing in the UI needs it.
 
-# Container id → {"id": short id, "name", "image", "deployment_id": int | None} (read-only Docker lookup), or None.
-ContainerLookup = Callable[[str], "dict | None"]
+# (container id, refresh) → {"id": short id, "name", "image", "deployment_id": int | None} or None.
+# refresh=False must answer from cache only (the budget loop must never wait on Docker).
+ContainerLookup = Callable[..., "dict | None"]
 
 
 @dataclass(frozen=True)
@@ -43,6 +44,7 @@ class ProcMem:
     command: str = ""  # REDACTED (dgxmm.memory.redact): /api/host is visible to viewers
     user: str = ""
     container: dict | None = None  # {id, name, image}; None = host process
+    user_scope: str = "host"  # "container": uid as seen inside the container, not a host account
 
 
 @dataclass(frozen=True)
@@ -52,6 +54,7 @@ class ProcInfo:
     ppid: int
     uid: int | None
     user: str
+    user_scope: str  # "host" (name from host passwd) | "container" (root / "uid N"; not a host account)
     name: str
     exe: str
     command: str
@@ -77,14 +80,15 @@ class _Proc:
 
 
 class UserNames:
-    """uid → name from a (read-only mounted) host /etc/passwd, re-read when it changes; numeric fallback."""
+    """uid → name from a (read-only mounted) host /etc/passwd, re-read when it changes; numeric fallback.
+    Call refresh() once per scan; name() never touches the filesystem."""
 
     def __init__(self, path: str):
         self.path = Path(path)
         self._mtime: float | None = None
         self._names: dict[int, str] = {}
 
-    def _load(self) -> None:
+    def refresh(self) -> None:
         try:
             mtime = self.path.stat().st_mtime
         except OSError:
@@ -105,8 +109,38 @@ class UserNames:
     def name(self, uid: int | None) -> str:
         if uid is None:
             return "?"
-        self._load()
         return self._names.get(uid, str(uid))
+
+
+def user_for(users: UserNames, uid: int | None, in_container: bool) -> tuple[str, str]:
+    """(user, user_scope). Host passwd names are only meaningful for host processes: a container's uid 1000 is not
+    the host's uid-1000 account."""
+    if not in_container:
+        return users.name(uid), "host"
+    if uid == 0:
+        return "root", "container"
+    return ("uid ?" if uid is None else f"uid {uid}"), "container"
+
+
+def managed_ref(cid: str | None, deployments: dict[str, dict | None], container: dict | None,
+                names: dict[int, str] | None = None) -> dict | None:
+    """THE definition of "managed" (sample() and /processes): the process runs in a container that is an active
+    deployment's container, or that carries DGXMM's managed/deployment labels. Returns {deployment_id, name}."""
+    if cid is None:
+        return None
+    if cid in deployments:
+        ref = deployments[cid]
+    else:
+        ref = next((v for k, v in deployments.items() if k and cid.startswith(k)), _MISSING)
+    if ref is not _MISSING:
+        return dict(ref) if ref else {"deployment_id": None, "name": None}
+    dep_id = (container or {}).get("deployment_id")
+    if dep_id is not None:
+        return {"deployment_id": dep_id, "name": (names or {}).get(dep_id)}
+    return None
+
+
+_MISSING = object()
 
 
 @dataclass
@@ -237,50 +271,57 @@ class HostProbe:
         except OSError:
             return fallback  # other users' processes: not readable without ptrace rights
 
-    def _container(self, cid: str | None) -> dict | None:
+    def _container(self, cid: str | None, refresh: bool) -> dict | None:
         if cid is None:
             return None
         found = None
         if self.containers is not None:
             try:
-                found = self.containers(cid)
+                found = self.containers(cid, refresh=refresh)
             except Exception:  # Docker unavailable: still show the process, just unnamed
                 log.debug("container lookup failed", exc_info=True)
         return found or {"id": cid[:12], "name": None, "image": None, "deployment_id": None}
 
-    def processes(self, managed: dict[str, dict] | None = None) -> list[ProcInfo]:
-        """Every live process using memory, biggest first. `managed` maps container id → {deployment_id, name}."""
+    def processes(self, managed: dict[str, dict] | None = None, names: dict[int, str] | None = None) -> list[ProcInfo]:
+        """Every live process using memory, biggest first. `managed` maps active deployments' container ids →
+        {deployment_id, name}; `names` maps every deployment id → name (for label-only managed containers)."""
         managed = managed or {}
         gpu_by_pid = self.gpu.process_gpu_bytes() if self.gpu else {}
+        self.users.refresh()
         out: list[ProcInfo] = []
         for p in self._scan(gpu_by_pid):
-            c = self._container(p.cid)
-            mg = None
-            if p.cid is not None:
-                mg = managed.get(p.cid) or next((v for k, v in managed.items() if k and p.cid.startswith(k)), None)
-                if mg is None and c.get("deployment_id") is not None:
-                    mg = {"deployment_id": c["deployment_id"], "name": c.get("name")}
+            c = self._container(p.cid, refresh=True)
+            user, scope = user_for(self.users, p.uid, p.cid is not None)
             command, truncated = format_command(self._argv(p.pid))
-            out.append(ProcInfo(pid=p.pid, ppid=p.ppid, uid=p.uid, user=self.users.name(p.uid), name=p.name,
+            out.append(ProcInfo(pid=p.pid, ppid=p.ppid, uid=p.uid, user=user, user_scope=scope, name=p.name,
                                 exe=self._exe(p.pid, p.name), command=command, command_truncated=truncated,
-                                container=_public(c), managed=dict(mg) if mg else None, rss=p.rss, gpu=p.gpu))
+                                container=_public(c), managed=managed_ref(p.cid, managed, c, names),
+                                rss=p.rss, gpu=p.gpu))
         out.sort(key=lambda x: x.rss + x.gpu, reverse=True)
         return out
 
     def sample(self, managed_ids: set[str], top_n: int = 8) -> HostSample:
+        """Runs on the budget loop: container lookups are cache-only, so Docker latency never delays it."""
         mem = self.meminfo()
         gpu_by_pid = self.gpu.process_gpu_bytes() if self.gpu else {}
         managed = {cid: self._cgroup_anon(cid) for cid in managed_ids}
-        external: list[_Proc] = []
+        rows: dict[str, dict | None] = {cid: None for cid in managed_ids}
+        self.users.refresh()
+        external: list[tuple[_Proc, dict | None]] = []
         for p in self._scan(gpu_by_pid):
             if p.cid in managed:
                 managed[p.cid] += p.gpu
                 continue
-            external.append(p)
-        external.sort(key=lambda p: p.rss + p.gpu, reverse=True)
-        top = [ProcMem(pid=p.pid, name=p.name, rss=p.rss, gpu=p.gpu, command=format_command(self._argv(p.pid))[0],
-                       user=self.users.name(p.uid), container=_public(self._container(p.cid)))
-               for p in external[:top_n]]
+            c = self._container(p.cid, refresh=False)
+            if managed_ref(p.cid, rows, c) is not None:
+                continue  # label-managed (e.g. a deployment no longer active): DGXMM's, not external
+            external.append((p, c))
+        external.sort(key=lambda pc: pc[0].rss + pc[0].gpu, reverse=True)
+        top = []
+        for p, c in external[:top_n]:
+            user, scope = user_for(self.users, p.uid, p.cid is not None)
+            top.append(ProcMem(pid=p.pid, name=p.name, rss=p.rss, gpu=p.gpu, command=format_command(self._argv(p.pid))[0],
+                               user=user, user_scope=scope, container=_public(c)))
         return HostSample(mem=mem, managed=managed, external_top=top,
                           gpu=self.gpu.device_stats() if self.gpu else {})
 

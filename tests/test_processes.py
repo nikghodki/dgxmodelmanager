@@ -39,7 +39,11 @@ CONTAINERS = {
 }
 
 
-def lookup(cid):
+LOOKUPS: list[tuple[str, bool]] = []
+
+
+def lookup(cid, refresh=True):
+    LOOKUPS.append((cid, refresh))
     return CONTAINERS.get(cid)
 
 
@@ -76,7 +80,10 @@ def test_processes_fields_exclusions_and_sort(settings, tmp_path):
     assert p[100].command == "python3 -m vllm.entrypoints.openai.api_server --model /m --api-key ***"
     assert p[100].container == {"id": CID[:12], "name": "dgxmm-qwen", "image": "vllm/vllm-openai:v0.11"}
     assert p[100].managed == {"deployment_id": 7, "name": "qwen"} and p[101].managed == p[100].managed
-    assert p[100].user == "root" and p[300].user == "dgxuser" and p[400].user == "4242"
+    # host accounts only for host processes; container uids are not host accounts
+    assert (p[300].user, p[300].user_scope) == ("dgxuser", "host")
+    assert (p[100].user, p[100].user_scope) == ("root", "container")
+    assert (p[400].user, p[400].user_scope) == ("uid 4242", "container")
     assert p[100].gpu == 40 * 2**30 and p[100].rss == 2_000_000 * 1024 and p[101].ppid == 100
     assert p[200].container["name"] == "litellm-proxy" and p[200].managed is None
     assert "postgres://***@db:5432/litellm" in p[200].command
@@ -85,21 +92,50 @@ def test_processes_fields_exclusions_and_sort(settings, tmp_path):
     assert p[100].name == "python3" and p[100].exe
     for item in ps:
         assert SECRET not in repr(item.as_dict())
-        assert set(item.as_dict()) == {"pid", "ppid", "uid", "user", "name", "exe", "command", "command_truncated",
-                                       "container", "managed", "rss", "gpu"}
+        assert set(item.as_dict()) == {"pid", "ppid", "uid", "user", "user_scope", "name", "exe", "command",
+                                       "command_truncated", "container", "managed", "rss", "gpu"}
 
 
 def test_user_falls_back_to_numeric_uid_without_passwd(settings, tmp_path):
     probe = build(settings, tmp_path, passwd=False)
     p = by_pid(probe.processes({}))
-    assert p[100].user == "0" and p[300].user == "1000"
+    assert p[300].user == "1000" and p[100].user == "root"
 
 
-def test_managed_flag_from_container_label_when_not_in_deployments(settings, tmp_path):
+def test_managed_flag_from_container_label_uses_the_deployment_name(settings, tmp_path):
     probe = build(settings, tmp_path)
-    p = by_pid(probe.processes({}))
-    assert p[100].managed == {"deployment_id": 7, "name": "dgxmm-qwen"}
+    p = by_pid(probe.processes({}, {7: "qwen-old"}))
+    assert p[100].managed == {"deployment_id": 7, "name": "qwen-old"}
     assert p[200].managed is None
+    assert by_pid(probe.processes({}))[100].managed == {"deployment_id": 7, "name": None}  # never the container name
+
+
+def test_sample_and_processes_share_one_managed_definition(settings, tmp_path):
+    probe = build(settings, tmp_path)
+    # label-managed container not in the active deployment rows: managed in /processes AND not "external" in sample
+    s = probe.sample(set())
+    managed_pids = {p.pid for p in probe.processes({}) if p.managed}
+    assert managed_pids == {100, 101}
+    assert not managed_pids & {p.pid for p in s.external_top}
+
+
+def test_sample_uses_cache_only_container_lookups(settings, tmp_path):
+    probe = build(settings, tmp_path)
+    LOOKUPS.clear()
+    probe.sample({CID})
+    assert LOOKUPS and all(refresh is False for _, refresh in LOOKUPS)
+    LOOKUPS.clear()
+    probe.processes({})
+    assert any(refresh is True for _, refresh in LOOKUPS)
+
+
+def test_passwd_is_statted_once_per_scan(settings, tmp_path, monkeypatch):
+    probe = build(settings, tmp_path)
+    calls = []
+    real = probe.users.refresh
+    monkeypatch.setattr(probe.users, "refresh", lambda: (calls.append(1), real())[1])
+    probe.processes({})
+    assert len(calls) == 1
 
 
 def test_sample_external_top_is_enriched_and_redacted(settings, tmp_path):
@@ -108,6 +144,7 @@ def test_sample_external_top_is_enriched_and_redacted(settings, tmp_path):
     assert [p.pid for p in s.external_top] == [300, 200, 400]
     top = by_pid(s.external_top)
     assert top[300].command == "python train.py --hf-token=***" and top[300].user == "dgxuser"
+    assert top[300].user_scope == "host" and (top[200].user, top[200].user_scope) == ("root", "container")
     assert top[300].container is None
     assert top[200].container == {"id": OTHER[:12], "name": "litellm-proxy", "image": "ghcr.io/berriai/litellm:main-latest"}
     assert SECRET not in repr(s.external_top)

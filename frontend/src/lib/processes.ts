@@ -1,4 +1,4 @@
-import type { ContainerRef, ManagedRef, ProcessInfo } from "@/types";
+import type { ContainerRef, ManagedRef, ProcessInfo, UserScope } from "@/types";
 
 export type ProcessScope = "all" | "external" | "managed";
 
@@ -39,3 +39,10 @@ export function groupByContainer(ps: ProcessInfo[]): ProcessGroup[] {
 
 export const processSearchText = (p: ProcessInfo) =>
   `${p.command} ${p.name} ${p.exe} ${containerLabel(p.container)} ${p.container?.image ?? ""} ${p.user} ${p.pid} ${p.managed?.name ?? ""}`;
+
+export const CONTAINER_UID_TITLE = "uid as seen inside the container; not a host account";
+
+/** Container uids are not host accounts: say so in text (and a tooltip), not only by styling. */
+export function userLabel(user: string, scope: UserScope | undefined): { text: string; title: string | undefined } {
+  return scope === "container" ? { text: `${user} (in container)`, title: CONTAINER_UID_TITLE } : { text: user, title: undefined };
+}
