@@ -49,6 +49,8 @@ export interface Deployment {
   sleep_capable: boolean; adopted_from: string | null; created_at: string; updated_at: string; events?: DeploymentEvent[];
   /** The name clients pass as `model` to LiteLLM: alias if set, else served_name. */
   model_name?: string | null;
+  /** Why this ready deployment is not (correctly) registered in LiteLLM, as of the last sync. */
+  litellm_error?: ApiProblem | null;
 }
 export interface EngineInfo { name: string; supports_sleep: boolean; defaults: Record<string, any>; image: string | null }
 
