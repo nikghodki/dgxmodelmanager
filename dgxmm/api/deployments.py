@@ -1,7 +1,7 @@
 import asyncio
 
 from fastapi import APIRouter, Depends, Query, Response
-from pydantic import BaseModel
+from pydantic import BaseModel, StrictBool
 
 from dgxmm.api.errors import api_error
 from dgxmm.api.integrations import key_allows, key_out
@@ -27,7 +27,7 @@ class DeployIn(DeployRequest):
 
 
 def deploy_error(e: DeployError):
-    extra = {"fit": e.fit.as_dict()} if isinstance(e, InsufficientMemory) else {}
+    extra = {"fit": e.fit.as_dict()} if isinstance(e, InsufficientMemory) else dict(getattr(e, "extra", {}) or {})
     return api_error(e.status, e.code, e.message, **extra)
 
 
@@ -76,6 +76,28 @@ def get_deployment(dep_id: int, p: Principal = Depends(current_principal), ctx: 
 
 class DeploymentPatch(BaseModel):
     alias: str | None = None  # LiteLLM model name; null or "" = use the served name
+    rewrite_keys: StrictBool = False  # also replace the old model name in keys scoped to it
+
+
+def _key_brief(k: dict) -> dict:
+    return {"token": k.get("token"), "key_alias": k.get("key_alias"), "models": list(k.get("models") or [])}
+
+
+async def _rename_in_keys(ctx: AppContext, old: str, new: str, rewrite: bool) -> tuple[list[dict], bool, dict | None]:
+    """Keys whose model list names ``old`` explicitly (unrestricted keys are unaffected by a rename)."""
+    cfg = ctx.settings_store.litellm()
+    if ctx.litellm is None or ctx.litellm.client is None or not cfg.active:
+        return [], False, {"code": "litellm_disabled" if cfg.master_key else "litellm_not_configured",
+                           "message": "LiteLLM keys are not available"}
+    client = ctx.litellm.client
+    try:
+        affected = [k for k in await client.key_list() if old in (k.get("models") or [])]
+        if rewrite:
+            for k in affected:
+                await client.key_update(k["token"], {"models": [new if m == old else m for m in k["models"]]})
+    except LiteLLMError as e:
+        return [], False, {"code": e.code, "message": e.message}
+    return [_key_brief(k) for k in affected], bool(rewrite and affected), None
 
 
 @router.patch("/{dep_id}")
@@ -88,11 +110,19 @@ async def patch_deployment(dep_id: int, body: DeploymentPatch, p: Principal = De
         view = ctx.deployer.set_alias(dep_id, body.alias)
     except DeployError as e:
         raise deploy_error(e)
+    affected, rewritten, keys_error = [], False, None
+    if before["model_name"] != view["model_name"] and before["model_name"] and view["model_name"]:
+        affected, rewritten, keys_error = await _rename_in_keys(ctx, before["model_name"], view["model_name"],
+                                                                body.rewrite_keys)
     if before["alias"] != view["alias"]:
-        audit(ctx.db, p.user.id, "deployment_alias", view["name"], {"from": before["alias"], "to": view["alias"]})
+        audit(ctx.db, p.user.id, "deployment_alias", view["name"],
+              {"from": before["alias"], "to": view["alias"], "keys_rewritten": len(affected) if rewritten else 0})
         if ctx.litellm is not None:
             ctx.litellm.trigger()  # re-register under the new name, drop the old one
-    return view
+    return {**view, "affected_keys": affected, "keys_rewritten": rewritten, "keys_error": keys_error}
+
+
+KEY_CACHE_S = 15.0  # per-deployment key listing may be this stale (API key writes invalidate it)
 
 
 @router.get("/{dep_id}/litellm")
@@ -106,19 +136,24 @@ async def deployment_litellm(dep_id: int, p: Principal = Depends(current_princip
     out = {"deployment_id": dep_id, "model_name": model_name, "endpoint": cfg.endpoint, "registered": None,
            "status": view["litellm_status"], "enabled": cfg.enabled, "error": None, "keys": [],
            "keys_visible": p.user.role == "admin", "keys_error": None}
-    client = ctx.litellm.client if ctx.litellm is not None else None
-    if client is None or not cfg.enabled:
+    sync = ctx.litellm
+    if sync is None or sync.client is None or not cfg.enabled:
         err = ("litellm_disabled", "the LiteLLM integration is disabled") if not cfg.enabled else \
             ("litellm_unavailable", "the LiteLLM integration is not initialised")
         out["error"] = {"code": err[0], "message": err[1]}
         return out
-    try:
-        out["registered"] = await ctx.litellm.is_registered(dep_id, model_name) if model_name else False
-    except LiteLLMError as e:
-        out["error"] = {"code": e.code, "message": e.message}
+    # Registration comes from the sync loop's last result: no LiteLLM call on this (viewer-readable) path.
+    out["registered"] = sync.is_registered(dep_id, model_name) if model_name else False
+    if dep_id in sync.conflicts:
+        out["error"] = {"code": "model_name_conflict", "message": sync.conflicts[dep_id]}
+    elif sync.last["ok"] is False:
+        out["error"] = {"code": sync.last["code"] or "litellm_error", "message": sync.last["error"]}
+    elif not cfg.master_key:
+        out["error"] = {"code": "litellm_not_configured", "message": cfg.master_key_hint or "no master key is set"}
     if out["keys_visible"]:
         try:
-            out["keys"] = [key_out(k) for k in await client.key_list() if model_name and key_allows(k, model_name)]
+            keys = await sync.client.key_list(max_age=KEY_CACHE_S)
+            out["keys"] = [key_out(k) for k in keys if model_name and key_allows(k, model_name)]
         except LiteLLMError as e:
             out["keys_error"] = {"code": e.code, "message": e.message}
     return out

@@ -18,11 +18,13 @@ BASE = "/dgxmm/api/integrations/litellm"
 def lite(api_stack, settings):
     Path(settings.litellm_key_file).write_text(MASTER)
     fake = FakeLiteLLM(master_key=MASTER)
+    http = fake.client()
     c = api_stack.ctx
-    c.litellm = LiteLLMSync(LiteLLMClient(fake.client(), c.settings_store.litellm), c.deployer, c.db, c.events)
+    c.litellm = LiteLLMSync(LiteLLMClient(http, c.settings_store.litellm), c.deployer, c.db, c.events)
     api_stack.fake = fake
     api_stack.h = admin(api_stack)
-    return api_stack
+    yield api_stack
+    api_stack.portal.call(http.aclose)
 
 
 def as_viewer(c):
@@ -44,7 +46,8 @@ def test_get_settings_shape(lite):
     j = r.json()
     st = j.pop("status")
     assert j == {"enabled": True, "url": "http://litellm-proxy:4000", "public_url": "",
-                 "endpoint": "http://litellm-proxy:4000/v1", "master_key_set": True, "master_key_source": "secret_file"}
+                 "endpoint": "http://litellm-proxy:4000/v1", "master_key_set": True, "master_key_source": "secret_file",
+                 "master_key_hint": None}
     assert st["reachable"] is True and st["version"] == "1.100.0" and st["db"] == "connected"
     assert st["error"] is None and st["checked_at"]
     assert MASTER not in r.text
@@ -72,28 +75,90 @@ def test_put_settings_admin_only_and_csrf(lite):
     assert r.status_code == 403 and r.json()["detail"]["code"] == "admin_required"
 
 
-def test_url_change_requires_master_key(lite):
-    """The stored key must not be redirectable to another server (that would disclose a write-only secret)."""
-    r = lite.put(BASE, headers=lite.h, json={"url": "http://evil.example:4000"})
-    assert r.status_code == 409 and r.json()["detail"]["code"] == "master_key_required"
-    r = lite.put(BASE, headers=lite.h, json={"url": "http://evil.example:4000", "master_key": ""})  # file fallback
-    assert r.status_code == 409
-    assert "evil.example" not in lite.fake.hosts
-    assert lite.get(BASE).json()["url"] == "http://litellm-proxy:4000"
-    assert lite.put(BASE, headers=lite.h, json={"url": "http://litellm-proxy:4000/"}).status_code == 200  # same URL
-    Path(lite.ctx.settings.litellm_key_file).write_text("")
-    assert lite.put(BASE, headers=lite.h, json={"url": "http://new:4000"}).status_code == 200  # no key to leak
+def sent_key_to(fake, host):
+    return [a for h, a in zip(fake.hosts, fake.auth) if h == host and a]
+
+
+def test_file_key_never_follows_url_change(lite):
+    """Reviewer's bypass: point the URL elsewhere with a garbage key, then clear the key. The secret-file key
+    must not be sent to the other host (it is only ever used with the configured default URL)."""
+    r = lite.put(BASE, headers=lite.h, json={"url": "http://evil.example:4000", "master_key": "sk-garbage"})
+    assert r.status_code == 200
+    r = lite.put(BASE, headers=lite.h, json={"master_key": ""})
+    assert r.status_code == 200
+    j = r.json()
+    assert j["master_key_set"] is False and j["master_key_source"] == "none" and "re-enter" in j["master_key_hint"]
+    lite.post(BASE + "/test", headers=lite.h)
+    lite.post(BASE + "/sync", headers=lite.h)
+    lite.get(BASE + "/keys")
+    assert all(MASTER not in a for a in sent_key_to(lite.fake, "evil.example"))
+    assert [a for a in sent_key_to(lite.fake, "evil.example") if a != "Bearer sk-garbage"] == []
+
+
+def test_url_change_unbinds_stored_key(lite):
+    lite.fake.master_key = "sk-db-key-1"
+    assert lite.put(BASE, headers=lite.h, json={"master_key": "sk-db-key-1"}).json()["master_key_source"] == "settings"
+    r = lite.put(BASE, headers=lite.h, json={"url": "http://evil.example:4000"})  # key not re-entered
+    assert r.status_code == 200
+    assert r.json()["master_key_set"] is False and r.json()["master_key_hint"]
+    lite.post(BASE + "/test", headers=lite.h)
+    lite.post(BASE + "/sync", headers=lite.h)
+    assert sent_key_to(lite.fake, "evil.example") == []
+    # back to the URL the key was entered for: usable again
+    r = lite.put(BASE, headers=lite.h, json={"url": "http://litellm-proxy:4000"})
+    assert r.json()["master_key_source"] == "settings" and r.json()["master_key_hint"] is None
+
+
+def test_key_entered_with_url_is_bound_to_it(lite):
+    lite.fake.master_key = "sk-new"
+    r = lite.put(BASE, headers=lite.h, json={"url": "http://new-litellm:4000", "master_key": "sk-new"})
+    assert r.json()["master_key_source"] == "settings"
+    assert lite.post(BASE + "/test", headers=lite.h).json()["auth_ok"] is True
+    assert sent_key_to(lite.fake, "new-litellm") and set(sent_key_to(lite.fake, "new-litellm")) == {"Bearer sk-new"}
+
+
+def test_put_without_changes_is_not_audited(lite):
+    lite.put(BASE, headers=lite.h, json={})
+    assert not [a for a, _, _ in audit_rows(lite) if a == "litellm_settings_update"]
+
+
+def test_status_is_cached(lite):
+    first = lite.get(BASE).json()["status"]
+    second = lite.get(BASE).json()["status"]
+    assert first["checked_at"] == second["checked_at"]
+    assert sum(1 for _, p in lite.fake.calls if p == "/health/liveliness") == 1
+    lite.put(BASE, headers=lite.h, json={"public_url": "https://x.example"})  # a settings change re-probes
+    assert sum(1 for _, p in lite.fake.calls if p == "/health/liveliness") == 2
+
+
+def test_viewer_status_reads_are_unauthenticated(lite):
+    as_viewer(lite)
+    lite.fake.auth.clear()
+    lite.get(BASE)
+    lite.get(BASE)
+    assert all(a is None for a in lite.fake.auth)
+
+
+def test_impostor_endpoint(lite):
+    lite.fake.impostor = True
+    st = lite.get(BASE).json()["status"]
+    assert st["reachable"] is False and "not a LiteLLM endpoint" in st["error"]
+
+
+def test_key_patch_blocked_must_be_bool(lite):
+    tok = lite.fake.add_key("x")
+    r = lite.patch(f"{BASE}/keys/{tok}", headers=lite.h, json={"blocked": "yes"})
+    assert r.status_code == 422
 
 
 def test_put_settings_round_trip(lite):
-    r = lite.put(BASE, headers=lite.h, json={"url": "http://other-litellm:4000/", "public_url": "https://llm.example.com/",
-                                             "master_key": MASTER})
+    r = lite.put(BASE, headers=lite.h, json={"url": "http://other-litellm:4000/", "public_url": "https://llm.example.com/"})
     assert r.status_code == 200, r.text
     j = r.json()
     assert j["url"] == "http://other-litellm:4000" and j["public_url"] == "https://llm.example.com"
     assert j["endpoint"] == "https://llm.example.com/v1"
     assert lite.fake.hosts[-1] == "other-litellm"  # read at call time, no restart
-    r = lite.put(BASE, headers=lite.h, json={"url": "", "public_url": "", "master_key": MASTER})  # empty → defaults
+    r = lite.put(BASE, headers=lite.h, json={"url": "", "public_url": ""})  # empty → back to defaults
     assert r.json()["url"] == "http://litellm-proxy:4000" and r.json()["public_url"] == ""
     r = lite.put(BASE, headers=lite.h, json={"enabled": False})
     assert r.json()["enabled"] is False
@@ -281,18 +346,8 @@ def test_keys_no_db_is_409(lite):
 
 def test_keys_no_db_detected_from_error_message(lite):
     """Even if readiness claims a DB, LiteLLM's 'No connected db' error maps to 409."""
-    orig = lite.fake.handler
-
-    def handler(req):
-        if req.url.path == "/health/readiness":
-            import httpx
-            return httpx.Response(200, json={"status": "healthy", "db": "connected"})
-        return orig(req)
     lite.fake.no_db = True
-    lite.fake.handler = handler
-    c = lite.ctx
-    import httpx
-    c.litellm.client.http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    lite.fake.readiness_db = "connected"
     r = lite.get(BASE + "/keys")
     assert r.status_code == 409 and r.json()["detail"]["code"] == "litellm_no_db"
 

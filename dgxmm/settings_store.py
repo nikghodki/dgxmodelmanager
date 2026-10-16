@@ -17,6 +17,14 @@ LITELLM_ENABLED = "litellm.enabled"
 LITELLM_URL = "litellm.url"
 LITELLM_PUBLIC_URL = "litellm.public_url"
 LITELLM_MASTER_KEY = "litellm.master_key"  # write-only through the API; never returned or logged
+LITELLM_MASTER_KEY_URL = "litellm.master_key_url"  # the LiteLLM URL the stored key was entered for
+REENTER_HINT = "the master key was entered for a different LiteLLM URL; re-enter it for this URL"
+FILE_KEY_HINT = ("the master key from the secret file is only used with the default LiteLLM URL ({url}); "
+                 "re-enter the master key for this URL")
+
+
+def norm_url(url: str) -> str:
+    return url.strip().rstrip("/")
 
 
 @dataclass(frozen=True)
@@ -26,6 +34,7 @@ class LiteLLMConfig:
     public_url: str
     master_key: str | None = field(repr=False)
     master_key_source: str  # settings | secret_file | none
+    master_key_hint: str | None = None  # why no key is in effect although one exists (URL binding)
 
     @property
     def endpoint(self) -> str:
@@ -79,14 +88,36 @@ class SettingsStore:
         self.set(key, None if value is None else ("true" if value else "false"))
 
     # ---------- typed accessors ----------
+    def set_master_key(self, key: str | None, url: str | None = None) -> None:
+        """Store (or with None clear) the LiteLLM master key, bound to the URL it was entered for."""
+        if key:
+            self.set(LITELLM_MASTER_KEY_URL, norm_url(url or ""))
+            self.set(LITELLM_MASTER_KEY, key)
+        else:
+            self.set(LITELLM_MASTER_KEY, None)
+            self.set(LITELLM_MASTER_KEY_URL, None)
+
     def litellm(self) -> LiteLLMConfig:
-        key, source = self.get(LITELLM_MASTER_KEY), "settings"
-        if not key:
-            key, source = self.settings.read_secret(self.settings.litellm_key_file), "secret_file"
-        if not key:
-            key, source = None, "none"
+        """Resolve the LiteLLM settings. A key is only ever used with the URL it belongs to: a stored key with
+        the URL it was entered for, the secret-file key with the configured default ``litellm_url``. So
+        repointing the URL can never send an existing (write-only) key to another server."""
+        url = norm_url(self.get(LITELLM_URL) or self.settings.litellm_url)
+        default_url = norm_url(self.settings.litellm_url)
+        key, source, hint = None, "none", None
+        stored = self.get(LITELLM_MASTER_KEY)
+        if stored:
+            if norm_url(self.get(LITELLM_MASTER_KEY_URL) or "") == url:
+                key, source = stored, "settings"
+            else:
+                hint = REENTER_HINT
+        if key is None:
+            file_key = self.settings.read_secret(self.settings.litellm_key_file)
+            if file_key and url == default_url:
+                key, source, hint = file_key, "secret_file", None
+            elif file_key and hint is None:
+                hint = FILE_KEY_HINT.format(url=default_url)
         return LiteLLMConfig(
             enabled=self.get_bool(LITELLM_ENABLED, bool(key)),
-            url=(self.get(LITELLM_URL) or self.settings.litellm_url).rstrip("/"),
-            public_url=(self.get(LITELLM_PUBLIC_URL) or "").rstrip("/"),
-            master_key=key, master_key_source=source)
+            url=url,
+            public_url=norm_url(self.get(LITELLM_PUBLIC_URL) or ""),
+            master_key=key, master_key_source=source, master_key_hint=hint)
