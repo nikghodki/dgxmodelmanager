@@ -61,6 +61,7 @@ def test_benchmarks_route_hides_failed_rows_and_reports_runs(api_stack):
     with api_stack.ctx.db.session() as s:
         s.add(Benchmark(concurrency=1, requests=8, tps_total=50.0, tps_per_req=50.0, **common))
         s.add(Benchmark(concurrency=4, requests=0, tps_total=0.0, tps_per_req=0.0, **common))  # legacy failed row
+        s.add(Benchmark(concurrency=8, requests=8, tps_total=0.0, tps_per_req=0.0, **common))  # zero throughput
         s.add(BenchmarkRun(deployment_id=d["id"], engine="vllm", model_ref="Qwen/Qwen3-Tiny", config_hash="h",
                            levels=[1, 4], status="failed", failed_concurrency=4, error="no successful requests at concurrency 4"))
     rows = api_stack.get(f"/dgxmm/api/deployments/{d['id']}/benchmarks").json()

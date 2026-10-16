@@ -17,6 +17,9 @@ WORDS = ("memory token cache batch speed latency model server context window pro
          "tensor kernel stream request response quality").split()
 
 
+MAX_ERROR_RATIO = 0.5  # a level where more than half the requests failed is not a measurement
+
+
 class BenchmarkBusy(Exception):
     pass
 
@@ -111,25 +114,29 @@ class BenchmarkRunner:
         if self._lock.locked():
             raise BenchmarkBusy(f"a benchmark is already running (deployment {self._running})")
         async with self._lock:
-            self._running = deployment_id
             h = config_hash(config)
+            # Insert the run row BEFORE marking the runner busy: if this fails, nothing is left "running".
             with self.db.session() as s:
                 run = BenchmarkRun(deployment_id=deployment_id, engine=engine, model_ref=model_ref, config_hash=h,
                                    levels=list(levels), status="running")
                 s.add(run)
                 s.flush()
                 run_id = run.id
+            self._running = deployment_id
             results: list[dict] = []
             status, failed_at, error = "done", None, None
             try:
                 async with self.http_factory() as http:
                     for conc in levels:
                         r = await self._level(http, base_url, served_name, conc, input_len, output_len, duration_s, max_requests)
-                        if r["requests"] == 0:
-                            # Every request failed: not a measurement. Record the failure on the run instead of
-                            # storing a tps=0 row, and stop - higher concurrency against a broken endpoint is moot.
+                        attempted = r["requests"] + r["errors"]
+                        if r["requests"] == 0 or r["errors"] > MAX_ERROR_RATIO * attempted:
+                            # Not a measurement (all or most requests failed). Record the failure on the run instead
+                            # of storing a misleading row, and stop: higher concurrency would only fail harder.
                             status, failed_at = "failed", conc
-                            error = f"no successful requests at concurrency {conc} ({r['errors']} failed)"
+                            error = (f"no successful requests at concurrency {conc} ({r['errors']} failed)"
+                                     if r["requests"] == 0 else
+                                     f"{r['errors']} of {attempted} requests failed at concurrency {conc}")
                             r["failed"] = True
                             results.append(r)
                             self.events.publish("benchmark", {"deployment_id": deployment_id, "level": r, "done": True,
@@ -139,13 +146,18 @@ class BenchmarkRunner:
                             s.add(Benchmark(deployment_id=deployment_id, engine=engine, model_ref=model_ref,
                                             config_hash=h, config=config, concurrency=conc,
                                             input_len=input_len, output_len=output_len, requests=r["requests"],
-                                            ttft_p50=r["ttft_p50"], ttft_p95=r["ttft_p95"], itl_p50=r["itl_p50"],
-                                            tps_total=r["tps_total"], tps_per_req=r["tps_per_req"]))
+                                            errors=r["errors"], ttft_p50=r["ttft_p50"], ttft_p95=r["ttft_p95"],
+                                            itl_p50=r["itl_p50"], tps_total=r["tps_total"], tps_per_req=r["tps_per_req"]))
                         results.append(r)
                         self.events.publish("benchmark", {"deployment_id": deployment_id, "level": r,
                                                           "done": conc == levels[-1]})
-            except BaseException as e:
+            except BaseException as e:  # includes cancellation
                 status, error = "failed", f"benchmark aborted: {e.__class__.__name__}: {e}"[:500]
+                try:
+                    self.events.publish("benchmark", {"deployment_id": deployment_id, "level": None, "done": True,
+                                                      "failed": True, "error": error})
+                except Exception:
+                    pass
                 raise
             finally:
                 self._running = None
