@@ -1,6 +1,6 @@
 import { useEffect } from "react";
-import { useQueryClient } from "@tanstack/react-query";
-import { streamUrl } from "./api";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { api, streamUrl } from "./api";
 
 const LIVE_POINTS = 120;
 
@@ -26,4 +26,8 @@ export function useLiveUpdates(enabled: boolean) {
     on("alert", (d) => qc.setQueryData(["alert"], d));
     return () => es.close();
   }, [enabled, qc]);
+}
+
+export function useLive(id: number) {
+  return useQuery<any[]>({ queryKey: ["live", id], queryFn: () => api<any[]>(`/deployments/${id}/metrics?window=live`), staleTime: Infinity });
 }
