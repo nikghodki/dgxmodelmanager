@@ -15,7 +15,7 @@ const GROUPS: CommandDef["group"][] = ["Pages", "Deployments", "Models", "Prefer
 
 export function CommandPalette({ open, onOpenChange }: { open: boolean; onOpenChange: (o: boolean) => void }) {
   const isAdmin = useIsAdmin();
-  const auth = useAuth();
+  const { logout } = useAuth();
   const { setTheme } = useTheme();
   const nav = useNavigate();
   const deps = useQuery({ queryKey: ["deployments"], queryFn: () => api<Deployment[]>("/deployments"), enabled: open });
@@ -35,7 +35,7 @@ export function CommandPalette({ open, onOpenChange }: { open: boolean; onOpenCh
     const a = c.action;
     if (a.type === "navigate") nav(a.to);
     else if (a.type === "theme") setTheme(a.theme);
-    else if (a.type === "logout") auth?.logout();
+    else if (a.type === "logout") logout();
     else if (a.op === "stop") setConfirmStop({ id: a.id, name: a.name });
     else op.mutate({ id: a.id, op: a.op });
   };
