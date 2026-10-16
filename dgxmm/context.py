@@ -81,7 +81,7 @@ def build_context(settings: Settings) -> AppContext:
     inventory = InventoryService(settings)
     docker = DockerController.from_env()
     engines = build_engines(settings)
-    probe = HostProbe(settings, NvmlGpu())
+    probe = HostProbe(settings, NvmlGpu(), containers=docker.lookup)
     deployer = Deployer(settings=settings, db=db, docker=docker, inventory=inventory, engines=engines, http=http,
                         events=events)
     budget = BudgetService(settings, probe, deployer.usage_rows)

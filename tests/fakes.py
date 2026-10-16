@@ -134,6 +134,9 @@ class FakeProbe:
         return HostSample(mem=self.meminfo(), managed={c: self.managed_actual.get(c, 0) for c in ids},
                           external_top=[], gpu={})
 
+    def processes(self, managed=None):
+        return []
+
 
 class FakeEngines:
     """Answers engine HTTP calls by port: /health, /v1/completions, /metrics, /sleep, /wake_up."""
