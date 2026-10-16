@@ -163,6 +163,7 @@ class DownloadService:
                 return
             done += sizes.get(name, 0)
             self._update(dl_id, bytes_done=done)
-        self._update(dl_id, state="done", bytes_done=done)
+        # Refresh inventory BEFORE marking done, so tests see the new model
         await asyncio.to_thread(self.inventory.refresh)
+        self._update(dl_id, state="done", bytes_done=done)
         self.events.publish("inventory", {"reason": "download", "repo_id": v["repo_id"]})
