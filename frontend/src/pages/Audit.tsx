@@ -1,7 +1,9 @@
 import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
+import { Navigate } from "react-router-dom";
 import type { ColumnDef } from "@tanstack/react-table";
 import { api } from "@/api";
+import { useIsAdmin } from "@/auth";
 import { DataTable } from "@/components/app/data-table";
 import { PageHeader } from "@/components/app/page-header";
 import { ErrorState } from "@/components/app/states";
@@ -13,6 +15,8 @@ import { fmtRelative } from "@/format";
 const ALL = "__all__";
 
 export function Audit() {
+  const admin = useIsAdmin();
+  if (!admin) return <Navigate to="/" replace />;
   const q = useQuery({ queryKey: ["audit"], queryFn: () => api<any[]>("/audit?limit=500"), refetchInterval: 15000 });
   const [action, setAction] = useState(ALL);
   const rows = q.data ?? [];
