@@ -39,19 +39,25 @@ _FLAG = re.compile(r"^(--?)([A-Za-z][\w.-]*)(?:([=:])(.*))?$", re.S)  # --passwo
 
 # Tool-specific options; the tool is the basename of the word at command position
 _TOOL_VALUE_FLAGS = {  # option → the NEXT argument is a secret
-    "redis-cli": {"-a"}, "curl": {"-u", "--user", "-U", "--proxy-user"}, "sshpass": {"-p"},
+    "redis-cli": {"-a"}, "valkey-cli": {"-a"}, "curl": {"-u", "--user", "-U", "--proxy-user"}, "sshpass": {"-p"},
     "wget": {"--user", "--http-user"}, "openssl": {"-k", "-psk"}, "docker-login": {"-p"},
     "mongosh": {"-p"}, "mongo": {"-p"}, "lftp": {"-u", "--user"}, "smbclient": {"-U", "--user"},
+    **{t: {"-p"} for t in ("mongodump", "mongorestore", "mongoexport", "mongoimport", "mongostat", "mongotop",
+                           "mongofiles")},
 }
 _TOOL_EQ_FLAGS = {"curl": {"--user", "--proxy-user"}, "smbclient": {"--user"}, "lftp": {"--user"}}  # --user=u:S
 _TOOL_GLUED: dict[str, tuple[str, ...]] = {  # option glued to its secret value (mysql -pS, curl -uu:S)
     **{t: ("-p",) for t in ("mysql", "mysqldump", "mysqladmin", "mysqlimport", "mysqlcheck", "mariadb", "mariadb-dump",
                             "mariadb-admin", "mysqlsh")},
-    "sshpass": ("-p",), "curl": ("-u", "-U"), "redis-cli": ("-a",), "docker-login": ("-p",), "smbclient": ("-U",),
-    "mongosh": ("-p",), "mongo": ("-p",),
+    "sshpass": ("-p",), "curl": ("-u", "-U"), "redis-cli": ("-a",), "valkey-cli": ("-a",), "docker-login": ("-p",),
+    "smbclient": ("-U",), "mongosh": ("-p",), "mongo": ("-p",),
+    **{t: ("-p",) for t in ("mongodump", "mongorestore", "mongoexport", "mongoimport", "mongostat", "mongotop",
+                            "mongofiles")},
 }
+_REDIS_TOOLS = frozenset({"redis-cli", "valkey-cli"})  # positional AUTH [user] PASSWORD, CONFIG SET requirepass S
+_KV_TOOLS = frozenset({"git", "poetry"})  # `<tool> config NAME VALUE` (poetry: http-basic.R USER PASSWORD)
 _LOGIN_TOOLS = frozenset({"docker", "podman", "nerdctl", "buildah", "skopeo", "helm", "oras"})  # `<tool> login`
-_KNOWN_TOOLS = set(_TOOL_VALUE_FLAGS) | set(_TOOL_GLUED) | {"htpasswd"} | _LOGIN_TOOLS
+_KNOWN_TOOLS = set(_TOOL_VALUE_FLAGS) | set(_TOOL_GLUED) | {"htpasswd"} | _LOGIN_TOOLS | _KV_TOOLS
 # Prefix commands run their operand as a command: name → (options that take a value, operands before the command)
 _PREFIX_COMMANDS: dict[str, tuple[frozenset[str], int]] = {
     "env": (frozenset({"-u", "--unset", "-C", "--chdir", "-S", "--split-string"}), 0),
@@ -290,21 +296,70 @@ def _looks_like_long_flag(arg: str) -> bool:
 
 
 _WRAPPERS = frozenset({"docker", "podman", "nerdctl", "kubectl", "oc", "crictl", "ctr", "ssh", "su", "runuser",
-                       "nsenter", "chroot", "unshare", "systemd-run", "machinectl", "lxc", "incus", "flatpak-spawn"})
+                       "nsenter", "chroot", "unshare", "systemd-run", "machinectl", "lxc", "incus", "flatpak-spawn",
+                       "sshpass"})
+# Options of each wrapper whose value is the NEXT word (so that word is not a command). An option not listed is taken
+# as valueless: the next word may be the command (fail closed: at worst its rules over-mask).
+_CONTAINER_OPTS = frozenset({
+    "--name", "-u", "--user", "-w", "--workdir", "-e", "--env", "--env-file", "-v", "--volume", "--network", "--net",
+    "-h", "--hostname", "--mount", "-l", "--label", "--label-file", "--cpus", "-c", "--cpu-shares", "--cpuset-cpus",
+    "-m", "--memory", "--memory-swap", "--shm-size", "--platform", "--pull", "--restart", "--runtime", "--gpus",
+    "--device", "--cap-add", "--cap-drop", "--add-host", "--dns", "--dns-search", "--ipc", "--pid", "--pod", "--uts",
+    "--userns", "--cgroupns", "--group-add", "--log-driver", "--log-opt", "-p", "--publish", "--expose",
+    "--security-opt", "--ulimit", "--stop-signal", "--stop-timeout", "--tmpfs", "--cidfile", "--link",
+    "--mac-address", "--ip", "--ip6", "--volumes-from", "--detach-keys", "--health-cmd", "--isolation", "-a",
+    "--attach", "--annotation", "--sysctl", "--storage-opt", "--blkio-weight", "--oom-score-adj", "--pids-limit",
+    "-H", "--host", "--config", "--context", "--log-level", "--tlscacert", "--tlscert", "--tlskey", "-f", "--filter",
+    "--format", "--namespace", "-n", "--address", "--cgroup-manager", "--root", "--runroot", "--connection", "--url",
+    "--identity", "--snapshotter", "--exec-id", "--cwd"})
+_KUBE_OPTS = frozenset({
+    "-c", "--container", "-n", "--namespace", "--context", "--cluster", "--kubeconfig", "--user", "-s", "--server",
+    "-l", "--selector", "-f", "--filename", "--pod-running-timeout", "--as", "--as-group", "--as-uid",
+    "--request-timeout", "-o", "--output", "--image", "--overrides", "--certificate-authority", "--client-certificate",
+    "--client-key", "--tls-server-name", "--cache-dir", "-v", "--v", "--profile", "--profile-output", "--field-selector",
+    "--env", "--port", "--restart", "--labels", "--target"})
+_WRAPPER_VALUE_OPTS: dict[str, frozenset[str]] = {
+    **{t: _CONTAINER_OPTS for t in ("docker", "podman", "nerdctl", "crictl", "ctr")},
+    "kubectl": _KUBE_OPTS, "oc": _KUBE_OPTS,
+    "ssh": frozenset({"-p", "-i", "-l", "-o", "-F", "-J", "-b", "-B", "-c", "-D", "-E", "-e", "-I", "-L", "-m", "-O",
+                      "-Q", "-R", "-S", "-W", "-w", "-P"}),
+    "sshpass": frozenset({"-p", "-f", "-d", "-P"}),  # -e (password from $SSHPASS) takes no value
+    "su": frozenset({"-g", "--group", "-G", "--supp-group", "-s", "--shell", "-w", "--whitelist-environment"}),
+    "runuser": frozenset({"-u", "--user", "-g", "--group", "-G", "--supp-group", "-s", "--shell", "-w",
+                          "--whitelist-environment"}),
+    "nsenter": frozenset({"-t", "--target", "-S", "--setuid", "-G", "--setgid", "-N", "--net-socket"}),
+    "chroot": frozenset({"--userspec", "--groups"}),
+    "unshare": frozenset({"-S", "--setuid", "-G", "--setgid", "-R", "--root", "-w", "--wd", "--propagation",
+                          "--map-user", "--map-group", "--map-users", "--map-groups", "--load-interp"}),
+    "systemd-run": frozenset({"-p", "--property", "-u", "--unit", "--slice", "-E", "--setenv", "--description",
+                              "-H", "--host", "-M", "--machine", "--uid", "--gid", "--nice", "--working-directory",
+                              "--service-type", "--path-property", "--socket-property", "--timer-property",
+                              "--on-active", "--on-boot", "--on-startup", "--on-unit-active", "--on-unit-inactive",
+                              "--on-calendar", "--on-timezone-change", "--expand-environment", "-G"}),
+    "machinectl": frozenset({"-M", "--machine", "-p", "--property", "-H", "--host", "-E", "--setenv", "--uid",
+                             "-o", "--output", "-n", "--lines"}),
+    "lxc": frozenset({"--env", "--user", "--group", "--cwd", "--project", "--mode"}),
+    "incus": frozenset({"--env", "--user", "--group", "--cwd", "--project", "--mode"}),
+    "flatpak-spawn": frozenset({"--env", "--directory", "--forward-fd", "--unset-env", "--app-path", "--usr-path"}),
+}
 _CMD_VALUE_OPTS = frozenset({"--entrypoint"})  # docker run --entrypoint redis-cli: this option's value IS a command
 _TOOL_SCRIPT_FLAGS = {"lftp": {"-e", "-c"}}     # lftp -e 'open -u user,S h': the value is a script for the tool
 # tools with their own secret options: once one is active, later words never switch the context
+# (sshpass has its own -p but runs a command, so it is a wrapper)
 _OWN_FLAG_TOOLS = frozenset(set(_TOOL_VALUE_FLAGS) | set(_TOOL_GLUED) | set(_TOOL_EQ_FLAGS) | {"htpasswd"}
-                            | set(_TOOL_SCRIPT_FLAGS))
+                            | set(_TOOL_SCRIPT_FLAGS)) - _WRAPPERS
 
 
 class _Argv:
     """Walks one argv (or a script's words), tracking which tool(s) the current simple command runs.
 
     The tool is taken at command positions only (start, after shell operators/keywords, after a prefix command and
-    its options/operands). Mid-command, a known tool's basename switches context only from a wrapper or an unknown
-    tool (docker exec c redis-cli, ssh host mysql, kubectl exec p -- redis-cli), never from a tool with its own secret
-    options, never for an option value (the word after an option, or after "="); a switch keeps the union of rules."""
+    its options/operands). Mid-command, a known tool's (or wrapper's) basename switches context only from a wrapper or
+    an unknown tool (docker exec c redis-cli, ssh host mysql, sshpass -e ssh h redis-cli), never for an option value
+    (the word after an option the wrapper knows takes one, or after "="); a switch keeps the union of rules. A tool with
+    its own secret options stops further switching once it has seen an option (until then the switch may have been
+    an operand: ssh mongo redis-cli). A prefix command under a wrapper (ssh h sudo -i mysql) is skipped as at command
+    position, and the command after it is added to the active tools."""
 
     def __init__(self, depth: int, check: bool, base: frozenset[str] = frozenset()):
         self.depth, self.check, self.base = depth, check, base
@@ -323,26 +378,44 @@ class _Argv:
         self.ht = {"b": False, "n": False, "pos": 0}  # htpasswd -b FILE USER PASSWORD / -nb USER PASSWORD
         self.kv_mode = False     # aws configure set / git config / npm config set: NAME VALUE positionals
         self.script_next = False  # previous arg was lftp -e/-c: this arg is a script for the tool
+        self.spec = False        # the active own-option tool came from a wrapper switch and has seen no option yet
+        self.cmd_add = False     # the next command (after a prefix under a wrapper) joins the active tools
+        self.mask_cmd = False    # redis-cli AUTH …: every remaining word of this command is masked
+        self.basic_user = False  # poetry config http-basic.R USER PASSWORD: this word is USER, the next is masked
 
     def _state(self) -> dict:
         return {k: getattr(self, k) for k in ("pending", "tools", "cmd_pos", "prefix", "ht", "kv_mode",
-                                              "script_next", "mask_rest")}
+                                              "script_next", "mask_rest", "spec", "cmd_add", "mask_cmd",
+                                              "basic_user")}
 
     def _set_tool(self, base: str, add: bool) -> None:
         self.tools = (self.tools | {base}) if add else (set(self.base) | {base})
+        self.spec = add and base in _OWN_FLAG_TOOLS
         self.ht = {"b": False, "n": False, "pos": 0}
 
-    def _can_switch(self, arg: str, base: str) -> bool:
-        if base not in _KNOWN_TOOLS or base in self.tools or self.tools & _OWN_FLAG_TOOLS:
+    def _prev_is_value_opt(self) -> bool:
+        """The previous word is an option that every active wrapper knows takes a value, so this word is its value
+        (docker run --name mongo). Unknown options, or no active wrapper: not known to be a value (fail closed)."""
+        wrappers = self.tools & _WRAPPERS
+        return bool(self.after_opt and wrappers) and all(self.prev in _WRAPPER_VALUE_OPTS.get(w, ()) for w in wrappers)
+
+    def _may_be_command(self, arg: str) -> bool:
+        """Mid-command: may this word be a command run by the active wrapper / unknown tool?"""
+        if self.pending or (self.tools & _OWN_FLAG_TOOLS and not self.spec):
             return False
         if arg.startswith("-") or "=" in arg:
             return False
-        if self.cmd_value:
-            return True
-        return not (self.after_opt and self.tools & _WRAPPERS)  # docker run --name mongo: an option value
+        return self.cmd_value or not self._prev_is_value_opt()
+
+    def _can_switch(self, arg: str, base: str) -> bool:
+        if base in self.tools or (base not in _KNOWN_TOOLS and base not in _WRAPPERS):
+            return False
+        return self._may_be_command(arg)
 
     def feed(self, arg: str) -> None:
         self._feed(arg)
+        if arg.startswith("-"):
+            self.spec = False
         self.cmd_value = arg in _CMD_VALUE_OPTS
         self.after_opt = len(arg) > 1 and arg[0] == "-" and arg != "--" and "=" not in arg
         self.prev = arg
@@ -372,6 +445,9 @@ class _Argv:
             out.append(arg)
             self._reset()
             return
+        if self.mask_cmd:
+            out.append(MASK)
+            return
         if self.prefix is not None:
             value_opts, operands, expecting, name = self.prefix
             if expecting == "split":
@@ -385,12 +461,27 @@ class _Argv:
                 out.append(arg)
                 return
             if len(arg) > 1 and arg[0] == "-":
-                if name == "env" and arg in ("-S", "--split-string"):
+                if name == "env" and arg == "--split-string":
                     self.prefix[2] = "split"
                     out.append(arg)
                     return
-                if name == "env" and (arg.startswith("--split-string=") or (arg.startswith("-S") and len(arg) > 2)):
-                    self._split(arg, "--split-string=" if arg.startswith("--") else "-S")
+                if name == "env" and arg.startswith("--split-string="):
+                    self._split(arg, "--split-string=")
+                    return
+                if name == "env" and arg[1] != "-":  # short cluster: -i, -vS 'cmd', -vS'cmd', -uNAME, -C DIR
+                    for i, c in enumerate(arg[1:], 1):
+                        if c == "S":
+                            if i + 1 < len(arg):
+                                self._split(arg, arg[:i + 1])
+                            else:
+                                self.prefix[2] = "split"
+                                out.append(arg)
+                            return
+                        if c in "uC":
+                            self.prefix[2] = i + 1 == len(arg)
+                            out.append(redact_text(arg, depth))
+                            return
+                    out.append(redact_text(arg, depth))
                     return
                 self.prefix[2] = arg.split("=", 1)[0] in value_opts and "=" not in arg
                 out.append(redact_text(arg, depth))
@@ -426,12 +517,19 @@ class _Argv:
                 self.prefix = [spec[0], spec[1], False, base]
                 out.append(arg)
                 return
+            add, self.cmd_add = self.cmd_add, False
             if not arg.startswith("-"):
-                self._set_tool(base, add=False)
+                self._set_tool(base, add=add)
                 if not any(c.isspace() for c in arg):
                     out.append(redact_text(arg, depth))
                     return
-        elif not self.pending and self._can_switch(arg, base):
+        elif not self.pending and base in _PREFIX_COMMANDS and self.tools & _WRAPPERS and self._may_be_command(arg):
+            spec = _PREFIX_COMMANDS[base]  # ssh h sudo -i mysql, docker exec c env A=1 redis-cli
+            self.prefix = [spec[0], spec[1], False, base]
+            self.cmd_add = True
+            out.append(arg)
+            return
+        elif self._can_switch(arg, base):
             self._set_tool(base, add=True)
             if not any(c.isspace() for c in arg):
                 out.append(redact_text(arg, depth))
@@ -441,15 +539,29 @@ class _Argv:
             if ep in _KNOWN_TOOLS and not self.tools & _OWN_FLAG_TOOLS:
                 self.tools.add(ep)
         tools = self.tools
-        if tools & _LOGIN_TOOLS and arg == "login" and not (self.after_opt and tools & _WRAPPERS):
+        if tools & _LOGIN_TOOLS and arg == "login" and not self._prev_is_value_opt():  # docker --debug login
             tools.add("docker-login")
         if self.pending:
             self.pending = False
             if not _looks_like_long_flag(arg):
                 out.append(MASK)
                 return
-        if (arg == "set" and self.prev in ("configure", "config")) or (arg == "config" and "git" in tools):
-            self.kv_mode = True
+        if self.basic_user and not arg.startswith("-"):
+            self.basic_user = False
+            out.append(redact_text(arg, depth))
+            self.pending = True  # poetry config http-basic.R USER PASSWORD
+            return
+        if tools & _REDIS_TOOLS and arg.lower() == "auth":
+            out.append(arg)
+            self.mask_cmd = True  # redis-cli AUTH [user] PASSWORD
+            return
+        if (arg.lower() == "set" and self.prev.lower() in ("configure", "config")) or (
+                arg == "config" and tools & _KV_TOOLS):
+            self.kv_mode = True  # also redis-cli CONFIG SET requirepass S
+            out.append(arg)
+            return
+        if self.kv_mode and "poetry" in tools and arg.startswith("http-basic."):
+            self.basic_user = True
             out.append(arg)
             return
         if self.kv_mode and not arg.startswith("-") and "=" not in arg and is_sensitive_name(arg):
