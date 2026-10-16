@@ -28,6 +28,7 @@ case "$*" in
     [ "${FAKE_COMPOSE_UP:-ok}" = ok ] || { echo "failed to solve: process did not complete" >&2; exit 17; }
     [ "${FAKE_RECREATE:-1}" = 1 ] && echo "id-$RANDOM-$$" > "$FAKE_LOG.id" ;;
   pull\ *) [ "${FAKE_PULL:-ok}" = ok ] || { echo "manifest unknown" >&2; exit 1; } ;;
+  network\ inspect\ *\ -f\ *Gateway*) [ "${FAKE_NETWORK:-missing}" = exists ] || { echo "Error: No such network" >&2; exit 1; }; echo "172.99.0.1" ;;
   network\ inspect\ --format*) [ "${FAKE_NETWORK:-missing}" = exists ] || exit 1; echo "${FAKE_NETWORK_LABEL:-}" ;;
   network\ inspect*) [ "${FAKE_NETWORK:-missing}" = exists ] || { echo "Error: No such network" >&2; exit 1; } ;;
   "ps -aq --filter label=dgxmm.managed=true"|"ps -q --filter label=dgxmm.managed=true") printf '%s\n' ${FAKE_MANAGED_IDS:-} ;;
