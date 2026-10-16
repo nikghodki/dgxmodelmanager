@@ -67,6 +67,7 @@ async def test_preview_includes_plans_when_short(stack):
     a = await stack.deployer.deploy(DeployRequest(name="a", engine="vllm", model_ref="org/big-model", config=small), 1)
     stack.http.healthy.add(a["port"])
     await stack.deployer.wait_ready(a["id"], 5)
+    stack.probe.available -= a["reserved_bytes"]  # GB10: the ready model's memory is part of `used`
     p = await stack.deployer.preview("vllm", "org/big-model", small)
     assert not p["fit"]["fits"]
     stop = next(x for x in p["plans"] if x["id"] == "stop")

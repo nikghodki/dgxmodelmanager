@@ -13,7 +13,7 @@ from dgxmm.engines.base import (SERVED_NAME_RE, ContainerSpec, EngineMetrics, La
                                 default_served_name, managed_labels, openai_health)
 from dgxmm.engines.prom import buckets, counter, gauge, parse_samples
 from dgxmm.inventory.artifact import REPO_RE, ModelArtifact
-from dgxmm.memory.estimate import MemoryEstimate, VllmSizing, estimate_vllm, vllm_gpu_util
+from dgxmm.memory.estimate import MemoryEstimate, VllmSizing, default_kv_tokens, estimate_vllm, vllm_gpu_util
 
 PARSER_RE = r"^[a-z0-9_]{1,32}$"
 
@@ -125,8 +125,14 @@ class VllmEngine:
         return cfg.enable_sleep_mode
 
     @staticmethod
-    def sizing(cfg: VllmConfig) -> VllmSizing:
-        return VllmSizing(cfg.max_model_len, cfg.max_num_seqs, cfg.max_num_batched_tokens, cfg.kv_cache_dtype, cfg.kv_tokens)
+    def pool_tokens(cfg: VllmConfig) -> int:
+        """KV pool the reservation is sized for: kv_tokens, or the default shared pool."""
+        return cfg.kv_tokens or default_kv_tokens(cfg.max_model_len, cfg.max_num_seqs)
+
+    @classmethod
+    def sizing(cls, cfg: VllmConfig) -> VllmSizing:
+        return VllmSizing(cfg.max_model_len, cfg.max_num_seqs, cfg.max_num_batched_tokens, cfg.kv_cache_dtype,
+                          cls.pool_tokens(cfg))
 
     def estimate(self, artifact: ModelArtifact, cfg: VllmConfig, draft: ModelArtifact | None, settings: Settings) -> MemoryEstimate:
         if artifact.arch is None:

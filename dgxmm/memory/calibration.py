@@ -58,6 +58,13 @@ class Calibration:
                                      f"scaled ×{ratio:.2f} from {len(ratios)} measurement(s) of this model")
         if oom_pending:
             est = est.with_total(int(est.total * 1.10), est.confidence, "last attempt was OOM-killed; added 10%")
+        # Never swing back to (or below) a size this exact configuration was OOM-killed at
+        oom_sizes = [r.estimated_bytes for r in same if r.oom]
+        if oom_sizes:
+            floor = int(max(oom_sizes) * 1.10)
+            if est.total < floor:
+                est = est.with_total(floor, est.confidence,
+                                     f"OOM-killed before at {max(oom_sizes) / GIB:.1f} GiB; floored at +10%")
         return est
 
 

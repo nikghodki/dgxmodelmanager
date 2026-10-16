@@ -151,8 +151,12 @@ def shrink_reservation(i: AdviceInput) -> Advice | None:
     kv = i.estimate.get("kv_cache", 0)
     if peak is None or peak >= 0.3 or kv < 4 * GIB:
         return None
-    pool = i.cfg.get("kv_tokens") or i.cfg["max_model_len"] * i.cfg.get("max_num_seqs", 1)
-    new_pool = max(int(i.cfg["max_model_len"]), int(pool / 2))
+    from dgxmm.memory.estimate import default_kv_tokens
+    ctx_len = int(i.cfg["max_model_len"])
+    pool = i.cfg.get("kv_tokens") or default_kv_tokens(ctx_len, int(i.cfg.get("max_num_seqs", 1)))
+    new_pool = max(ctx_len, int(pool / 2))
+    if new_pool >= pool:
+        return None  # already at the minimum pool (one full-length request)
     return Advice("shrink_reservation", "Reserve a smaller KV pool",
                   f"The KV cache never went above {peak:.0%} in the last 24 hours.",
                   f"frees about {kv / 2 / GIB:.1f} GiB so another model can run alongside",
