@@ -69,12 +69,17 @@ function ConnectionCard({ s }: { s: LiteLLMSettings }) {
   const [masterKey, setMasterKey] = useState("");
   const [test, setTest] = useState<LiteLLMTestResult | null>(null);
   const [sync, setSync] = useState<LiteLLMSyncResult | null>(null);
-  const { body, needsKey } = connectionPatch(s, { enabled, url, public_url: pub, keyMode, masterKey });
-  const dirty = Object.keys(body).length > 0 || needsKey;
+  const { body, keyDetaches } = connectionPatch(s, { enabled, url, public_url: pub, keyMode, masterKey });
+  const dirty = Object.keys(body).length > 0;
+  // Keys are bound to the URL they were entered for: prompt for one when the URL changes or the server says so.
+  const hint = keyDetaches
+    ? `The current master key is only used with ${s.url}. Enter the master key for the new URL, otherwise DGXMM has no key for it.`
+    : s.master_key_hint;
+  const prompt = !!hint && keyMode !== "clear";
   const urlErr = urlProblem(url);
   const pubErr = urlProblem(pub);
   const preview = endpointPreview(url, pub);
-  const keyInput = keyMode === "replace" || needsKey;
+  const keyInput = keyMode === "replace" || prompt;
   const reset = (next: LiteLLMSettings) => {
     setUrl(next.url); setPub(next.public_url); setEnabled(next.enabled); setKeyMode("keep"); setMasterKey("");
   };
@@ -96,7 +101,7 @@ function ConnectionCard({ s }: { s: LiteLLMSettings }) {
         <CardDescription className="text-xs">How DGXMM reaches LiteLLM, and the endpoint clients are told to use.</CardDescription>
       </CardHeader>
       <CardContent>
-        <form className="space-y-4" noValidate onSubmit={(e) => { e.preventDefault(); if (!needsKey && !urlErr && !pubErr) save.mutate(undefined); }}>
+        <form className="space-y-4" noValidate onSubmit={(e) => { e.preventDefault(); if (dirty && !urlErr && !pubErr) save.mutate(undefined); }}>
           <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
             <div className="space-y-1.5">
               <Label htmlFor="ll-url">Internal URL</Label>
@@ -127,20 +132,23 @@ function ConnectionCard({ s }: { s: LiteLLMSettings }) {
                 </p>
               </div>
               <div className="flex gap-2">
-                {keyMode === "keep" && !needsKey && <Button type="button" variant="outline" size="sm" onClick={() => setKeyMode("replace")}>{s.master_key_set ? "Replace" : "Set key"}</Button>}
-                {keyMode === "keep" && !needsKey && s.master_key_source === "settings" && <Button type="button" variant="outline" size="sm" onClick={() => setKeyMode("clear")}>Clear</Button>}
-                {keyMode !== "keep" && !needsKey && <Button type="button" variant="ghost" size="sm" onClick={() => { setKeyMode("keep"); setMasterKey(""); }}>Cancel</Button>}
+                {keyMode === "keep" && !prompt && <Button type="button" variant="outline" size="sm" onClick={() => setKeyMode("replace")}>{s.master_key_set ? "Replace" : "Set key"}</Button>}
+                {keyMode === "keep" && s.master_key_source === "settings" && <Button type="button" variant="outline" size="sm" onClick={() => setKeyMode("clear")}>Clear</Button>}
+                {keyMode !== "keep" && !prompt && <Button type="button" variant="ghost" size="sm" onClick={() => { setKeyMode("keep"); setMasterKey(""); }}>Cancel</Button>}
               </div>
             </div>
+            {hint && (
+              <p data-testid="master-key-hint" role="note" className="flex items-start gap-2 rounded-md border border-status-warning/30 bg-status-warning-bg px-3 py-2 text-sm text-status-warning">
+                <AlertTriangle aria-hidden className="mt-0.5 h-4 w-4 shrink-0" /><span className="min-w-0 break-words">{hint}</span>
+              </p>
+            )}
             {keyMode === "clear" && <p className="text-xs text-muted-foreground">The key stored in DGXMM is removed; DGXMM then uses the secret file key if there is one.</p>}
             {keyInput && (
               <div className="space-y-1.5">
                 <Label htmlFor="ll-key">New master key</Label>
                 <PasswordInput id="ll-key" autoComplete="new-password" spellCheck={false} value={masterKey}
                   onChange={(e) => { setMasterKey(e.target.value); setKeyMode("replace"); }} aria-describedby="ll-key-help" />
-                <p id="ll-key-help" className={`text-xs ${needsKey ? "text-status-warning" : "text-muted-foreground"}`}>
-                  {needsKey ? "You changed the internal URL. Re-enter the master key so it is only ever sent to a server you chose."
-                    : "Write-only: DGXMM stores it and never shows it again."}</p>
+                <p id="ll-key-help" className="text-xs text-muted-foreground">Write-only: DGXMM stores it for this URL and never shows it again.</p>
               </div>
             )}
             {fieldErr("master_key") && <p className="text-xs text-status-critical">{fieldErr("master_key")}</p>}
@@ -154,7 +162,7 @@ function ConnectionCard({ s }: { s: LiteLLMSettings }) {
 
           {saveErr && !saveErr.detail?.field && <ErrorState error={saveErr} />}
           <div className="flex flex-wrap items-center gap-2">
-            <Button type="submit" size="sm" disabled={!dirty || needsKey || !!urlErr || !!pubErr || save.isPending}>
+            <Button type="submit" size="sm" disabled={!dirty || !!urlErr || !!pubErr || save.isPending}>
               {save.isPending && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}Save</Button>
             {dirty && <Button type="button" variant="ghost" size="sm" onClick={() => reset(s)}>Discard changes</Button>}
             <span className="flex-1" />
@@ -180,7 +188,7 @@ function ConnectionCard({ s }: { s: LiteLLMSettings }) {
 
 /** Why models / keys cannot be listed right now, or null if they can. */
 function blocker(s: LiteLLMSettings, needsDb: boolean): { title: string; description: string } | null {
-  if (!s.master_key_set) return litellmProblem({ code: "litellm_not_configured", message: "" });
+  if (!s.master_key_set) return litellmProblem({ code: "litellm_not_configured", message: s.master_key_hint ?? "" });
   if (!s.enabled) return litellmProblem({ code: "litellm_disabled", message: "" });
   if (!s.status.reachable) return litellmProblem({ code: "litellm_unreachable", message: s.status.error ?? "LiteLLM did not answer." });
   if (needsDb && s.status.db && s.status.db !== "connected") return litellmProblem({ code: "litellm_no_db", message: "" });
@@ -254,7 +262,7 @@ function LiteLLMPage() {
     <div className="space-y-4">
       {header}
       {!s.status.reachable && <Notice tone="critical" title="Cannot reach LiteLLM">{s.status.error ?? `No answer from ${s.url}.`} Check the internal URL and that the proxy is running.</Notice>}
-      {!s.master_key_set && <Notice tone="warning" title="No master key set">DGXMM needs the LiteLLM master key to register deployments and manage keys. Set it below.</Notice>}
+      {!s.master_key_set && <Notice tone="warning" title="No master key set">{s.master_key_hint ?? "DGXMM needs the LiteLLM master key to register deployments and manage keys. Set it below."}</Notice>}
       {s.master_key_set && !s.enabled && <Notice tone="warning" title="Integration disabled">Deployments are not registered in LiteLLM while the integration is off.</Notice>}
       {s.status.reachable && (
         <p className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
