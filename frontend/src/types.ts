@@ -18,8 +18,9 @@ export interface DeploymentRef { id: number; name: string; state: string }
 export interface DeletePreview {
   ref: string; source: "hf" | "gguf"; name: string; paths: string[]; bytes: number;
   deployments_blocking: DeploymentRef[]; deployments_affected: DeploymentRef[]; download_active: boolean; blocked: boolean;
+  notes: string[];
 }
-export interface DeleteResult { ref: string; freed_bytes: number; paths: string[]; method: string; warnings: DeploymentRef[] }
+export interface DeleteResult { ref: string; freed_bytes: number; paths: string[]; method: string; warnings: DeploymentRef[]; notes: string[] }
 export interface CleanupItem extends Omit<DeletePreview, "blocked"> {
   problems: string[]; eligible: boolean; skip_reason: string | null; message?: string;
 }

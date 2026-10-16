@@ -79,6 +79,12 @@ class Deployer:
         self._monitors: dict[int, asyncio.Task] = {}
         self.state_hooks: list[StateHook] = []
         self.calibration = None  # set in Task 32
+        self.delete_guard: Callable[[str], bool] | None = None  # WeightsDeleter.is_being_deleted
+
+    def _check_not_deleting(self, *refs: str | None) -> None:
+        for ref in refs:
+            if ref and self.delete_guard is not None and self.delete_guard(ref):
+                raise DeployError("model_being_deleted", f"{ref} is being deleted from disk", 409)
 
     # ---------- helpers ----------
     def _lock(self, dep_id: int) -> asyncio.Lock:
@@ -153,6 +159,7 @@ class Deployer:
             raise DeployError("unknown_engine", f"engine {engine_name!r} is not available", 422)
         if not self._ref_allowed(model_ref):
             raise DeployError("invalid_model_ref", "model reference is not a repo id or an allowed GGUF path", 422)
+        self._check_not_deleting(model_ref)
         try:
             cfg = engine.validate_config(raw_cfg)
         except (ValidationError, ValueError) as e:
@@ -166,6 +173,7 @@ class Deployer:
             raise DeployError("engine_unsupported", f"{engine_name} cannot serve {artifact.format} model {model_ref}", 422)
         draft = None
         if dref := engine.draft_ref(cfg):
+            self._check_not_deleting(dref)
             draft = self.inventory.get(dref)
             if draft is None or not draft.complete:
                 raise DeployError("draft_not_found", f"draft model {dref} is not downloaded", 404)
@@ -243,6 +251,11 @@ class Deployer:
         return self.view(dep_id)
 
     async def _launch(self, dep_id: int, name: str, port: int, prep: Prepared, mem_total: int) -> None:
+        try:  # re-check now that the planned row exists (closes the race with a concurrent weights delete)
+            self._check_not_deleting(prep.artifact.ref, prep.draft.ref if prep.draft else None)
+        except DeployError as e:
+            self._transition(dep_id, "failed", message=e.message, last_error=e.message)
+            raise
         launch = LaunchContext(dep_id, name, port, prep.estimate.total, mem_total)
         spec = prep.engine.container_spec(prep.artifact, prep.cfg, prep.draft, launch, self.settings)
         try:

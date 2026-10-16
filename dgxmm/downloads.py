@@ -43,6 +43,7 @@ class DownloadService:
         self._cancel: set[int] = set()
         self._tasks: dict[int, asyncio.Task] = {}
         self._sizes: dict[int, dict[str, int]] = {}
+        self.delete_guard: Callable[[str], bool] | None = None  # WeightsDeleter.is_being_deleted
 
     def view(self, dl_id: int) -> dict:
         with self.db.session() as s:
@@ -67,6 +68,8 @@ class DownloadService:
               user_id: int | None = None) -> dict:
         if not re.fullmatch(REPO_RE, repo_id) or ".." in repo_id:
             raise DownloadError("invalid_repo", "repo id must look like org/name", 422)
+        if self.delete_guard is not None and self.delete_guard(repo_id):
+            raise DownloadError("model_being_deleted", f"{repo_id} is being deleted from disk; try again shortly", 409)
         if revision is not None and not re.fullmatch(r"^[A-Za-z0-9._/-]{1,64}$", revision):
             raise DownloadError("invalid_revision", "invalid revision", 422)
         for p in include or []:
