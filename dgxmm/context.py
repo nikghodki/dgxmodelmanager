@@ -132,6 +132,23 @@ def build_context(settings: Settings) -> AppContext:
     from dgxmm.downloads import DownloadService
     ctx.downloads = DownloadService(settings, db, inventory, hub, events, token=hf_token)
 
+    from dgxmm.metrics.scraper import MetricsScraper
+    from dgxmm.metrics.store import MetricsStore
+    store = MetricsStore(db)
+    scraper = MetricsScraper(settings, deployer, http, store, events, budget)
+    ctx.metrics = store
+    ctx.background.append(scraper.run)
+
+    from dgxmm.memory.calibration import Calibration, CalibrationRecorder
+    calibration = Calibration(db)
+    deployer.calibration = calibration
+    deployer.state_hooks.append(CalibrationRecorder(deployer, calibration).on_state)
+
+    from dgxmm.advisor.benchmark import BenchmarkRunner
+    from dgxmm.advisor.rules import AdvisorService
+    ctx.advisor = AdvisorService(deployer, inventory, store, db)
+    ctx.benchmarks = BenchmarkRunner(db, events)
+
     ctx.startup += [_bootstrap, _inventory, _reconcile]
     ctx.background += [_budget_loop, _inventory_loop]
     return ctx

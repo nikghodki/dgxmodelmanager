@@ -5,12 +5,14 @@ import { api } from "../api";
 import { useIsAdmin } from "../auth";
 import { MemoryBar } from "../components/MemoryBar";
 import { SwitchDialog } from "../components/SwitchDialog";
+import { MetricChart } from "../components/Charts";
 import { Badge, Button, Card, ErrorBox, Stat, Table } from "../components/ui";
 import { fmtBytes, fmtNum, fmtPct, stateTone } from "../format";
 import { type Deployment, type HostInfo } from "../types";
+import { useLive } from "../stream";
 
 function LiveCell({ id, field, fmt }: { id: number; field: string; fmt: (v: any) => string }) {
-  const q = useQuery<any[]>({ queryKey: ["live", id], queryFn: () => Promise.resolve([]), staleTime: Infinity });
+  const q = useLive(id);
   const last = q.data?.[q.data.length - 1];
   return <span className="tabular-nums">{last ? fmt(last[field]) : "—"}</span>;
 }
@@ -25,6 +27,7 @@ export function Dashboard() {
     mutationFn: ({ id, action }: { id: number; action: string }) => api(`/deployments/${id}/${action}`, { method: "POST" }),
     onSettled: () => qc.invalidateQueries({ queryKey: ["deployments"] }),
   });
+  const hostLive = useQuery({ queryKey: ["host-metrics"], queryFn: () => api<any[]>("/host/metrics?window=live"), refetchInterval: 10000 });
   const b = host.data?.budget;
   return (
     <div className="space-y-4">
@@ -43,6 +46,9 @@ export function Dashboard() {
             <Stat label="Model disk free" value={fmtBytes(host.data?.disk?.free)} sub={host.data?.gpu?.util != null ? `GPU ${host.data.gpu.util}% · ${host.data.gpu.temp_c ?? "?"}°C` : undefined} />
           </div>
           <Card title="Unified memory"><MemoryBar budget={b} /></Card>
+          <Card title="Memory over the last hour">
+            <MetricChart data={hostLive.data ?? []} fmt={(v) => fmtBytes(v, 0)} lines={[{ key: "used", label: "used", color: "#2563eb" }, { key: "external", label: "external", color: "#ea580c" }, { key: "free_for_new", label: "free for new", color: "#0d9488" }]} />
+          </Card>
         </>
       )}
       <ErrorBox error={host.error || deps.error || act.error} />
