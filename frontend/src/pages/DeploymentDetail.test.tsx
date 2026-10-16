@@ -167,6 +167,7 @@ describe("DeploymentDetail", () => {
     await userEvent.click(screen.getByRole("link", { name: /Set a model name for qwen/ }));
     expect(await screen.findByLabelText("Model name")).toHaveValue("qwen-qwen");
     expect(screen.getByLabelText("Model name")).toHaveFocus();
+    expect(screen.queryByText(/load-balance/)).toBeNull(); // the start conflict notice clears on tab change
   });
 
   it("opens the LiteLLM tab with a suggested model name from the URL", async () => {
@@ -209,5 +210,48 @@ describe("DeploymentDetail", () => {
     expect(screen.queryByRole("button", { name: /Create key/ })).toBeNull();
     expect(screen.queryByRole("button", { name: "Re-sync" })).toBeNull();
     expect(screen.queryByText("Keys with access")).toBeNull();
+  });
+
+  it("keeps the one-time key when the per-deployment refetch reports a key error", async () => {
+    const full = "sk-TAB-KEY-0123456789";
+    let loads = 0;
+    renderDetail([], { extra: (url, opts) => {
+      if (url === "/deployments/1/litellm") return Promise.resolve(loads++ === 0 ? info() : info({ keys: [], keys_error: { code: "litellm_unreachable", message: "could not reach LiteLLM" } }));
+      if (url === "/integrations/litellm/keys" && opts?.method === "POST") return Promise.resolve({ ...key, key_alias: "tab-key", key: full });
+      return undefined;
+    } });
+    await userEvent.click(await screen.findByRole("tab", { name: /LiteLLM/ }));
+    await userEvent.click(await screen.findByRole("button", { name: "Create key for this deployment" }));
+    await userEvent.type(screen.getByLabelText("Alias"), "tab-key");
+    await userEvent.click(screen.getByRole("button", { name: "Create key" }));
+    expect(await screen.findByDisplayValue(full)).toBeInTheDocument();
+    await waitFor(() => expect(loads).toBeGreaterThan(1));
+    await new Promise((r) => setTimeout(r, 20));
+    expect(screen.getByDisplayValue(full)).toBeInTheDocument();
+  });
+
+  it("still offers (and defaults to) rewriting keys when the key list is unavailable", async () => {
+    const patches: any[] = [];
+    renderDetail([], { litellm: info({ keys: [], keys_error: { code: "litellm_no_db", message: "no db" } }),
+      extra: patchHandler(patches, { affected_keys: [], keys_rewritten: 0, keys_error: null }) });
+    await userEvent.click(await screen.findByRole("tab", { name: /LiteLLM/ }));
+    const input = await screen.findByLabelText("Model name");
+    await userEvent.clear(input);
+    await userEvent.type(input, "renamed");
+    expect(screen.getByRole("checkbox", { name: "Also update any keys scoped to chat" })).toBeChecked();
+    await userEvent.click(screen.getByRole("button", { name: "Save model name" }));
+    await waitFor(() => expect(patches).toEqual([{ alias: "renamed", rewrite_keys: true }]));
+  });
+
+  it("explains a disabled sync from the tab's Re-sync", async () => {
+    renderDetail([], { extra: (url) => (url === "/integrations/litellm/sync" ? Promise.resolve({ ok: true, status: "disabled", registered: 0, removed: 0, error: null }) : undefined) });
+    await userEvent.click(await screen.findByRole("tab", { name: /LiteLLM/ }));
+    await userEvent.click(await screen.findByRole("button", { name: "Re-sync" }));
+    expect(await screen.findByText(/disabled or has no master key/)).toBeInTheDocument();
+  });
+
+  it("falls back to the overview for an unknown tab", async () => {
+    renderDetail([], { path: "/deployments/1?tab=bogus" });
+    expect(await screen.findByRole("heading", { name: "API access" })).toBeInTheDocument();
   });
 });

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { ApiError } from "@/api";
 import {
-  ALIAS_RE, apiErrorText, keysScopedTo, nameFixHref, rewrittenCount, suggestAlias, takenHolder, aliasProblem, buildKeyCreateBody, buildKeyPatchBody, connectionPatch, curlSnippet, emptyKeyForm, endpointPreview,
+  ALIAS_RE, apiErrorText, keysScopedTo, nameFixHref, rewrittenCount, suggestAlias, syncMessage, takenHolder, aliasProblem, buildKeyCreateBody, buildKeyPatchBody, connectionPatch, curlSnippet, emptyKeyForm, endpointPreview,
   isAllModels, keyFormFromKey, keyFormProblems, litellmProblem, modelNameOptions, pythonSnippet, urlProblem,
 } from "./litellm";
 
@@ -155,5 +155,25 @@ describe("model name fixes", () => {
     expect(rewrittenCount(1, 2)).toBe(1);
     expect(rewrittenCount([{ token: "a" }], 2)).toBe(1);
     expect(rewrittenCount(undefined, 2)).toBe(0);
+  });
+});
+
+describe("review fixes", () => {
+  it("emptying the internal URL when it already is the default is no change and detaches no key", () => {
+    const saved = { enabled: true, url: "http://litellm-proxy:4000", public_url: "", master_key_set: true, default_url: "http://litellm-proxy:4000" };
+    expect(connectionPatch(saved, { enabled: true, url: "", public_url: "", keyMode: "keep", masterKey: "" })).toEqual({ body: {}, keyDetaches: false });
+    const custom = { ...saved, url: "http://other:4000" };
+    expect(connectionPatch(custom, { enabled: true, url: "", public_url: "", keyMode: "keep", masterKey: "" })).toEqual({ body: { url: "" }, keyDetaches: true });
+  });
+  it("edit allows an empty alias only when the key had none", () => {
+    const key = { key_alias: null, models: [], max_budget: null, budget_duration: null, rpm_limit: null, tpm_limit: null } as any;
+    const f = { ...emptyKeyForm(), alias: "" };
+    expect(keyFormProblems(f, "edit", key).alias).toBeUndefined();
+    expect(keyFormProblems(f, "edit", { ...key, key_alias: "a" }).alias).toBeDefined();
+    expect(keyFormProblems(f, "create").alias).toBeDefined();
+  });
+  it("describes sync results the same way everywhere", () => {
+    expect(syncMessage({ ok: true, status: "disabled", registered: 0, removed: 0, error: null })).toMatch(/disabled or has no master key/);
+    expect(syncMessage({ ok: true, status: "synced", registered: 2, removed: 1, error: null })).toBe("Sync finished: 2 registered, 1 removed.");
   });
 });

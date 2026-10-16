@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { LiteLLM } from "./LiteLLM";
 import * as auth from "@/auth";
 import * as apiModule from "@/api";
@@ -16,7 +16,7 @@ vi.mock("@/api", async () => {
 const okStatus = { reachable: true, version: "1.100.0", db: "connected", error: null, checked_at: "2026-10-16T16:56:43Z" };
 const settings = (over: Record<string, any> = {}) => ({
   enabled: true, url: "http://litellm-proxy:4000", public_url: "https://llm.example.com", endpoint: "https://llm.example.com/v1",
-  master_key_set: true, master_key_source: "secret_file", master_key_hint: null, status: okStatus, ...over,
+  master_key_set: true, master_key_source: "secret_file", master_key_hint: null, default_url: "http://litellm-proxy:4000", status: okStatus, ...over,
 });
 const key = {
   token: "a".repeat(64), key_name: "sk-...HWqw", key_alias: "team-a", models: ["chat"], spend: 1.5, max_budget: 5, budget_duration: "30d",
@@ -57,8 +57,11 @@ describe("LiteLLM page", () => {
   it("redirects viewers", () => {
     vi.mocked(auth.useIsAdmin).mockReturnValue(false);
     const qc = new QueryClient();
-    const { container } = render(<QueryClientProvider client={qc}><MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}><LiteLLM /></MemoryRouter></QueryClientProvider>);
-    expect(container.textContent).toBe("");
+    render(<QueryClientProvider client={qc}><MemoryRouter initialEntries={["/litellm"]} future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
+      <Routes><Route path="/litellm" element={<LiteLLM />} /><Route path="/" element={<p>home page</p>} /></Routes>
+    </MemoryRouter></QueryClientProvider>);
+    expect(screen.getByText("home page")).toBeInTheDocument();
+    expect(vi.mocked(apiModule.api)).not.toHaveBeenCalled();
   });
 
   it("shows the connection, the single endpoint, models and keys", async () => {
@@ -186,7 +189,15 @@ describe("LiteLLM page", () => {
     expect(screen.getByLabelText("curl example")).toHaveTextContent(`Bearer ${full}`);
     expect(screen.getByLabelText("curl example")).toHaveTextContent("https://llm.example.com/v1/chat/completions");
     expect(screen.getByText(/only time the full key is shown/)).toBeInTheDocument();
+    fireEvent.pointerDown(document.body); // an outside click must not dismiss the one-time key
+    fireEvent.keyDown(document.activeElement ?? document.body, { key: "Escape" }); // nor Escape: it asks first
+    expect(screen.getByDisplayValue(full)).toBeInTheDocument();
+    expect(await screen.findByText(/Close without copying/)).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Keep open" }));
     await userEvent.click(screen.getByRole("button", { name: "Done" }));
+    expect(screen.getByText(/Close without copying/)).toBeInTheDocument();
+    expect(screen.getByDisplayValue(full)).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Close anyway" }));
     await waitFor(() => expect(screen.queryByDisplayValue(full)).toBeNull());
     expect(document.body.innerHTML).not.toContain(full);
     await waitFor(() => expect(cached(qc, full)).toBe(false));
@@ -218,5 +229,56 @@ describe("LiteLLM page", () => {
     await userEvent.click(screen.getByRole("button", { name: "Save changes" }));
     await waitFor(() => expect(calls("PATCH", `/integrations/litellm/keys/${key.token}`)).toHaveLength(1));
     expect(calls("PATCH", `/integrations/litellm/keys/${key.token}`)[0][1]).toEqual({ method: "PATCH", body: { tpm_limit: 5000 } });
+  });
+
+  it("keeps the one-time key on screen when the key list refetch fails", async () => {
+    const full = "sk-KEEP-ME-0123456789";
+    let lists = 0;
+    setup({}, (url, opts) => {
+      if (url === "/integrations/litellm/keys" && opts?.method === "POST") return { ...key, key_alias: "ci-bot", key: full };
+      if (url === "/integrations/litellm/keys" && !opts?.method && lists++ > 0) return Promise.reject(new apiModule.ApiError(502, { code: "litellm_unreachable", message: "could not reach LiteLLM" }));
+      return undefined;
+    });
+    await userEvent.click(await screen.findByRole("button", { name: "Create key" }));
+    await userEvent.type(screen.getByLabelText("Alias"), "ci-bot");
+    await userEvent.click(screen.getByRole("button", { name: "Create key" }));
+    expect(await screen.findByDisplayValue(full)).toBeInTheDocument();
+    await waitFor(() => expect(lists).toBeGreaterThan(1));
+    await new Promise((r) => setTimeout(r, 20));
+    expect(screen.getByDisplayValue(full)).toBeInTheDocument();
+  });
+
+  it("closes the created-key dialog straight away once the key was copied", async () => {
+    const full = "sk-COPIED-0123456789";
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText: vi.fn().mockResolvedValue(undefined) } });
+    setup({}, (url, opts) => (url === "/integrations/litellm/keys" && opts?.method === "POST" ? { ...key, key: full } : undefined));
+    await userEvent.click(await screen.findByRole("button", { name: "Create key" }));
+    await userEvent.type(screen.getByLabelText("Alias"), "x");
+    await userEvent.click(screen.getByRole("button", { name: "Create key" }));
+    await userEvent.click(await screen.findByRole("button", { name: "Copy key" }));
+    await userEvent.click(screen.getByRole("button", { name: "Done" }));
+    await waitFor(() => expect(screen.queryByDisplayValue(full)).toBeNull());
+  });
+
+  it("lets a key without an alias be edited", async () => {
+    const plain = { ...key, key_alias: null };
+    setup({}, (url, opts) => {
+      if (url === "/integrations/litellm/keys" && !opts?.method) return [plain];
+      if (opts?.method === "PATCH") return plain;
+      return undefined;
+    });
+    await userEvent.click(await screen.findByRole("button", { name: "Actions for key sk-...HWqw" }));
+    await userEvent.click(await screen.findByRole("menuitem", { name: /Edit/ }));
+    await userEvent.type(await screen.findByLabelText("Tokens per minute"), "100");
+    await userEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    await waitFor(() => expect(calls("PATCH", `/integrations/litellm/keys/${key.token}`)).toHaveLength(1));
+    expect(calls("PATCH", `/integrations/litellm/keys/${key.token}`)[0][1]).toEqual({ method: "PATCH", body: { tpm_limit: 100 } });
+  });
+
+  it("shows no key hint when the internal URL is emptied back to the default it already is", async () => {
+    setup();
+    await userEvent.clear(await screen.findByLabelText("Internal URL"));
+    expect(screen.queryByTestId("master-key-hint")).toBeNull();
+    expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
   });
 });
