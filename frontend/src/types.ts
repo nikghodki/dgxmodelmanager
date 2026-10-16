@@ -13,6 +13,21 @@ export interface Artifact {
   max_context: number | null; is_moe: boolean | null; num_layers: number | null; confident: boolean | null;
   has_mtp: boolean; engines: string[];
 }
+export interface DeploymentRef { id: number; name: string; state: string }
+/** GET /inventory/delete-preview — what deleting a model would remove (host paths). */
+export interface DeletePreview {
+  ref: string; source: "hf" | "gguf"; name: string; paths: string[]; bytes: number;
+  deployments_blocking: DeploymentRef[]; deployments_affected: DeploymentRef[]; download_active: boolean; blocked: boolean;
+}
+export interface DeleteResult { ref: string; freed_bytes: number; paths: string[]; method: string; warnings: DeploymentRef[] }
+export interface CleanupItem extends Omit<DeletePreview, "blocked"> {
+  problems: string[]; eligible: boolean; skip_reason: string | null; message?: string;
+}
+export interface CleanupPreview { items: CleanupItem[]; count: number; bytes: number }
+export interface CleanupResult {
+  deleted: DeleteResult[]; skipped: { ref: string; code: string; message: string }[];
+  failed: { ref: string; code: string; message: string }[]; freed_bytes: number;
+}
 export interface Estimate {
   weights: number; draft_weights: number; kv_cache: number; state: number; activations: number; runtime: number;
   margin: number; confidence: string; notes: string[]; total: number;

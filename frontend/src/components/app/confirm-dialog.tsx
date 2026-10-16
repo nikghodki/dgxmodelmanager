@@ -7,9 +7,11 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 
-export function ConfirmDialog({ open, onOpenChange, title, description, confirmLabel, destructive, requireText, onConfirm, pending }: {
+export function ConfirmDialog({ open, onOpenChange, title, description, confirmLabel, destructive, requireText, onConfirm, pending, disabled }: {
   open: boolean; onOpenChange: (o: boolean) => void; title: string; description: React.ReactNode; confirmLabel: string;
   destructive?: boolean; requireText?: string; onConfirm: () => void; pending?: boolean;
+  /** Keep the confirm button disabled regardless of the typed text (e.g. the action is blocked). */
+  disabled?: boolean;
 }) {
   const [typed, setTyped] = useState("");
   useEffect(() => { if (!open) setTyped(""); }, [open]);
@@ -29,7 +31,7 @@ export function ConfirmDialog({ open, onOpenChange, title, description, confirmL
         )}
         <AlertDialogFooter>
           <AlertDialogCancel>Cancel</AlertDialogCancel>
-          <Button variant={destructive ? "destructive" : "default"} disabled={blocked || pending} onClick={onConfirm}>
+          <Button variant={destructive ? "destructive" : "default"} disabled={blocked || pending || disabled} onClick={onConfirm}>
             {pending && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}{confirmLabel}
           </Button>
         </AlertDialogFooter>
