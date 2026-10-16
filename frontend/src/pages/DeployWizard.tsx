@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { useNavigate, useSearchParams } from "react-router-dom";
+import { Navigate, useNavigate, useSearchParams } from "react-router-dom";
 import { Loader2 } from "lucide-react";
 import { ApiError, api } from "@/api";
+import { useIsAdmin } from "@/auth";
 import { ConfigForm } from "@/components/app/config-form";
 import { EstimatePanel } from "@/components/app/estimate-panel";
 import { ModelSelect } from "@/components/app/model-select";
@@ -35,6 +36,8 @@ function Section({ n, title, description, children }: { n: number; title: string
 }
 
 export function DeployWizard() {
+  const admin = useIsAdmin();
+  if (!admin) return <Navigate to="/" replace />;
   const [params] = useSearchParams();
   const nav = useNavigate();
   const inv = useQuery({ queryKey: ["inventory"], queryFn: () => api<Artifact[]>("/inventory") });
@@ -79,7 +82,21 @@ export function DeployWizard() {
   const actions = plan?.actions ?? [];
   const deploy = useActionMutation(() => api<{ id: number }>("/deployments", {
     method: "POST", body: { name, engine, model_ref: ref, config, priority, alias: alias || null, actions },
-  }), { success: (d: any) => `Deploying ${name} (id ${d.id})`, invalidate: [["deployments"], ["host"]], onSuccess: (d: any) => nav(`/deployments/${d.id}`) });
+  }), {
+    success: (d: any) => `Deploying ${name} (id ${d.id})`,
+    invalidate: [["deployments"], ["host"]],
+    onSuccess: (d: any) => nav(`/deployments/${d.id}`),
+  });
+
+  useEffect(() => {
+    if (deploy.error instanceof ApiError && deploy.error.code === "insufficient_memory") {
+      setPlan(null);
+      if (deploy.error.detail?.fit && deploy.error.detail?.plans) {
+        setPreview({ ...preview!, fit: deploy.error.detail.fit, plans: deploy.error.detail.plans });
+      }
+    }
+  }, [deploy.error, preview]);
+
   const submit = submitState(preview, actions, deploy.isPending, "deploy");
   const memoryChanged = deploy.error instanceof ApiError && deploy.error.code === "insufficient_memory";
 
@@ -89,14 +106,18 @@ export function DeployWizard() {
       {preview ? <EstimatePanel preview={preview} /> : <p className="text-sm text-muted-foreground">Choose a model to see the memory check.</p>}
       {preview && !preview.fit.fits && (
         <PlanChooser plans={preview.plans ?? []} selectedId={plan?.id ?? null}
-          onSelect={(o) => { setPlan({ id: o.id, actions: o.actions.filter((a) => a.type !== "patch") }); if (o.patch) setConfig({ ...config, ...o.patch }); }} />
+          onSelect={(o) => {
+            setPlan({ id: o.id, actions: o.actions.filter((a) => a.type !== "patch") });
+            if (o.patch) setConfig({ ...config, ...o.patch });
+            if (o.model_ref) setRef(o.model_ref); // triggers artifact effect → resets config/plan, but user sees model change
+          }} />
       )}
       {memoryChanged && <p className="text-xs text-status-critical">Memory changed since the preview — choose a plan again.</p>}
     </div>
   );
 
   return (
-    <div className="pb-24 md:pb-0">
+    <div className="pb-[calc(44px+env(safe-area-inset-bottom)+1rem)] md:pb-0">
       <PageHeader title="Deploy a model" description="DGXMM checks memory before anything starts. Nothing is evicted without your confirmation." />
       <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_380px]">
         <div className="space-y-4">
@@ -137,10 +158,10 @@ export function DeployWizard() {
             </CardContent>
           </Card>
         </div>
-        <div className="lg:hidden">{artifact && <Card className="shadow-card"><CardHeader className="pb-3"><CardTitle className="text-sm">Memory check</CardTitle></CardHeader><CardContent>{check}</CardContent></Card>}</div>
+        <div className="lg:hidden">{artifact && <Card className="shadow-card"><CardHeader className="pb-3"><CardTitle className="text-sm">Memory check</CardTitle></CardHeader><CardContent className="space-y-4">{check}<Button className="w-full md:hidden" disabled={submit.disabled} onClick={() => deploy.mutate(undefined)}>{deploy.isPending && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}{submit.label}</Button></CardContent></Card>}</div>
       </div>
       {artifact && (
-        <div className="pb-safe fixed inset-x-0 bottom-14 z-30 border-t bg-background/95 px-4 py-3 backdrop-blur lg:hidden">
+        <div className="fixed inset-x-0 bottom-[calc(44px+env(safe-area-inset-bottom))] z-30 border-t bg-background/95 px-4 py-3 backdrop-blur md:hidden">
           <div className="flex items-center gap-3">
             <div className="min-w-0 flex-1 text-xs">
               {preview ? <span className={preview.fit.fits ? "text-status-good" : "text-status-critical"}>{preview.fit.fits ? "Fits" : "Does not fit"} · needs {fmtBytes(preview.estimate.total)}</span> : <span className="text-muted-foreground">Checking memory…</span>}
