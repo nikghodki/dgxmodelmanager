@@ -34,8 +34,7 @@ export function Models() {
   });
   const [target, setTarget] = useState<{ artifact: Artifact; mode: "delete" | "cleanup" } | null>(null);
   const [bulk, setBulk] = useState(false);
-  const cleanupItems = admin && incomplete > 0 ? cleanup.data?.items ?? [] : [];
-  const cleanupBytes = cleanupItems.reduce((s, i) => s + i.bytes, 0);
+  const eligibleCount = admin && incomplete > 0 ? cleanup.data?.count ?? 0 : 0; // server-side eligibility
   const rows = kind === "all" ? all : all.filter((a) => a.kind === kind);
   const total = all.reduce((s, a) => s + a.size_bytes, 0);
   const columns = useMemo<ColumnDef<Artifact, any>[]>(() => [
@@ -60,7 +59,7 @@ export function Models() {
     <div className="space-y-4">
       <PageHeader title="Models on disk" description={`${all.length} models · ${fmtBytes(total)} in the Hugging Face cache and GGUF folders`}
         actions={admin && <>
-          {cleanupItems.length > 0 && <Button variant="outline" size="sm" onClick={() => setBulk(true)}><Eraser className="mr-1 h-4 w-4" aria-hidden />Clean up incomplete ({cleanupItems.length} · {fmtBytes(cleanupBytes)})</Button>}
+          {eligibleCount > 0 && <Button variant="outline" size="sm" onClick={() => setBulk(true)}><Eraser className="mr-1 h-4 w-4" aria-hidden />Clean up incomplete ({eligibleCount} · {fmtBytes(cleanup.data?.bytes ?? 0)})</Button>}
           <Button variant="outline" size="sm" disabled={refresh.isPending} onClick={() => refresh.mutate(undefined)}><RefreshCw className={cn("mr-1 h-4 w-4", refresh.isPending && "animate-spin")} />Rescan</Button>
         </>} />
       <ErrorState error={inv.error} onRetry={() => inv.refetch()} />
@@ -76,7 +75,7 @@ export function Models() {
               {a.kind === "llm" && a.engines.length > 0 && <Button asChild size="sm" variant="outline"><Link to={`/deploy?model=${encodeURIComponent(a.ref)}`}><Rocket className="mr-1 h-3.5 w-3.5" />Deploy</Link></Button>}
               <Button size="sm" variant="ghost" aria-label={`Delete ${modelShortName(a.ref)}`} title="Delete weights…" onClick={() => setTarget({ artifact: a, mode: "delete" })}>
                 <Trash2 className="h-3.5 w-3.5" aria-hidden /><span className="ml-1 hidden lg:inline">Delete…</span></Button>
-            </> : <Button size="sm" variant="outline" onClick={() => setTarget({ artifact: a, mode: "cleanup" })}><Eraser className="mr-1 h-3.5 w-3.5" aria-hidden />Clean up</Button>}
+            </> : <Button size="sm" variant="outline" aria-label={`Clean up ${modelShortName(a.ref)}`} onClick={() => setTarget({ artifact: a, mode: "cleanup" })}><Eraser className="mr-1 h-3.5 w-3.5" aria-hidden />Clean up</Button>}
           </div>) : null}
         empty={<EmptyState icon={HardDrive} title="No models found" description="Download one from the Catalog." action={<Button asChild size="sm" variant="outline"><Link to="/catalog">Open catalog</Link></Button>} />} />
       {admin && <DeleteWeightsDialog artifact={target?.artifact ?? null} mode={target?.mode ?? "delete"} onClose={() => setTarget(null)} />}

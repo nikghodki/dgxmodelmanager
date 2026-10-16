@@ -62,6 +62,17 @@ class FakeHelperContainer:
         self.client.helper_killed += 1
 
 
+class FakeImages:
+    def __init__(self, client):
+        self.client = client
+
+    def get(self, name):
+        self.client.images_checked.append(name)
+        if name in self.client.missing_images:
+            raise docker.errors.ImageNotFound(f"no such image: {name}")
+        return object()
+
+
 class FakeContainers:
     def __init__(self, client):
         self.client = client
@@ -127,6 +138,9 @@ class FakeDockerClient:
     def __init__(self):
         self._containers: dict[str, FakeContainer] = {}
         self.containers = FakeContainers(self)
+        self.images = FakeImages(self)
+        self.images_checked: list[str] = []
+        self.missing_images: set[str] = set()
         self.run_calls: list[dict] = []
         self.fail_run = False
         self.oneshot_output = ""

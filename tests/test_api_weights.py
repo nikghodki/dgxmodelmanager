@@ -94,8 +94,17 @@ def test_delete_without_csrf_is_refused(api_stack):
     assert (hub(api_stack) / "models--Qwen--Qwen3-Tiny").is_dir()
 
 
+def age(c):
+    import os
+    import time
+    t = time.time() - 3600
+    for b in hub(c).glob("models--*/blobs/*.incomplete"):
+        os.utime(b, (t, t))
+
+
 def test_cleanup_incomplete_preview_and_run(api_stack):
     h = admin(api_stack)
+    age(api_stack)
     p = api_stack.get(f"{API}/cleanup-incomplete/preview").json()
     assert [i["ref"] for i in p["items"]] == ["org/partial"] and p["count"] == 1 and p["bytes"] > 0
     r = api_stack.post(f"{API}/cleanup-incomplete", json={}, headers=h)
@@ -111,6 +120,7 @@ def test_cleanup_incomplete_preview_and_run(api_stack):
 
 def test_cleanup_with_refs_reports_skips(api_stack):
     h = admin(api_stack)
+    age(api_stack)
     add_dep(api_stack, "p", "org/partial", "loading")
     out = api_stack.post(f"{API}/cleanup-incomplete", json={"refs": ["org/partial", "Qwen/Qwen3-Tiny"]},
                          headers=h).json()
@@ -118,3 +128,17 @@ def test_cleanup_with_refs_reports_skips(api_stack):
     assert {s["ref"]: s["code"] for s in out["skipped"]} == {"org/partial": "model_in_use",
                                                              "Qwen/Qwen3-Tiny": "not_incomplete"}
     assert (hub(api_stack) / "models--org--partial").is_dir()
+
+
+def test_refused_delete_is_audited(api_stack):
+    h = admin(api_stack)
+    add_dep(api_stack, "tiny", "Qwen/Qwen3-Tiny", "ready")
+    assert api_stack.delete(API, params={"ref": "Qwen/Qwen3-Tiny"}, headers=h).status_code == 409
+    [(target, detail)] = audits(api_stack, "model_delete_refused")
+    assert target == "Qwen/Qwen3-Tiny" and detail["reason"] == "model_in_use"
+
+
+def test_api_wires_the_being_deleted_guard_into_deployer(api_stack):
+    admin(api_stack)
+    api_stack.get(f"{API}/delete-preview", params={"ref": "Qwen/Qwen3-Tiny"})
+    assert api_stack.ctx.deployer.delete_guard == api_stack.ctx.weights.is_being_deleted

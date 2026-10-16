@@ -22,7 +22,7 @@ const art = (ref: string, complete: boolean, extra: Record<string, unknown> = {}
 const GIB = 1024 ** 3;
 const preview = (extra: Record<string, unknown> = {}) => ({
   ref: "org/done", source: "hf", name: "done", paths: ["/home/u/.cache/huggingface/hub/models--org--done"], bytes: 2 * GIB,
-  deployments_blocking: [], deployments_affected: [], download_active: false, blocked: false, ...extra,
+  deployments_blocking: [], deployments_affected: [], download_active: false, blocked: false, notes: [], ...extra,
 });
 const cleanupPreview = {
   items: [
@@ -96,7 +96,7 @@ describe("Models", () => {
     expect(within(done).getByRole("link", { name: /Deploy/ })).toBeInTheDocument();
     expect(within(done).getByRole("button", { name: "Delete done" })).toBeInTheDocument();
     expect(within(partial).queryByRole("link", { name: /Deploy/ })).toBeNull();
-    expect(within(partial).getByRole("button", { name: /Clean up/ })).toBeInTheDocument();
+    expect(within(partial).getByRole("button", { name: "Clean up partial" })).toBeInTheDocument();
   });
 
   it("delete dialog shows the preview and requires the typed model name", async () => {
@@ -139,7 +139,7 @@ describe("Models", () => {
     const user = userEvent.setup();
     const api = mockApi();
     renderModels();
-    await user.click(await screen.findByRole("button", { name: /Clean up incomplete \(2 · 4\.0 GiB\)/ }));
+    await user.click(await screen.findByRole("button", { name: /Clean up incomplete \(1 · 3\.0 GiB\)/ }));
     const dialog = await screen.findByRole("dialog");
     const ok = within(dialog).getByRole("checkbox", { name: /org\/partial/ });
     const busy = within(dialog).getByRole("checkbox", { name: /org\/busy/ });
@@ -157,10 +157,35 @@ describe("Models", () => {
     const api = mockApi((p) => p.startsWith("/inventory/delete-preview")
       ? preview({ ref: "org/partial", name: "partial", bytes: 3 * GIB }) : undefined);
     renderModels();
-    await user.click(within(await row("org/partial")).getByRole("button", { name: /Clean up/ }));
+    await user.click(within(await row("org/partial")).getByRole("button", { name: "Clean up partial" }));
     const dialog = await screen.findByRole("alertdialog");
     expect(await within(dialog).findByText("3.0 GiB")).toBeInTheDocument();
     await user.click(within(dialog).getByRole("button", { name: "Clean up" }));
     await waitFor(() => expect(api).toHaveBeenCalledWith("/inventory/cleanup-incomplete", { method: "POST", body: { refs: ["org/partial"] } }));
+  });
+
+  it("shows preview notes (e.g. shared blobs)", async () => {
+    vi.mocked(auth.useIsAdmin).mockReturnValue(true);
+    const user = userEvent.setup();
+    mockApi((p) => p.startsWith("/inventory/delete-preview") ? preview({ bytes: 0, notes: ["Q8.gguf: its data is shared with other files"] }) : undefined);
+    renderModels();
+    await user.click(within(await row("org/done")).getByRole("button", { name: "Delete done" }));
+    expect(await within(await screen.findByRole("alertdialog")).findByText(/shared with other files/)).toBeInTheDocument();
+  });
+
+  it("refetches the preview when the delete is refused", async () => {
+    vi.mocked(auth.useIsAdmin).mockReturnValue(true);
+    const user = userEvent.setup();
+    const api = mockApi((_p, o) => {
+      if (o?.method === "DELETE") return Promise.reject(new apiModule.ApiError(409, { code: "model_in_use", message: "in use" }));
+      return undefined;
+    });
+    renderModels();
+    await user.click(within(await row("org/done")).getByRole("button", { name: "Delete done" }));
+    const dialog = await screen.findByRole("alertdialog");
+    await user.type(await within(dialog).findByLabelText(/Type done to confirm/), "done");
+    await user.click(within(dialog).getByRole("button", { name: "Delete weights" }));
+    const previews = () => api.mock.calls.filter(([p]) => p.startsWith("/inventory/delete-preview")).length;
+    await waitFor(() => expect(previews()).toBeGreaterThanOrEqual(2));
   });
 });

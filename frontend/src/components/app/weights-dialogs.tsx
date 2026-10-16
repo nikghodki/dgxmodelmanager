@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { AlertTriangle, Ban, Loader2 } from "lucide-react";
@@ -45,6 +45,7 @@ function PreviewBody({ p, mode }: { p: DeletePreview; mode: "delete" | "cleanup"
         <Notice tone="critical">In use by {depList(p.deployments_blocking)}. {p.deployments_blocking.length === 1 ? "Stop it first." : "Stop them first."}</Notice>
       )}
       {p.download_active && <Notice tone="critical">A download for this model is still running. Cancel it on the Downloads page first.</Notice>}
+      {p.notes?.map((n) => <Notice key={n} tone="warning">{n}</Notice>)}
       {p.deployments_affected.length > 0 && (
         <Notice tone="warning">Used by stopped deployment{p.deployments_affected.length === 1 ? "" : "s"} {depList(p.deployments_affected)}. They will fail to start until the model is downloaded again.</Notice>
       )}
@@ -60,7 +61,7 @@ export function DeleteWeightsDialog({ artifact, mode, onClose }: { artifact: Art
     queryFn: () => api<DeletePreview>(`/inventory/delete-preview?ref=${encodeURIComponent(ref)}`),
     enabled: !!artifact, staleTime: 0, gcTime: 0,
   });
-  const invalidate = [["inventory"]];
+  const invalidate = [["inventory"]]; // also refetches this preview (key below), e.g. after a refused delete
   const del = useActionMutation(() => api<DeleteResult>(`/inventory?ref=${encodeURIComponent(ref)}`, { method: "DELETE" }), {
     success: (d) => `Deleted ${shortRef(ref)} · freed ${fmtBytes(d.freed_bytes)}`, invalidate, onSuccess: onClose,
   });
@@ -85,6 +86,7 @@ export function DeleteWeightsDialog({ artifact, mode, onClose }: { artifact: Art
 
 function skipText(i: CleanupItem): string {
   if (i.skip_reason === "download_active") return "Skipped: a download is still running.";
+  if (i.skip_reason === "recently_active") return "Skipped: partial files were written in the last 10 minutes; a download may still be running.";
   if (i.skip_reason === "model_in_use") return `Skipped: used by ${depList(i.deployments_blocking)}. Stop it first.`;
   return `Skipped: ${i.message ?? i.skip_reason}`;
 }
@@ -93,7 +95,14 @@ function skipText(i: CleanupItem): string {
 export function CleanupIncompleteDialog({ open, onOpenChange, preview }: { open: boolean; onOpenChange: (o: boolean) => void; preview: CleanupPreview | undefined }) {
   const items = useMemo(() => preview?.items ?? [], [preview]);
   const [selected, setSelected] = useState<Set<string>>(new Set());
-  useEffect(() => { if (open) setSelected(new Set(items.filter((i) => i.eligible).map((i) => i.ref))); }, [open, items]);
+  const wasOpen = useRef(false);
+  const baseId = useId();
+  useEffect(() => {
+    const eligible = new Set(items.filter((i) => i.eligible).map((i) => i.ref));
+    if (open && !wasOpen.current) setSelected(eligible); // freshly opened: everything eligible is selected
+    else if (open) setSelected((s) => new Set([...s].filter((r) => eligible.has(r)))); // refetch: keep the user's choice
+    wasOpen.current = open;
+  }, [open, items]);
   const chosen = items.filter((i) => i.eligible && selected.has(i.ref));
   const bytes = chosen.reduce((s, i) => s + i.bytes, 0);
   const run = useActionMutation(() => api<CleanupResult>("/inventory/cleanup-incomplete", { method: "POST", body: { refs: chosen.map((i) => i.ref) } }), {
@@ -104,8 +113,8 @@ export function CleanupIncompleteDialog({ open, onOpenChange, preview }: { open:
     <ResponsiveDialog open={open} onOpenChange={onOpenChange} title="Clean up incomplete downloads" className="max-w-2xl"
       description="Interrupted downloads and models with missing files. The selected ones are deleted from disk.">
       <ul className="divide-y rounded-md border">
-        {items.map((i) => {
-          const id = `cleanup-${i.ref.replace(/[^A-Za-z0-9_-]/g, "_")}`;
+        {items.map((i, idx) => {
+          const id = `${baseId}-cleanup-${idx}`;
           return (
             <li key={i.ref} className="flex items-start gap-3 p-3">
               <Checkbox id={id} className="mt-0.5" checked={i.eligible && selected.has(i.ref)} disabled={!i.eligible}

@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 import shutil
 import socket
+import time
 from pathlib import Path
 
 import pytest
@@ -47,8 +48,9 @@ def local_for(settings, host: str) -> Path:
 def simulate_rm(settings):
     """Make the fake helper container behave like `rm -rf` on its single mount."""
     def act(call):
-        [host] = call["volumes"]
-        base = local_for(settings, host)
+        [m] = call["mounts"]
+        assert call["volumes"] is None
+        base = local_for(settings, m["Source"])
         for arg in call["command"]:
             if arg.startswith(HELPER_MOUNT + "/"):
                 p = base / arg[len(HELPER_MOUNT) + 1:]
@@ -281,12 +283,15 @@ def test_helper_container_args(settings, fake_hf_repo, make):
     d, _ = make(sdk)
     out = d.delete("Qwen/Qwen3-Tiny")
     assert out["method"] == "helper"
-    runs = {r["volumes"] and next(iter(r["volumes"])): r for r in sdk.helper_runs}
+    runs = {r["mounts"][0]["Source"]: r for r in sdk.helper_runs}
     assert set(runs) == {"/host/hf/hub", "/host/hf/hub/.locks"}
     r = runs["/host/hf/hub"]
-    assert r["volumes"] == {"/host/hf/hub": {"bind": HELPER_MOUNT, "mode": "rw"}}
+    assert r["mounts"] == [{"Target": HELPER_MOUNT, "Source": "/host/hf/hub", "Type": "bind", "ReadOnly": False}]
     assert r["image"] == "dgxmm:latest" and r["user"] == "0:0" and r["network_mode"] == "none"
     assert r["auto_remove"] is True and r["detach"] is True
+    assert r["cap_drop"] == ["ALL"] and sorted(r["cap_add"]) == ["DAC_OVERRIDE", "FOWNER"]
+    assert r["read_only"] is True and r["pids_limit"] == 64
+    assert sdk.images_checked == ["dgxmm:latest", "dgxmm:latest"]
     assert r["labels"] == {HELPER_LABEL: "true"} and MANAGED_LABEL not in r["labels"]
     assert r["entrypoint"] == ["rm"] and r["command"] == ["-rf", "--", f"{HELPER_MOUNT}/models--Qwen--Qwen3-Tiny"]
     assert sdk.helper_waits == [settings.helper_timeout_s, settings.helper_timeout_s]
@@ -303,7 +308,7 @@ def test_helper_for_files_uses_rm_f_and_groups_shards(settings, make):
     d, _ = make(sdk)
     d.delete(str(root / "big" / "M-00001-of-00002.gguf"))
     [r] = sdk.helper_runs
-    assert next(iter(r["volumes"])) == "/host/gguf/big"
+    assert r["mounts"][0]["Source"] == "/host/gguf/big"
     assert r["command"] == ["-f", "--", f"{HELPER_MOUNT}/M-00001-of-00002.gguf", f"{HELPER_MOUNT}/M-00002-of-00002.gguf"]
 
 
@@ -384,6 +389,14 @@ def incomplete_set(settings, db, fake_hf_repo):
     fake_hf_repo("Qwen/Qwen3-Tiny", config=QWEN_TINY)
     add_download(db, "org/downloading", "running")
     add_dep(db, "x", "org/inuse", "starting")
+    age_partials(settings)
+
+
+def age_partials(settings, seconds=3600):
+    """Make *.incomplete blobs look abandoned (cleanup skips ones touched in the last 10 minutes)."""
+    t = time.time() - seconds
+    for b in hub(settings).glob("models--*/blobs/*.incomplete"):
+        os.utime(b, (t, t))
 
 
 def test_cleanup_preview_lists_incomplete_with_skip_reasons(incomplete_set, make):
@@ -419,3 +432,228 @@ def test_cleanup_selected_refs_never_deletes_complete_models(settings, incomplet
     assert codes == {"Qwen/Qwen3-Tiny": "not_incomplete", "nope/nope": "not_found"}
     assert (hub(settings) / "models--Qwen--Qwen3-Tiny").is_dir()
     assert (hub(settings) / "models--org--broken").is_dir()
+
+
+# ---------------------------------------------------------------- review fixes (round 1)
+
+def _hub_gguf(fake_hf_repo, repo="unsloth/Qwen3-GGUF", rev="a" * 40, names=("Q8.gguf",), blob_name="gg"):
+    snap = fake_hf_repo(repo, rev=rev, files={}, main=True)
+    blob = snap.parent.parent / "blobs" / blob_name
+    if not blob.exists():
+        write_gguf(blob, vocab=10, ftype=7)
+    for n in names:
+        os.symlink(os.path.relpath(blob, snap), snap / n)
+    return snap, blob
+
+
+def test_shared_hf_blob_is_kept_when_other_links_use_it(settings, fake_hf_repo, make):
+    snap_a, blob = _hub_gguf(fake_hf_repo, rev="a" * 40)
+    snap_b, _ = _hub_gguf(fake_hf_repo, rev="b" * 40)        # another revision, same blob
+    d, _ = make()
+    ref = str(snap_a / "Q8.gguf")
+    p = d.preview(ref)
+    assert p["bytes"] == 0 and any("shared" in n for n in p["notes"])
+    assert p["paths"] == [d.to_host(snap_a.resolve() / "Q8.gguf")]
+    out = d.delete(ref)
+    assert out["freed_bytes"] == 0
+    assert not os.path.lexists(snap_a / "Q8.gguf") and blob.exists() and (snap_b / "Q8.gguf").exists()
+
+
+def test_shared_blob_with_other_filename_in_same_snapshot_is_kept(settings, fake_hf_repo, make):
+    snap, blob = _hub_gguf(fake_hf_repo, names=("A.gguf", "B.gguf"))
+    d, _ = make()
+    d.delete(str(snap / "A.gguf"))
+    assert blob.exists() and (snap / "B.gguf").exists()
+
+
+def test_running_deployment_on_other_link_to_same_blob_blocks(settings, db, fake_hf_repo, make):
+    snap, blob = _hub_gguf(fake_hf_repo, names=("A.gguf",))
+    other = groot(settings) / "alias.gguf"
+    other.symlink_to(blob)                                    # resolves to the blob being deleted
+    add_dep(db, "llama", str(other), "ready")
+    d, _ = make()
+    with pytest.raises(DeleteError) as e:
+        d.delete(str(snap / "A.gguf"))
+    assert e.value.code == "model_in_use" and blob.exists()
+
+
+def test_deleting_hf_repo_blocked_by_deployment_on_gguf_inside_it(settings, db, fake_hf_repo, make):
+    fake_hf_repo("org/mixed", config=QWEN_TINY)
+    snap = hub(settings) / "models--org--mixed" / "snapshots" / ("a" * 40)
+    write_gguf(snap / "M-Q4.gguf", vocab=10)
+    add_dep(db, "gg", str(snap / "M-Q4.gguf"), "ready")
+    add_dep(db, "old", str(snap / "M-Q4.gguf"), "stopped")
+    add_dep(db, "draft-user", "org/x", "stopped", config={"speculative": {"model": str(snap / "M-Q4.gguf")}})
+    d, _ = make()
+    p = d.preview("org/mixed")
+    assert [x["name"] for x in p["deployments_blocking"]] == ["gg"]
+    assert sorted(x["name"] for x in p["deployments_affected"]) == ["draft-user", "old"]
+    with pytest.raises(DeleteError) as e:
+        d.delete("org/mixed")
+    assert e.value.code == "model_in_use" and (snap / "M-Q4.gguf").exists()
+
+
+def test_symlink_loop_is_unsafe_not_a_crash(settings, fake_hf_repo, make):
+    loop = groot(settings) / "loop.gguf"
+    loop.symlink_to(groot(settings) / "loop2.gguf")
+    (groot(settings) / "loop2.gguf").symlink_to(loop)
+    art = _fake_art(str(loop), complete=False)
+    d, _ = make(scanners=[lambda: [art]])
+    with pytest.raises(DeleteError) as e:
+        d.preview(str(loop))
+    assert e.value.code == "unsafe_path"
+    p = d.cleanup_preview()
+    assert p["items"][0]["eligible"] is False and p["items"][0]["skip_reason"] == "unsafe_path"
+    out = d.cleanup()
+    assert out["deleted"] == [] and out["skipped"][0]["code"] == "unsafe_path"
+
+
+def test_cleanup_keeps_going_and_audits_each_deletion_when_one_item_crashes(settings, db, fake_hf_repo, make,
+                                                                           monkeypatch):
+    from dgxmm.db import AuditLog
+    fake_hf_repo("org/a", config=QWEN_TINY, incomplete=True)
+    fake_hf_repo("org/b", config=QWEN_TINY, incomplete=True)
+    fake_hf_repo("org/c", config=QWEN_TINY, incomplete=True)
+    age_partials(settings)
+    d, _ = make()
+    orig = d.plan
+
+    def plan(ref):
+        if ref == "org/b":
+            raise RuntimeError("boom")
+        return orig(ref)
+    monkeypatch.setattr(d, "plan", plan)
+    out = d.cleanup(user_id=None)
+    assert sorted(x["ref"] for x in out["deleted"]) == ["org/a", "org/c"]
+    assert [x["ref"] for x in out["failed"]] == ["org/b"]
+    with db.session() as s:
+        rows = sorted(a.target for a in s.query(AuditLog).filter(AuditLog.action == "model_delete"))
+    assert rows == ["org/a", "org/c"]
+
+
+def test_refresh_failure_does_not_mask_result_or_error(settings, db, fake_hf_repo, make, monkeypatch):
+    from dgxmm.db import AuditLog
+    fake_hf_repo("Qwen/Qwen3-Tiny", config=QWEN_TINY)
+    fake_hf_repo("org/used", config=QWEN_TINY)
+    add_dep(db, "u", "org/used", "ready")
+    d, inv = make()
+    monkeypatch.setattr(inv, "refresh", lambda: (_ for _ in ()).throw(OSError("scan failed")))
+    assert d.delete("Qwen/Qwen3-Tiny")["freed_bytes"] > 0
+    with pytest.raises(DeleteError) as e:
+        d.delete("org/used")
+    assert e.value.code == "model_in_use"
+    with db.session() as s:
+        acts = sorted((a.action, a.target) for a in s.query(AuditLog))
+    assert ("model_delete", "Qwen/Qwen3-Tiny") in acts and ("model_delete_refused", "org/used") in acts
+
+
+def test_refusals_are_audited_with_reason(settings, db, tmp_path, make):
+    from dgxmm.db import AuditLog
+    (tmp_path / "victim.gguf").write_bytes(b"x")
+    ref = str(tmp_path / "victim.gguf")
+    d, _ = make(scanners=[lambda: [_fake_art(ref)]])
+    with pytest.raises(DeleteError):
+        d.delete(ref, user_id=None)
+    with db.session() as s:
+        [row] = s.query(AuditLog).filter(AuditLog.action == "model_delete_refused").all()
+        assert row.target == ref and row.detail["reason"] == "unsafe_path"
+
+
+def test_symlinked_repo_dir_inside_hub_frees_nothing_and_keeps_target(settings, fake_hf_repo, make):
+    fake_hf_repo("org/real", config=QWEN_TINY, files={"model.safetensors": 5000})
+    (hub(settings) / "models--org--alias").symlink_to(hub(settings) / "models--org--real", target_is_directory=True)
+    d, _ = make()
+    p = d.preview("org/alias")
+    assert p["bytes"] == 0
+    out = d.delete("org/alias")
+    assert out["freed_bytes"] == 0 and not os.path.lexists(hub(settings) / "models--org--alias")
+    assert (hub(settings) / "models--org--real").is_dir()
+
+
+def test_cleanup_skips_recently_written_partial_downloads(settings, fake_hf_repo, make):
+    fake_hf_repo("org/fresh", config=QWEN_TINY, incomplete=True)       # .incomplete just written
+    fake_hf_repo("org/stale", config=QWEN_TINY, incomplete=True)
+    t = time.time() - 3600
+    for b in (hub(settings) / "models--org--stale" / "blobs").glob("*.incomplete"):
+        os.utime(b, (t, t))
+    d, _ = make()
+    items = {i["ref"]: i for i in d.cleanup_preview()["items"]}
+    assert items["org/fresh"]["skip_reason"] == "recently_active" and not items["org/fresh"]["eligible"]
+    assert items["org/stale"]["eligible"]
+    out = d.cleanup()
+    assert [x["ref"] for x in out["deleted"]] == ["org/stale"]
+    assert out["skipped"] == [{"ref": "org/fresh", "code": "recently_active", "message": out["skipped"][0]["message"]}]
+    assert (hub(settings) / "models--org--fresh").is_dir()
+
+
+def test_being_deleted_guard_blocks_deploys_and_downloads(settings, db, fake_hf_repo, stack):
+    from dgxmm.deployer.service import DeployError
+    from dgxmm.downloads import DownloadError, DownloadService
+    sdk = stack.sdk
+    seen = {}
+    dls = DownloadService(settings, db, stack.inv, hub=None, events=stack.events)
+    d = WeightsDeleter(settings, db, stack.inv, docker=DockerController(sdk), deployer=stack.deployer, downloads=dls)
+
+    def act(call):
+        seen["deleting"] = set(d.deleting)
+        for fn in (lambda: stack.deployer.prepare("vllm", "Qwen/Qwen3-Tiny", {}),
+                   lambda: dls.start("Qwen/Qwen3-Tiny")):
+            try:
+                fn()
+            except (DeployError, DownloadError) as e:
+                seen.setdefault("codes", []).append((e.code, e.status))
+        simulate_rm(settings)(call)
+    sdk.helper_action = act
+    d.delete("Qwen/Qwen3-Tiny")
+    assert "Qwen/Qwen3-Tiny" in seen["deleting"]
+    assert seen["codes"] == [("model_being_deleted", 409), ("model_being_deleted", 409)]
+    assert d.deleting == set() and d.is_being_deleted("Qwen/Qwen3-Tiny") is False
+
+
+def test_being_deleted_matches_paths_inside_targets(settings, fake_hf_repo, make):
+    fake_hf_repo("org/mixed", config=QWEN_TINY)
+    d, _ = make()
+    target = (hub(settings) / "models--org--mixed").resolve()
+    d.deleting = {"org/mixed", str(target)}
+    assert d.is_being_deleted(str(target / "snapshots" / "x" / "M.gguf"))
+    assert d.is_being_deleted("org/mixed") and not d.is_being_deleted("org/other")
+
+
+def test_launch_rechecks_guard_after_row_is_created(stack):
+    from dgxmm.deployer.service import DeployError
+    calls = []
+
+    def guard(ref):
+        calls.append(ref)
+        return len(calls) > 1          # free during prepare, deleting by launch time
+    stack.deployer.delete_guard = guard
+    from dgxmm.deployer.service import DeployRequest
+    import asyncio
+    with pytest.raises(DeployError) as e:
+        asyncio.run(stack.deployer.deploy(DeployRequest(name="t", engine="vllm", model_ref="Qwen/Qwen3-Tiny",
+                                                        config={"max_model_len": 4096}), None))
+    assert e.value.code == "model_being_deleted" and e.value.status == 409
+    assert stack.sdk.run_calls == []
+
+
+def test_helper_missing_image_falls_back_without_pull(settings, fake_hf_repo, make):
+    fake_hf_repo("Qwen/Qwen3-Tiny", config=QWEN_TINY)
+    sdk = FakeDockerClient()
+    sdk.missing_images = {"dgxmm:latest"}
+    d, _ = make(sdk)
+    out = d.delete("Qwen/Qwen3-Tiny")
+    assert out["method"] == "in_process" and sdk.helper_runs == []
+
+
+def test_self_image_prefers_container_id_from_proc(tmp_path):
+    sdk = FakeDockerClient()
+    me = sdk.add_unmanaged("whatever-name", image="dgxmm:from-id")
+    sdk.add_unmanaged(socket.gethostname(), image="dgxmm:from-hostname")
+    mi = tmp_path / "mountinfo"
+    mi.write_text(f"123 45 0:1 /var/lib/docker/containers/{me.id}/hostname /etc/hostname rw - ext4 /dev/x rw\n")
+    d = DockerController(sdk)
+    assert d.self_image(mountinfo=str(mi), cgroup=str(tmp_path / "nope")) == "dgxmm:from-id"
+    cg = tmp_path / "cgroup"
+    cg.write_text(f"0::/system.slice/docker-{me.id}.scope\n")
+    assert d.self_image(mountinfo=str(tmp_path / "nope"), cgroup=str(cg)) == "dgxmm:from-id"
+    assert d.self_image(mountinfo=str(tmp_path / "nope"), cgroup=str(tmp_path / "nope")) == "dgxmm:from-hostname"
