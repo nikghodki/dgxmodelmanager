@@ -1,13 +1,20 @@
 """The only module that talks to the Docker daemon. Writes are limited to dgxmm-managed containers."""
 from __future__ import annotations
 
+import logging
+import threading
+import time
 from dataclasses import dataclass, field
+from typing import Callable
 
 import docker
 import docker.errors
 from docker.types import DeviceRequest
 
 from dgxmm.engines.base import MANAGED_LABEL, ContainerSpec
+
+log = logging.getLogger(__name__)
+CONTAINER_CACHE_TTL_S = 30.0
 
 
 @dataclass
@@ -52,9 +59,56 @@ def _info(c) -> ContainerInfo:
     )
 
 
+class ContainerDirectory:
+    """Read-only container id → {id, name, image, deployment_id}, from one sparse `docker ps` at most every `ttl`
+    seconds (a miss may refresh early, but not more often than every `miss_refresh_s`). Never modifies containers."""
+
+    def __init__(self, client, ttl: float = CONTAINER_CACHE_TTL_S, miss_refresh_s: float = 5.0,
+                 clock: Callable[[], float] = time.monotonic):
+        self.client, self.ttl, self.miss_refresh_s, self.clock = client, ttl, miss_refresh_s, clock
+        self._by_id: dict[str, dict] = {}
+        self._at: float | None = None
+        self._lock = threading.Lock()
+
+    def _refresh(self, now: float) -> None:
+        self._at = now  # also on failure: a down daemon is retried at the normal pace
+        try:
+            items = self.client.containers.list(all=False, sparse=True)
+        except Exception as e:  # docker.errors.APIError, connection errors
+            log.debug("container listing failed: %s", e)
+            return
+        by_id: dict[str, dict] = {}
+        for c in items:
+            a = getattr(c, "attrs", None) or {}
+            cfg = a.get("Config") or {}
+            name = getattr(c, "name", None) or next(iter(a.get("Names") or []), None)
+            labels = cfg.get("Labels") or a.get("Labels") or {}
+            dep = labels.get("dgxmm.deployment_id") if labels.get(MANAGED_LABEL) == "true" else None
+            by_id[c.id] = {"id": c.id[:12], "name": name.lstrip("/") if name else None,
+                           "image": cfg.get("Image") or a.get("Image") or None,
+                           "deployment_id": int(dep) if dep and str(dep).isdigit() else None}
+        self._by_id = by_id
+
+    def lookup(self, cid: str | None) -> dict | None:
+        if not cid:
+            return None
+        with self._lock:
+            now = self.clock()
+            age = None if self._at is None else now - self._at
+            if age is None or age >= self.ttl or (cid not in self._by_id and age >= self.miss_refresh_s):
+                self._refresh(now)
+            found = self._by_id.get(cid)
+            return dict(found) if found else None
+
+
 class DockerController:
     def __init__(self, client):
         self.client = client
+        self.directory = ContainerDirectory(client)
+
+    def lookup(self, cid: str | None) -> dict | None:
+        """Cached, read-only name/image lookup by full container id (for the processes view)."""
+        return self.directory.lookup(cid)
 
     @classmethod
     def from_env(cls) -> "DockerController":
