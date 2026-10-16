@@ -43,8 +43,9 @@ async def test_refuses_when_not_enough_memory(stack):
 
 async def test_concurrent_deploys_cannot_both_claim_memory(stack):
     # free_for_new = 121 - 12 - 21 external = 88 GiB; each big deploy needs ~50 GiB
-    results = await asyncio.gather(stack.deployer.deploy(req("a", "org/big-model"), 1),
-                                   stack.deployer.deploy(req("b", "org/big-model"), 1), return_exceptions=True)
+    results = await asyncio.gather(stack.deployer.deploy(req("a", "org/big-model").model_copy(update={"alias": "a"}), 1),
+                                   stack.deployer.deploy(req("b", "org/big-model").model_copy(update={"alias": "b"}), 1),
+                                   return_exceptions=True)
     assert sum(isinstance(r, InsufficientMemory) for r in results) == 1
     assert len(stack.sdk.run_calls) == 1
 
@@ -103,7 +104,7 @@ async def test_input_validation(stack):
 
 async def test_name_in_use_and_port_allocation(stack):
     a = await stack.deployer.deploy(req("a"), 1)
-    b = await stack.deployer.deploy(req("b"), 1)
+    b = await stack.deployer.deploy(req("b").model_copy(update={"alias": "b"}), 1)  # distinct LiteLLM model names (same model twice)
     assert (a["port"], b["port"]) == (8100, 8101)
     with pytest.raises(DeployError) as e:
         await stack.deployer.deploy(req("a"), 1)
