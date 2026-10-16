@@ -8,7 +8,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, RedirectResponse
 
 from dgxmm.api import auth as auth_api, users as users_api, host as host_api, inventory as inventory_api
 from dgxmm.api import engines as engines_api, deployments as deployments_api, stream as stream_api
@@ -44,8 +44,20 @@ def create_app(ctx: AppContext) -> FastAPI:
     bp = ctx.settings.base_path
     for module in ROUTERS:
         app.include_router(module.router, prefix=bp)
+    if bp:
+        _mount_root_redirect(app, bp)
     _mount_static(app, Path(ctx.settings.static_dir), bp)
     return app
+
+
+def _mount_root_redirect(app: FastAPI, bp: str) -> None:
+    """Send `/` and `<bp>` to `<bp>/` so http://host:8090/ opens the UI (relative Location: proxy-safe)."""
+
+    def to_ui():
+        return RedirectResponse(bp + "/", status_code=307)
+
+    app.add_api_route("/", to_ui, methods=["GET", "HEAD"], include_in_schema=False)
+    app.add_api_route(bp, to_ui, methods=["GET", "HEAD"], include_in_schema=False)
 
 
 def _mount_static(app: FastAPI, static: Path, bp: str) -> None:

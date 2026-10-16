@@ -1,19 +1,81 @@
-# DGXMM configuration. Copy to config.yaml next to docker-compose.yaml.
-safety_margin_gib: 8        # memory DGXMM never allocates
-os_reserve_gib: 4           # kept back for the OS and desktop
-port_range: [8100, 8199]    # engine container ports
-publish_bind: 127.0.0.1     # host interface engine ports are published on
-startup_timeout_s: 900
-auto_protect: false         # true = watchdog stops lowest-priority deployment when critical
-docker_network: gateway
-litellm_url: http://litellm-proxy:4000
+# DGXMM configuration (YAML).
+#
+# ./install.sh renders this file into config.yaml on first install, filling in the host paths it
+# detected; an existing config.yaml is never overwritten. To configure by hand instead:
+#   cp config.example.yaml config.yaml
+# Every key is optional; anything left out uses the default shown here. Any key can also be set
+# with an environment variable DGXMM_<KEY_IN_UPPER_CASE> (value parsed as YAML), which wins over
+# this file. After editing, apply with: docker compose up -d   (or ./install.sh)
+#
+# Host paths: "~" means the home directory of the host user DGXMM runs as (DGXMM_HOST_HOME in
+# .env), NOT the home directory inside the container.
+
+# --- Memory gate --------------------------------------------------------------------------
+safety_margin_gib: 8          # memory DGXMM never hands out to models (GiB)
+os_reserve_gib: 4             # kept back for the OS, desktop and other processes (GiB)
+auto_protect: false           # true = when memory turns critical the watchdog stops the
+                              # lowest-priority deployment by itself (otherwise it only warns)
+# Per-engine fixed overheads added to every estimate (GiB); tune only if estimates are off.
+# vllm_runtime_fixed_gib: 3.0
+# vllm_cuda_graph_gib: 1.5
+# llamacpp_runtime_fixed_gib: 0.5
+
+# --- Engine containers --------------------------------------------------------------------
 images:
-  vllm: vllm/vllm-openai:pinned-2026-08-27
-  llamacpp: ghcr.io/ggml-org/llama.cpp:server-cuda
+  vllm: vllm/vllm-openai:pinned-2026-08-27        # image for vLLM deployments
+  llamacpp: ghcr.io/ggml-org/llama.cpp:server-cuda  # image for llama.cpp (GGUF) deployments
+docker_network: dgxmm         # docker network engines join; must equal DGXMM_NETWORK in .env
+port_range: [8100, 8199]      # host ports handed to engine containers (1024-65535, ascending)
+publish_bind: 127.0.0.1       # host interface engine ports are published on (keep loopback;
+                              # clients should go through LiteLLM or the DGXMM network)
+# engine_base_host: null      # null = DGXMM reaches engines by container name on docker_network;
+                              # set a hostname/IP to reach them via published ports instead
+startup_timeout_s: 900        # seconds an engine may take to become ready before it is failed
+
+# Hugging Face cache: `host` is the path on the host (mounted into engine containers),
+# `local` is the same directory inside the dgxmm container (see docker-compose.yaml volumes).
 hf_cache:
-  host: /home/nikghodki-dgx/.cache/huggingface
+  host: ~/.cache/huggingface
   local: /data/hf
+
+# Directories scanned for GGUF files (llama.cpp). Each extra root also needs a volume in
+# docker-compose.yaml mapping `host` to `local`.
 gguf_roots:
-  - host: /home/nikghodki-dgx/models
+  - host: ~/models
     local: /data/gguf/0
-min_free_disk_gib: 50
+
+# Host directories mounted into vLLM containers so compiled kernels survive restarts.
+vllm_cache_mounts:
+  - host: ~/.cache/vllm
+    target: /root/.cache/vllm
+  - host: ~/.cache/flashinfer
+    target: /root/.cache/flashinfer
+  - host: ~/.triton
+    target: /root/.triton
+
+min_free_disk_gib: 50         # downloads are refused when the HF cache disk would drop below this
+
+# --- LiteLLM (optional) -------------------------------------------------------------------
+# Running deployments are registered as models in LiteLLM (needs store_model_in_db: true).
+# Registration is disabled when the master key file is empty or missing.
+litellm_url: http://litellm-proxy:4000
+# litellm_key_file: /run/secrets/litellm_master_key   # docker secret from secrets/litellm_master_key
+# hf_token_file: /run/secrets/hf_token                 # docker secret from secrets/hf_token (gated repos)
+
+# --- Web UI / sessions --------------------------------------------------------------------
+# base_path: /dgxmm           # URL prefix; the frontend is built for /dgxmm, so leave as is
+# session_ttl_s: 43200        # login session lifetime (seconds)
+# secure_cookies: auto        # auto (Secure when the request is HTTPS) | always | never
+
+# --- Polling intervals (seconds) ----------------------------------------------------------
+# monitor_poll_s: 3           # deployment state checks while starting/stopping
+# budget_interval_s: 2        # memory budget refresh (drives the live UI and the watchdog)
+# scrape_interval_s: 5        # engine Prometheus metrics scrape
+# inventory_interval_s: 300   # rescan of the HF cache and GGUF roots
+
+# --- Paths inside the container (set by the image; rarely changed) ------------------------
+# data_dir: /app/data         # SQLite database lives here (./data on the host)
+# static_dir: /app/static     # built frontend
+# host_proc: /host/proc       # host /proc (read-only mount)
+# host_cgroup: /host/sys/fs/cgroup
+# llmfit_bin: llmfit          # llmfit CLI used for catalog fit scores

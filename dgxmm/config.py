@@ -5,21 +5,64 @@ import os
 from pathlib import Path
 
 import yaml
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 GIB = 1024**3
-_HOME = "/home/nikghodki-dgx"
+
+
+def host_home() -> str:
+    """Home directory of the host user DGXMM runs as.
+
+    Inside the container this comes from DGXMM_HOST_HOME (set by docker-compose from .env);
+    when running directly on the host it falls back to the current user's home.
+    """
+    return os.environ.get("DGXMM_HOST_HOME") or str(Path.home())
+
+
+def _expand_host(path: str) -> str:
+    """Expand a leading ``~`` against the *host* home (not the container's)."""
+    if path == "~":
+        return host_home()
+    if path.startswith("~/"):
+        return host_home().rstrip("/") + path[1:]
+    return path
 
 
 class PathMapping(BaseModel):
     host: str   # path on the DGX host (what engine containers mount)
     local: str  # the same directory as seen inside the dgxmm container
 
+    @field_validator("host")
+    @classmethod
+    def _expand(cls, v: str) -> str:
+        return _expand_host(v)
+
 
 class Mount(BaseModel):
     host: str
     target: str
     mode: str = "rw"
+
+    @field_validator("host")
+    @classmethod
+    def _expand(cls, v: str) -> str:
+        return _expand_host(v)
+
+
+def _default_hf_cache() -> PathMapping:
+    return PathMapping(host="~/.cache/huggingface", local="/data/hf")
+
+
+def _default_gguf_roots() -> list[PathMapping]:
+    return [PathMapping(host="~/models", local="/data/gguf/0")]
+
+
+def _default_vllm_cache_mounts() -> list[Mount]:
+    return [
+        Mount(host="~/.cache/vllm", target="/root/.cache/vllm"),
+        Mount(host="~/.cache/flashinfer", target="/root/.cache/flashinfer"),
+        Mount(host="~/.triton", target="/root/.triton"),
+    ]
 
 
 class Images(BaseModel):
@@ -33,15 +76,11 @@ class Settings(BaseModel):
     static_dir: str = "/app/static"
     host_proc: str = "/host/proc"
     host_cgroup: str = "/host/sys/fs/cgroup"
-    hf_cache: PathMapping = PathMapping(host=f"{_HOME}/.cache/huggingface", local="/data/hf")
-    gguf_roots: list[PathMapping] = [PathMapping(host=f"{_HOME}/models", local="/data/gguf/0")]
-    vllm_cache_mounts: list[Mount] = [
-        Mount(host=f"{_HOME}/.cache/vllm", target="/root/.cache/vllm"),
-        Mount(host=f"{_HOME}/.cache/flashinfer", target="/root/.cache/flashinfer"),
-        Mount(host=f"{_HOME}/.triton", target="/root/.triton"),
-    ]
+    hf_cache: PathMapping = Field(default_factory=_default_hf_cache)
+    gguf_roots: list[PathMapping] = Field(default_factory=_default_gguf_roots)
+    vllm_cache_mounts: list[Mount] = Field(default_factory=_default_vllm_cache_mounts)
     images: Images = Images()
-    docker_network: str = "gateway"
+    docker_network: str = "dgxmm"  # must match DGXMM_NETWORK in .env
     engine_base_host: str | None = None  # None → reach engines by container name
     port_range: tuple[int, int] = (8100, 8199)
     publish_bind: str = "127.0.0.1"
