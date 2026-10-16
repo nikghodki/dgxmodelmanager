@@ -2,18 +2,19 @@ import { useMemo, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 import type { ColumnDef } from "@tanstack/react-table";
-import { AlertTriangle, CheckCircle2, HardDrive, RefreshCw, Rocket } from "lucide-react";
+import { AlertTriangle, CheckCircle2, Eraser, HardDrive, RefreshCw, Rocket, Trash2 } from "lucide-react";
 import { api } from "@/api";
 import { useIsAdmin } from "@/auth";
 import { DataTable } from "@/components/app/data-table";
 import { PageHeader } from "@/components/app/page-header";
 import { EmptyState, ErrorState } from "@/components/app/states";
+import { CleanupIncompleteDialog, DeleteWeightsDialog, modelShortName } from "@/components/app/weights-dialogs";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { fmtBytes, shortRef } from "@/format";
 import { useActionMutation } from "@/hooks/use-action-mutation";
 import { cn } from "@/lib/utils";
-import type { Artifact } from "@/types";
+import type { Artifact, CleanupPreview } from "@/types";
 
 const KINDS = [{ key: "all", label: "All" }, { key: "llm", label: "LLM" }, { key: "draft", label: "Draft" }, { key: "other", label: "Other" }];
 
@@ -26,6 +27,15 @@ export function Models() {
     success: (d) => `Rescanned: ${d.length} models`, onSuccess: (d) => qc.setQueryData(["inventory"], d),
   });
   const all = inv.data ?? [];
+  const incomplete = all.filter((a) => !a.complete).length;
+  const cleanup = useQuery({
+    queryKey: ["inventory", "cleanup-preview"], queryFn: () => api<CleanupPreview>("/inventory/cleanup-incomplete/preview"),
+    enabled: admin && incomplete > 0,
+  });
+  const [target, setTarget] = useState<{ artifact: Artifact; mode: "delete" | "cleanup" } | null>(null);
+  const [bulk, setBulk] = useState(false);
+  const cleanupItems = admin && incomplete > 0 ? cleanup.data?.items ?? [] : [];
+  const cleanupBytes = cleanupItems.reduce((s, i) => s + i.bytes, 0);
   const rows = kind === "all" ? all : all.filter((a) => a.kind === kind);
   const total = all.reduce((s, a) => s + a.size_bytes, 0);
   const columns = useMemo<ColumnDef<Artifact, any>[]>(() => [
@@ -49,7 +59,10 @@ export function Models() {
   return (
     <div className="space-y-4">
       <PageHeader title="Models on disk" description={`${all.length} models · ${fmtBytes(total)} in the Hugging Face cache and GGUF folders`}
-        actions={admin && <Button variant="outline" size="sm" disabled={refresh.isPending} onClick={() => refresh.mutate(undefined)}><RefreshCw className={cn("mr-1 h-4 w-4", refresh.isPending && "animate-spin")} />Rescan</Button>} />
+        actions={admin && <>
+          {cleanupItems.length > 0 && <Button variant="outline" size="sm" onClick={() => setBulk(true)}><Eraser className="mr-1 h-4 w-4" aria-hidden />Clean up incomplete ({cleanupItems.length} · {fmtBytes(cleanupBytes)})</Button>}
+          <Button variant="outline" size="sm" disabled={refresh.isPending} onClick={() => refresh.mutate(undefined)}><RefreshCw className={cn("mr-1 h-4 w-4", refresh.isPending && "animate-spin")} />Rescan</Button>
+        </>} />
       <ErrorState error={inv.error} onRetry={() => inv.refetch()} />
       <DataTable columns={columns} data={rows} loading={inv.isLoading} getRowId={(a) => a.ref}
         searchPlaceholder="Search models" searchText={(a) => `${a.ref} ${a.architecture ?? ""} ${a.quant ?? ""}`}
@@ -57,9 +70,17 @@ export function Models() {
           <button key={k.key} role="tab" aria-selected={kind === k.key} onClick={() => setKind(k.key)}
             className={cn("h-8 rounded-full border px-3 text-xs font-medium", kind === k.key ? "border-primary bg-primary text-primary-foreground" : "bg-card text-muted-foreground hover:text-foreground")}>{k.label}</button>))}</div>}
         renderDetail={(a) => a.problems.length ? <ul className="space-y-1 text-xs text-status-warning">{a.problems.map((p) => <li key={p}>• {p}</li>)}</ul> : null}
-        rowActions={(a) => admin && a.complete && a.kind === "llm" && a.engines.length > 0
-          ? <Button asChild size="sm" variant="outline"><Link to={`/deploy?model=${encodeURIComponent(a.ref)}`}><Rocket className="mr-1 h-3.5 w-3.5" />Deploy</Link></Button> : null}
+        rowActions={(a) => admin ? (
+          <div className="flex items-center justify-end gap-1">
+            {a.complete ? <>
+              {a.kind === "llm" && a.engines.length > 0 && <Button asChild size="sm" variant="outline"><Link to={`/deploy?model=${encodeURIComponent(a.ref)}`}><Rocket className="mr-1 h-3.5 w-3.5" />Deploy</Link></Button>}
+              <Button size="sm" variant="ghost" aria-label={`Delete ${modelShortName(a.ref)}`} title="Delete weights…" onClick={() => setTarget({ artifact: a, mode: "delete" })}>
+                <Trash2 className="h-3.5 w-3.5" aria-hidden /><span className="ml-1 hidden lg:inline">Delete…</span></Button>
+            </> : <Button size="sm" variant="outline" onClick={() => setTarget({ artifact: a, mode: "cleanup" })}><Eraser className="mr-1 h-3.5 w-3.5" aria-hidden />Clean up</Button>}
+          </div>) : null}
         empty={<EmptyState icon={HardDrive} title="No models found" description="Download one from the Catalog." action={<Button asChild size="sm" variant="outline"><Link to="/catalog">Open catalog</Link></Button>} />} />
+      {admin && <DeleteWeightsDialog artifact={target?.artifact ?? null} mode={target?.mode ?? "delete"} onClose={() => setTarget(null)} />}
+      {admin && <CleanupIncompleteDialog open={bulk} onOpenChange={setBulk} preview={cleanup.data} />}
     </div>
   );
 }
