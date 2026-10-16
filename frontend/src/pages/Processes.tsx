@@ -150,7 +150,7 @@ export function Processes() {
           <>
             {q.data && <span className="text-xs text-muted-foreground tabular-nums">{q.data.total} processes · scanned in {Math.round(q.data.duration_ms)} ms</span>}
             <span className="text-xs text-muted-foreground" aria-live="polite">{paused ? "Auto-refresh paused" : `Refreshing every ${REFRESH_MS / 1000} s`}</span>
-            <Button size="sm" variant={paused ? "secondary" : "outline"} aria-pressed={paused} aria-label="Pause auto-refresh" onClick={() => setPaused(!paused)}>
+            <Button size="sm" variant={paused ? "secondary" : "outline"} onClick={() => setPaused(!paused)}>
               {paused ? <Play className="mr-1 h-4 w-4" aria-hidden /> : <Pause className="mr-1 h-4 w-4" aria-hidden />}{paused ? "Resume" : "Pause"}
             </Button>
           </>

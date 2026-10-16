@@ -80,18 +80,19 @@ describe("Processes", () => {
     expect(screen.getByText("litellm --config /app/config.yaml --port 4000")).toBeInTheDocument();
   });
 
-  it("auto-refresh can be paused (fixed name, state in aria-pressed and in text)", async () => {
+  it("auto-refresh can be paused; the button's name is its visible label", async () => {
     renderPage();
     await screen.findByText("dgxmm-qwen");
-    const btn = screen.getByRole("button", { name: "Pause auto-refresh" });
-    expect(btn).toHaveAttribute("aria-pressed", "false");
-    expect(btn).toHaveTextContent("Pause");
+    const btn = screen.getByRole("button", { name: "Pause" });
+    expect(btn).not.toHaveAttribute("aria-pressed");
+    expect(btn).not.toHaveAttribute("aria-label");
     expect(screen.getByText("Refreshing every 5 s")).toBeInTheDocument();
     fireEvent.click(btn);
-    expect(screen.getByRole("button", { name: "Pause auto-refresh" })).toHaveAttribute("aria-pressed", "true");
-    expect(screen.getByRole("button", { name: "Pause auto-refresh" })).toHaveTextContent("Resume");
-    expect(btn).toHaveTextContent("Resume");
+    expect(screen.getByRole("button", { name: "Resume" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Pause" })).toBeNull();
     expect(screen.getByText("Auto-refresh paused")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Resume" }));
+    expect(screen.getByRole("button", { name: "Pause" })).toBeInTheDocument();
   });
 
   it("scope radio group uses roving tabindex and arrow keys", async () => {
