@@ -562,3 +562,29 @@ def test_trusted_proxies_hint_not_shown_for_lan_bind(box):
     p = box.run("--dry-run", DGXMM_BIND="0.0.0.0")
     assert p.returncode == 0, p.out
     assert "Behind a reverse proxy?" not in p.out
+
+
+def test_trusted_proxies_from_existing_env_file_suppresses_hint(box):
+    """A value saved in .env counts as set: no hint, and compose receives it."""
+    (box.repo / ".env").write_text("DGXMM_BIND=127.0.0.1\nDGXMM_TRUSTED_PROXIES=172.99.0.1\n")
+    p = box.run("--dry-run", FAKE_NETWORK="exists")
+    assert p.returncode == 0, p.out
+    assert "Behind a reverse proxy?" not in p.out
+    assert "DGXMM_TRUSTED_PROXIES=" not in p.out  # already present, nothing appended
+
+
+def test_trusted_proxies_env_appended_when_missing_from_env_file(box):
+    """Env value is appended to an existing .env that lacks the key (same rule as other keys)."""
+    (box.repo / ".env").write_text("DGXMM_BIND=127.0.0.1\n")
+    p = box.run("--dry-run", DGXMM_TRUSTED_PROXIES="10.0.0.1", FAKE_NETWORK="exists")
+    assert p.returncode == 0, p.out
+    assert "| DGXMM_TRUSTED_PROXIES=10.0.0.1" in p.out
+    assert "Behind a reverse proxy?" not in p.out
+
+
+def test_trusted_proxies_existing_env_file_wins_over_environment(box):
+    """Like DGXMM_PORT: an existing .env value is kept, with a warning, over a different env value."""
+    (box.repo / ".env").write_text("DGXMM_TRUSTED_PROXIES=172.99.0.1\n")
+    p = box.run("--dry-run", DGXMM_TRUSTED_PROXIES="10.0.0.1")
+    assert p.returncode == 0, p.out
+    assert "keeping .env" in p.out
