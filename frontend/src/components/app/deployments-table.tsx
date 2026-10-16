@@ -60,9 +60,11 @@ export function DeploymentsTable({ deployments, isAdmin, loading, searchable, on
       return (
         <span className="flex flex-col items-start gap-1">
           {name && <span title={name} className="block max-w-[22ch] truncate font-mono text-xs">{name}</span>}
-          {row.original.litellm_status === "error" ? (
-            <Tooltip><TooltipTrigger asChild><span tabIndex={0} className="rounded-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"><StatusBadge state="error" /></span></TooltipTrigger>
-              <TooltipContent className="max-w-xs break-words">LiteLLM registration failed, usually because another deployment uses the same model name. Open the deployment's LiteLLM tab for the reason.</TooltipContent></Tooltip>
+          {row.original.litellm_error || row.original.litellm_status === "error" ? (
+            <Tooltip><TooltipTrigger asChild><span tabIndex={0} className="rounded-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"><StatusBadge state={row.original.litellm_status} /></span></TooltipTrigger>
+              <TooltipContent className="max-w-xs break-words">{row.original.litellm_error
+                ? `LiteLLM: ${row.original.litellm_error.message}`
+                : "LiteLLM registration failed, usually because another deployment uses the same model name. Open the deployment's LiteLLM tab for the reason."}</TooltipContent></Tooltip>
           ) : <StatusBadge state={row.original.litellm_status} />}
         </span>
       );

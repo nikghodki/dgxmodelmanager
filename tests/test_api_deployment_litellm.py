@@ -258,3 +258,52 @@ def test_name_conflict_backstop(lite):
 def test_alias_pattern_accepts(lite, alias):
     a = deploy(lite, lite.h, "a")
     assert lite.patch(f"{DEP}/{a['id']}", headers=lite.h, json={"alias": alias}).status_code == 200
+
+
+# ---------- per-deployment litellm_error in the deployment views ----------
+
+def by_id(c, dep_id):
+    return next(d for d in c.get(DEP).json() if d["id"] == dep_id)
+
+
+def test_list_has_litellm_error_for_name_conflict(lite):
+    from dgxmm.db import Deployment
+    a = deploy(lite, lite.h, "a", alias="chat")
+    b = deploy(lite, lite.h, "b", alias="chat-b")
+    assert wait(lite, a["id"], "ready") and wait(lite, b["id"], "ready")
+    lite.post(BASE + "/sync", headers=lite.h)
+    assert by_id(lite, a["id"])["litellm_error"] is None and by_id(lite, b["id"])["litellm_error"] is None
+    with lite.ctx.db.session() as s:
+        s.get(Deployment, b["id"]).alias = "chat"  # bypass validation
+    lite.post(BASE + "/sync", headers=lite.h)
+    err = by_id(lite, b["id"])["litellm_error"]
+    assert err["code"] == "model_name_conflict" and "deployment a" in err["message"]
+    assert by_id(lite, a["id"])["litellm_error"] is None
+    assert lite.get(f"{DEP}/{b['id']}").json()["litellm_error"] == err  # detail view and SSE payloads too
+
+
+def test_list_has_litellm_error_for_failed_sync_on_ready_deployments_only(lite):
+    a = deploy(lite, lite.h, "a", alias="chat")
+    b = deploy(lite, lite.h, "b", alias="other")
+    assert wait(lite, a["id"], "ready") and wait(lite, b["id"], "ready")
+    lite.post(f"{DEP}/{b['id']}/stop", headers=lite.h)
+    assert wait(lite, b["id"], "stopped")
+    lite.fake.down = True
+    lite.post(BASE + "/sync", headers=lite.h)
+    err = by_id(lite, a["id"])["litellm_error"]
+    assert err["code"] == "litellm_unreachable" and err["message"]
+    assert by_id(lite, b["id"])["litellm_error"] is None  # not registered anyway: no noise
+    lite.fake.down = False
+    lite.post(BASE + "/sync", headers=lite.h)
+    assert by_id(lite, a["id"])["litellm_error"] is None
+
+
+def test_litellm_error_never_contains_master_key(lite):
+    a = deploy(lite, lite.h, "a", alias="chat")
+    assert wait(lite, a["id"], "ready")
+    lite.fake.master_key = "sk-rotated-elsewhere"  # LiteLLM now rejects DGXMM's key
+    lite.post(BASE + "/sync", headers=lite.h)
+    r = lite.get(DEP)
+    err = by_id(lite, a["id"])["litellm_error"]
+    assert err["code"] == "litellm_auth_failed"
+    assert MASTER not in r.text

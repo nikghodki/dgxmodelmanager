@@ -80,6 +80,8 @@ class Deployer:
         self.state_hooks: list[StateHook] = []
         self.calibration = None  # set in Task 32
         self.delete_guard: Callable[[str], bool] | None = None  # WeightsDeleter.is_being_deleted
+        # LiteLLMSync.error_for: why a deployment is not (correctly) registered in LiteLLM, as of the last sync
+        self.litellm_error: Callable[[int, str], dict | None] | None = None
         # dep_id -> model refs while a container is being (re)launched; until it reaches "starting" the DB row may
         # still be planned/stopped/failed, so the weights deleter treats these as blocking.
         self.launching: dict[int, tuple[str, ...]] = {}
@@ -515,6 +517,7 @@ class Deployer:
             "litellm_status": d.litellm_status, "last_error": d.last_error, "exit_code": d.exit_code,
             "container_id": d.container_id, "served_name": served, "adopted_from": d.adopted_from,
             "model_name": d.alias or served,  # what clients pass as "model" to the single LiteLLM endpoint
+            "litellm_error": self.litellm_error(d.id, d.state) if self.litellm_error is not None else None,
             "endpoint": f"http://{container_name(d.name)}:{d.port}/v1" if d.port else None,
             "host_endpoint": f"http://{self.settings.publish_bind}:{d.port}/v1" if d.port and self.settings.publish_bind else None,
             "sleep_capable": bool(engine and engine.supports_sleep and d.config.get("enable_sleep_mode")),

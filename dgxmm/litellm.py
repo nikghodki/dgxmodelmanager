@@ -338,6 +338,8 @@ class LiteLLMSync:
                                      "code": None, "at": None}
         self.conflicts: dict[int, str] = {}       # deployment id -> why it is not registered (name clash)
         self.registrations: dict[int, str] = {}   # deployment id -> model name, as of the last successful sync
+        if deployer is not None:
+            deployer.litellm_error = self.error_for  # deployment views carry the reason (list, detail, SSE)
 
     def active(self) -> bool:
         return self.client is not None and self.client.config().active
@@ -429,6 +431,18 @@ class LiteLLMSync:
         self.last = {"ok": True, "status": "synced", "registered": added, "removed": removed, "error": None,
                      "code": None, "at": _now()}
         return True
+
+    def error_for(self, dep_id: int, state: str) -> dict | None:
+        """``{code, message}`` when a ready deployment is not registered as it should be, as of the last sync: a
+        model-name clash, or the sync itself failing (messages are already scrubbed of keys). None otherwise;
+        non-ready deployments are not registered anyway, so a failing sync is not their problem."""
+        if state != "ready":
+            return None
+        if dep_id in self.conflicts:
+            return {"code": "model_name_conflict", "message": self.conflicts[dep_id]}
+        if self.last["ok"] is False:
+            return {"code": self.last["code"] or "litellm_error", "message": self.last["error"]}
+        return None
 
     def is_registered(self, dep_id: int, model_name: str) -> bool | None:
         """As of the last sync (no LiteLLM call); None (unknown) unless that sync succeeded."""
