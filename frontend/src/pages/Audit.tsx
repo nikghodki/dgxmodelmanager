@@ -14,9 +14,7 @@ import { fmtRelative } from "@/format";
 
 const ALL = "__all__";
 
-export function Audit() {
-  const admin = useIsAdmin();
-  if (!admin) return <Navigate to="/" replace />;
+function AuditPage() {
   const q = useQuery({ queryKey: ["audit"], queryFn: () => api<any[]>("/audit?limit=500"), refetchInterval: 15000 });
   const [action, setAction] = useState(ALL);
   const rows = q.data ?? [];
@@ -41,4 +39,8 @@ export function Audit() {
         renderDetail={(r) => Object.keys(r.detail ?? {}).length ? <pre className="overflow-x-auto whitespace-pre-wrap break-all font-mono text-xs">{JSON.stringify(r.detail, null, 2)}</pre> : null} />
     </div>
   );
+}
+
+export function Audit() {
+  return useIsAdmin() ? <AuditPage /> : <Navigate to="/" replace />;
 }
