@@ -50,6 +50,7 @@ def test_sample_attributes_gpu_and_anon_to_managed_container(settings):
     probe = HostProbe(settings, FakeGpu({100: 30 * 2**30, 200: 20 * 2**30}))
     s = probe.sample({CID})
     assert s.managed[CID] == 1_000_000 + 50_000 + 30 * 2**30
+    assert s.managed_gpu[CID] == 30 * 2**30  # the NVML part, so callers can separate host memory
     assert [p.pid for p in s.external_top] == [200]
     assert s.external_top[0].gpu == 20 * 2**30 and s.external_top[0].rss == 1_000_000 * 1024
     assert s.gpu == {"util": 50}

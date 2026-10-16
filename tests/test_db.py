@@ -27,3 +27,25 @@ def test_unique_username_and_rollback(db):
             s.add(User(username="a", pw_hash="y", role="viewer"))
     with db.session() as s:
         assert len(s.scalars(select(User)).all()) == 1
+
+
+def test_add_missing_columns_upgrades_old_schema_idempotently(tmp_path):
+    """No migration framework: new nullable columns are added to existing SQLite tables at startup."""
+    import sqlite3
+
+    from dgxmm.db import Database, MemoryCalibration
+    path = tmp_path / "old.sqlite3"
+    con = sqlite3.connect(path)
+    con.execute("CREATE TABLE memory_calibration (id INTEGER PRIMARY KEY, engine VARCHAR(16), repo VARCHAR(512), "
+                "config_hash VARCHAR(32), estimated_bytes BIGINT, measured_bytes BIGINT, oom BOOLEAN, ts DATETIME)")
+    con.execute("INSERT INTO memory_calibration VALUES (1, \"vllm\", \"r\", \"h\", 10, 4, 0, \"2026-10-01 00:00:00\")")
+    con.commit()
+    con.close()
+    for _ in range(2):  # second open is a no-op
+        db = Database(f"sqlite:///{path}")
+        with db.session() as s:
+            row = s.get(MemoryCalibration, 1)
+            assert row.measured_bytes == 4 and row.method is None and row.quality is None and row.detail is None
+        db.engine.dispose()
+    cols = {r[1] for r in sqlite3.connect(path).execute("PRAGMA table_info(memory_calibration)")}
+    assert {"method", "quality", "detail"} <= cols
