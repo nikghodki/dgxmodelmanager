@@ -28,7 +28,11 @@ const FitBadge = ({ badge }: { badge: string }) => {
   const f = FIT[badge] ?? FIT.unknown;
   return <span className={cn("inline-flex whitespace-nowrap rounded-full px-2 py-0.5 text-xs font-medium", f.cls)}>{f.label}</span>;
 };
-const support = (v: boolean | null) => (v === null ? "?" : v ? "✓" : "—");
+const SUPPORT = { yes: ["✓", "supported"], no: ["✗", "not supported"], unknown: ["?", "unknown"] } as const;
+const Support = ({ v }: { v: boolean | null }) => {
+  const [mark, text] = SUPPORT[v === null ? "unknown" : v ? "yes" : "no"];
+  return <><span aria-hidden>{mark}</span><span className="sr-only">{text}</span></>;
+};
 
 export function Catalog() {
   const admin = useIsAdmin();
@@ -41,14 +45,16 @@ export function Catalog() {
   const columns = useMemo<ColumnDef<any, any>[]>(() => [
     { accessorKey: "repo_id", header: "Model", cell: ({ row }) => {
       const m = row.original;
-      return <div className="min-w-0"><div className="max-w-[44ch] truncate font-medium" title={m.repo_id}>{m.repo_id}</div>
+      // A real button so details are reachable from the keyboard; the row click stays as a pointer shortcut.
+      return <div className="min-w-0"><button type="button" className="block max-w-[44ch] truncate rounded-sm text-left font-medium hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        title={m.repo_id} aria-haspopup="dialog" onClick={(e) => { e.stopPropagation(); setOpen(m.repo_id); }}>{m.repo_id}</button>
         <div className="mt-1 flex flex-wrap gap-1">{m.quant && <Badge variant="outline">{m.quant}</Badge>}{m.gated && <Badge variant="outline" className="text-status-warning">gated</Badge>}{m.downloaded && <Badge variant="secondary">on disk</Badge>}</div></div>;
     } },
     { accessorKey: "downloads", header: "Downloads", cell: ({ getValue }) => <span className="tabular-nums">{Number(getValue()).toLocaleString()}</span> },
     { accessorKey: "est_bytes", header: "Approx size", cell: ({ getValue }) => <span className="tabular-nums">{fmtBytes(getValue())}</span> },
     { id: "fit", header: "Fit", accessorFn: (m) => m.fit.badge, cell: ({ row }) => <FitBadge badge={row.original.fit.badge} /> },
     { id: "engines", header: "Engines", enableSorting: false, meta: { hideOnMobile: true }, cell: ({ row }) => (
-      <span className="text-xs text-muted-foreground">vLLM {support(row.original.support.vllm)} · llama.cpp {support(row.original.support.llamacpp)}</span>) },
+      <span className="text-xs text-muted-foreground">vLLM <Support v={row.original.support.vllm} /> · llama.cpp <Support v={row.original.support.llamacpp} /></span>) },
     { id: "llmfit", header: "llmfit", enableSorting: false, meta: { hideOnMobile: true }, cell: ({ row }) => {
       const l = row.original.llmfit;
       return l ? <span className="text-xs">{l.fit_level ?? ""} {l.estimated_tps ? `· ~${l.estimated_tps} tok/s` : ""}{l.mismatch && <AlertTriangle className="ml-1 inline h-3 w-3 text-status-warning" aria-label="differs from DGXMM by over 20%" />}</span> : <span className="text-muted-foreground">—</span>;

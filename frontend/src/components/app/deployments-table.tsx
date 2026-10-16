@@ -8,7 +8,7 @@ import {
   DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { fmtBytes, fmtNum, fmtPct } from "@/format";
+import { engineLabel, fmtBytes, fmtNum, fmtPct, shortRef } from "@/format";
 import { useActionMutation } from "@/hooks/use-action-mutation";
 import { deploymentActions } from "@/logic";
 import { useLive } from "@/stream";
@@ -42,8 +42,8 @@ export function DeploymentsTable({ deployments, isAdmin, loading, searchable, on
     { accessorKey: "name", header: "Name", cell: ({ row }) => (
       <Link to={`/deployments/${row.original.id}`} className="font-medium hover:underline">{row.original.name}</Link>) },
     { accessorKey: "model_ref", header: "Model", cell: ({ row }) => (
-      <span title={row.original.model_ref} className="block max-w-[26ch] truncate text-muted-foreground">{row.original.model_ref.split("/").pop()}</span>) },
-    { accessorKey: "engine", header: "Engine", meta: { hideOnMobile: true }, cell: ({ getValue }) => (getValue() === "llamacpp" ? "llama.cpp" : "vLLM") },
+      <span title={row.original.model_ref} className="block max-w-[26ch] truncate text-muted-foreground">{shortRef(row.original.model_ref)}</span>) },
+    { accessorKey: "engine", header: "Engine", meta: { hideOnMobile: true }, cell: ({ getValue }) => engineLabel(getValue()) },
     { accessorKey: "state", header: "State", cell: ({ row }) => (
       row.original.last_error ? (
         <Tooltip><TooltipTrigger asChild><span><StatusBadge state={row.original.state} /></span></TooltipTrigger>

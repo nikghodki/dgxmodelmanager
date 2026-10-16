@@ -35,4 +35,25 @@ describe("CommandPalette", () => {
     await userEvent.keyboard("{Enter}");
     expect(screen.getByTestId("where")).toHaveTextContent("/planner");
   });
+
+  it("requires typing the name before stopping a ready deployment", async () => {
+    isAdminFlag = true;
+    const qc = new QueryClient();
+    qc.setQueryData(["deployments"], [{ id: 1, name: "qwen", state: "ready", sleep_capable: true, model_ref: "Qwen/Qwen3-8B" }]);
+    qc.setQueryData(["inventory"], []);
+    render(
+      <QueryClientProvider client={qc}>
+        <MemoryRouter initialEntries={["/"]} future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
+          <CommandPalette open onOpenChange={() => undefined} />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+    await userEvent.type(screen.getByPlaceholderText(/Search pages, deployments, models/), "Stop qwen");
+    await userEvent.keyboard("{Enter}");
+    expect(await screen.findByLabelText("Type qwen to confirm")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Stop" })).toBeDisabled();
+    await userEvent.type(screen.getByLabelText("Type qwen to confirm"), "qwen");
+    expect(screen.getByRole("button", { name: "Stop" })).toBeEnabled();
+    isAdminFlag = false;
+  });
 });
