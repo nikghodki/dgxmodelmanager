@@ -134,4 +134,28 @@ describe("DeployWizard", () => {
     const call = api.mock.calls.find((c) => c[0] === "/deployments");
     expect((call![1] as any).body.priority).toBe(0);
   });
+
+  it("names the LiteLLM model, explains the single endpoint and validates the name", async () => {
+    vi.mocked(auth.useIsAdmin).mockReturnValue(true);
+    vi.mocked(apiModule.api).mockImplementation((url: string) => {
+      if (url === "/inventory") return Promise.resolve([artifact]);
+      if (url === "/engines") return Promise.resolve(engines);
+      if (url === "/deployments/preview") return Promise.resolve({ ...fitsPreview, served_name: "model-a" });
+      if (url === "/integrations/litellm") return Promise.resolve({ endpoint: "https://llm.example.com/v1" });
+      return Promise.reject(new Error(`unexpected ${url}`));
+    });
+    renderWizard();
+    const input = await screen.findByLabelText("Model name (LiteLLM)");
+    await waitFor(() => expect(screen.getAllByText("Fits").length).toBeGreaterThan(0));
+    expect(screen.getByText(/Defaults to the served name/)).toBeInTheDocument();
+    expect(await screen.findByText("https://llm.example.com/v1")).toBeInTheDocument();
+    expect(screen.getByText("model-a")).toBeInTheDocument();
+    await userEvent.type(input, "bad name");
+    expect(screen.getByText(/no spaces/)).toBeInTheDocument();
+    expect(screen.getAllByRole("button", { name: "Deploy" })[0]).toBeDisabled();
+    await userEvent.clear(input);
+    await userEvent.type(input, "team-chat");
+    expect(screen.getByText("team-chat")).toBeInTheDocument();
+    expect(screen.getAllByRole("button", { name: "Deploy" })[0]).toBeEnabled();
+  });
 });
