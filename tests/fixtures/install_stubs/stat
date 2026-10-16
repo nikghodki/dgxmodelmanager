@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# only `stat -c %g /var/run/docker.sock` is faked
+if [ "$1" = "-c" ] && [ "$2" = "%g" ] && [ "$3" = "/var/run/docker.sock" ]; then
+  echo "${FAKE_DOCKER_GID:-977}"; exit 0
+fi
+exec "${REAL_STAT:?}" "$@"
