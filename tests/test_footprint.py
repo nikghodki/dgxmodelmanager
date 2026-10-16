@@ -59,3 +59,15 @@ def test_dispatch_by_engine():
     assert parse_engine_log("vllm", log("vllm_profiled.txt")) is not None
     assert parse_engine_log("llamacpp", log("llamacpp.txt")) is not None
     assert parse_engine_log("other", log("llamacpp.txt")) is None
+
+
+def test_llamacpp_without_startup_marker_fails_closed():
+    """Without the `build:` marker we cannot tell restarts apart in the tail: record nothing."""
+    text = "\n".join(l for l in log("llamacpp.txt").splitlines() if not l.startswith("build:"))
+    assert parse_llamacpp(text) is None
+
+
+def test_llamacpp_tolerates_log_prefixes_and_timestamps():
+    prefixed = "\n".join(f"0.00.{i:03d}.512 I {l}" for i, l in enumerate(log("llamacpp.txt").splitlines()))
+    fp = parse_llamacpp(prefixed)
+    assert fp is not None and fp.total == parse_llamacpp(log("llamacpp.txt")).total

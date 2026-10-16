@@ -7,13 +7,23 @@ never recorded. Instead the recorder takes the engine's own startup accounting f
 memory (cgroup anon + kernel, which on GB10 holds the Python/C++ heap but not the CUDA allocations).
 Every term is a real allocation, so the result is a lower bound on the true footprint.
 
-The MemAvailable delta across startup (snapshot when the container starts vs. when it is ready) is used
-only as a cross-check and stored as `quality`:
-  verified   - the delta agrees with the log-based figure (within max(15 %, 1 GiB))
-  disputed   - the delta disagrees (other host activity, or the engine log missed/double-counted something)
-  unverified - no clean delta (another deployment changed state during the window, or no snapshot)
-The delta is never the recorded figure: unrelated processes allocating or freeing memory on the host make
-it noisy in both directions.
+vLLM normalisation (no ratchet): DGXMM launches vLLM with --gpu-memory-utilization derived from the
+reservation and vLLM sizes its KV pool to FILL that budget, so its logged footprint is ~ the reservation
+itself. Learning it verbatim would grow the reservation by ~5 % + host memory on every restart. So for vLLM
+the learned figure is the log's NON-KV part (weights + non-torch + activations + CUDA graphs) + the host
+term + the KV the configuration actually needs according to the formula (`estimate.kv_cache + state`), not
+the KV vLLM chose to fill. A vLLM deployment without a stored formula estimate (e.g. adopted) is not
+recorded. llama.cpp allocates a fixed KV for its n_ctx, so its log total is learned as is.
+
+The MemAvailable delta across startup (snapshot when the container starts vs. when it is ready) is
+compared with the *observed* footprint (full log total + host) and stored as `quality`:
+  verified      - agrees within the tolerance min(max(10 %, 1 GiB), 3 GiB)
+  disputed_high - MemAvailable dropped by MORE than accounted for (OOM direction): the unexplained excess is
+                  added to the learned figure (conservative) and a warning is logged
+  disputed_low  - dropped by less (other host activity freed memory, or double counting): the log-based
+                  figure is kept (it is a sum of real allocations)
+  unverified    - no clean delta (another deployment changed state during the window, or no snapshot)
+Only a `verified` exact-config row yields confidence "measured"; anything else yields "calibrated".
 
 Calibration stays conservative: estimates are only ever raised, never lowered below the formula, as
 before (exact config: max(measured × 1.05, estimate); same model: mean ratio clamped to [1.0, 1.5]).
@@ -34,8 +44,9 @@ from dgxmm.memory.footprint import parse_engine_log
 log = logging.getLogger(__name__)
 GIB = 1024**3
 RELIABLE_METHODS = frozenset({"engine_log"})
-DELTA_TOLERANCE = 0.15
+DELTA_TOLERANCE = 0.10
 DELTA_TOLERANCE_MIN = 1 * GIB
+DELTA_TOLERANCE_MAX = 3 * GIB
 LOG_TAIL = 10000
 
 
@@ -77,10 +88,12 @@ class Calibration:
         oom_pending = bool(same) and same[0].oom
         exact = next((r for r in same if not r.oom), None)
         if exact:
-            # Controller ruling: never lower the estimate
+            # Controller ruling: never lower the estimate. Only a MemAvailable-verified row claims "measured".
             new_total = max(int(exact.measured_bytes * 1.05), est.total)
-            est = est.with_total(new_total, "measured",
-                                 f"measured {exact.measured_bytes / GIB:.1f} GiB with this exact configuration")
+            verified = exact.quality == "verified"
+            note = f"measured {exact.measured_bytes / GIB:.1f} GiB with this exact configuration"
+            est = est.with_total(new_total, "measured" if verified else "calibrated",
+                                 note if verified else f"{note} (quality={exact.quality})")
         else:
             ratios = [r.measured_bytes / r.estimated_bytes for r in rows if not r.oom and r.estimated_bytes > 0][:5]
             if ratios:
@@ -100,10 +113,17 @@ class Calibration:
         return est
 
 
-def delta_quality(measured: int, delta: int | None) -> str:
+def delta_tolerance(observed: int) -> int:
+    return int(min(max(DELTA_TOLERANCE * observed, DELTA_TOLERANCE_MIN), DELTA_TOLERANCE_MAX))
+
+
+def delta_quality(observed: int, delta: int | None) -> str:
     if delta is None:
         return "unverified"
-    return "verified" if abs(delta - measured) <= max(DELTA_TOLERANCE * measured, DELTA_TOLERANCE_MIN) else "disputed"
+    diff = delta - observed
+    if abs(diff) <= delta_tolerance(observed):
+        return "verified"
+    return "disputed_high" if diff > 0 else "disputed_low"
 
 
 class CalibrationRecorder:
@@ -152,6 +172,13 @@ class CalibrationRecorder:
             # cgroup + NVML alone misses CUDA memory on GB10: not a measurement, so record nothing
             log.info("calibration: %s skipped - no engine memory accounting found in its log", dep.name)
             return
+        formula_kv = None
+        if dep.engine == "vllm":
+            est = dep.estimate or {}
+            if "kv_cache" not in est or "kv_cache" not in fp.parts:
+                log.info("calibration: %s skipped - no formula KV to normalise vLLM's budget-filling KV pool", dep.name)
+                return
+            formula_kv = int(est["kv_cache"]) + int(est.get("state", 0))
         window = self._windows.get(dep_id)
         budget = await self.deployer.budget.refresh()
         after = budget.available
@@ -159,17 +186,25 @@ class CalibrationRecorder:
         sample = getattr(self.deployer.budget, "last_sample", None)
         gpu_part = (getattr(sample, "managed_gpu", {}) or {}).get(dep.container_id, 0) if sample else 0
         host = max(actual - gpu_part, 0)  # cgroup anon + kernel: host-side heap, not in the engine's accounting
-        measured = fp.total + host
+        observed = fp.total + host  # what is physically allocated right now
+        # vLLM: swap the KV it filled to the --gpu-memory-utilization budget for the KV this config needs
+        learned = observed if formula_kv is None else fp.total - fp.parts["kv_cache"] + formula_kv + host
         delta = None
         if window and not window["noisy"] and window["before"] is not None:
             delta = window["before"] - after
-        quality = delta_quality(measured, delta)
+        quality = delta_quality(observed, delta)
+        unexplained = delta - observed if quality == "disputed_high" else 0
+        measured = learned + unexplained
+        if unexplained:
+            log.warning("calibration: %s MemAvailable dropped %.1f GiB but the engine log + host account for %.1f GiB; "
+                        "learning the %.1f GiB excess too", dep.name, delta / GIB, observed / GIB, unexplained / GIB)
         from dgxmm.deployer.service import config_hash
         raw = dep.estimate.get("total", dep.reserved_bytes) - dep.estimate.get("margin", 0) if dep.estimate else dep.reserved_bytes
-        detail = {"engine_bytes": fp.total, "host_bytes": host, "complete": fp.complete, "parts": fp.parts,
-                  "memavailable_delta": delta, "cgroup_nvml_bytes": actual}
+        detail = {"engine_bytes": fp.total, "host_bytes": host, "observed_bytes": observed, "learned_bytes": learned,
+                  "formula_kv_bytes": formula_kv, "unexplained_bytes": unexplained, "complete": fp.complete,
+                  "parts": fp.parts, "memavailable_delta": delta, "cgroup_nvml_bytes": actual}
         self.calibration.record(dep.engine, dep.model_ref, config_hash(dep.config), int(raw), int(measured),
                                 method="engine_log", quality=quality, detail=detail)
-        log.info("calibration: %s estimated %.1f GiB (formula) measured %.1f GiB (engine log %.1f + host %.1f; "
-                 "MemAvailable delta %s) quality=%s", dep.name, raw / GIB, measured / GIB, fp.total / GIB, host / GIB,
-                 f"{delta / GIB:.1f} GiB" if delta is not None else "n/a", quality)
+        log.info("calibration: %s estimated %.1f GiB (formula) measured %.1f GiB (observed %.1f = engine log %.1f + "
+                 "host %.1f; MemAvailable delta %s) quality=%s", dep.name, raw / GIB, measured / GIB, observed / GIB,
+                 fp.total / GIB, host / GIB, f"{delta / GIB:.1f} GiB" if delta is not None else "n/a", quality)
