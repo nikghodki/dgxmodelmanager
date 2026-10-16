@@ -20,7 +20,7 @@ export function CommandPalette({ open, onOpenChange }: { open: boolean; onOpenCh
   const nav = useNavigate();
   const deps = useQuery({ queryKey: ["deployments"], queryFn: () => api<Deployment[]>("/deployments"), enabled: open });
   const inv = useQuery({ queryKey: ["inventory"], queryFn: () => api<Artifact[]>("/inventory"), enabled: open && isAdmin });
-  const [confirmStop, setConfirmStop] = useState<{ id: number; name: string } | null>(null);
+  const [confirmStop, setConfirmStop] = useState<{ id: number; name: string; state: string } | null>(null);
   const op = useActionMutation(({ id, op }: { id: number; op: string }) => api(`/deployments/${id}/${op}`, { method: "POST" }), {
     success: (_d, v) => `${v.op[0].toUpperCase()}${v.op.slice(1)} requested`,
     invalidate: [["deployments"]],
@@ -36,7 +36,7 @@ export function CommandPalette({ open, onOpenChange }: { open: boolean; onOpenCh
     if (a.type === "navigate") nav(a.to);
     else if (a.type === "theme") setTheme(a.theme);
     else if (a.type === "logout") logout();
-    else if (a.op === "stop") setConfirmStop({ id: a.id, name: a.name });
+    else if (a.op === "stop") setConfirmStop({ id: a.id, name: a.name, state: a.state });
     else op.mutate({ id: a.id, op: a.op });
   };
 
@@ -74,6 +74,7 @@ export function CommandPalette({ open, onOpenChange }: { open: boolean; onOpenCh
       <ConfirmDialog open={!!confirmStop} onOpenChange={(o) => !o && setConfirmStop(null)}
         title={`Stop ${confirmStop?.name}?`} description="The container is stopped and its memory released. You can start it again later."
         confirmLabel="Stop" destructive pending={op.isPending}
+        requireText={confirmStop?.state === "ready" ? confirmStop.name : undefined}
         onConfirm={() => { if (confirmStop) op.mutate({ id: confirmStop.id, op: "stop" }, { onSettled: () => setConfirmStop(null) }); }} />
     </>
   );

@@ -22,3 +22,8 @@ export function fmtRelative(iso: string, now: number = Date.now()): string {
   if (s < 86400) return `${Math.floor(s / 3600)} h ago`;
   return `${Math.floor(s / 86400)} d ago`;
 }
+
+/** HF repo ids are shown whole; absolute GGUF paths are shortened to the file name. */
+export const shortRef = (ref: string) => (ref.startsWith("/") ? ref.split("/").pop()! : ref);
+/** Display name of an inference engine. */
+export const engineLabel = (engine: string) => (engine === "llamacpp" ? "llama.cpp" : "vLLM");

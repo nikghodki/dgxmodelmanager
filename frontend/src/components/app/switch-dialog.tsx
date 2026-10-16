@@ -32,13 +32,14 @@ export function SwitchDialog({ mode, deployment, initialPatch, onClose }: {
   const choices = (inv.data ?? []).filter((a) => a.complete && a.kind === "llm" && a.engines.includes(deployment.engine));
 
   useEffect(() => {
+    let live = true; // a slower, older preview must not overwrite the current one
     const t = setTimeout(async () => {
       try {
-        setPreview(await api<Preview>("/deployments/preview", { method: "POST", body: { engine: deployment.engine, model_ref: ref, config, replacing: deployment.id } }));
-        setErr(null);
-      } catch (e) { setErr(e); setPreview(null); }
+        const p = await api<Preview>("/deployments/preview", { method: "POST", body: { engine: deployment.engine, model_ref: ref, config, replacing: deployment.id } });
+        if (live) { setPreview(p); setErr(null); }
+      } catch (e) { if (live) { setErr(e); setPreview(null); } }
     }, 350);
-    return () => clearTimeout(t);
+    return () => { live = false; clearTimeout(t); };
   }, [ref, config, deployment.engine, deployment.id]);
 
   const actions = plan?.actions ?? [];
@@ -50,14 +51,14 @@ export function SwitchDialog({ mode, deployment, initialPatch, onClose }: {
     onSuccess: onClose,
   });
 
+  // A 409 carries a fresh fit + plans: show them and make the user choose again (depends only on the error).
   useEffect(() => {
-    if (go.error instanceof ApiError && go.error.code === "insufficient_memory") {
-      setPlan(null);
-      if (go.error.detail?.fit && go.error.detail?.plans) {
-        setPreview({ ...preview!, fit: go.error.detail.fit, plans: go.error.detail.plans });
-      }
-    }
-  }, [go.error, preview]);
+    const e = go.error;
+    if (!(e instanceof ApiError) || e.code !== "insufficient_memory") return;
+    setPlan(null);
+    const { fit, plans } = e.detail ?? {};
+    if (fit && plans) setPreview((p) => p && { ...p, fit, plans });
+  }, [go.error]);
 
   const submit = submitState(preview, actions, go.isPending, mode);
   const memoryChanged = go.error instanceof ApiError && go.error.code === "insufficient_memory";
@@ -66,9 +67,9 @@ export function SwitchDialog({ mode, deployment, initialPatch, onClose }: {
     <ResponsiveDialog open onOpenChange={(o) => !o && !go.isPending && onClose()}
       title={mode === "switch" ? `Switch ${deployment.name} to another model` : `Reconfigure ${deployment.name}`}
       description={mode === "switch" ? `${deployment.name} is put to sleep (or stopped) and its LiteLLM alias moves to the new deployment.` : "The deployment restarts with the new settings."}>
-      <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_340px]">
+      <div className="grid grid-cols-1 gap-6 lg:grid-cols-[minmax(0,1fr)_340px]">
         <div className="space-y-4">
-          <div className="space-y-1.5"><Label>Model</Label><ModelSelect artifacts={choices} value={ref} onChange={(r) => { setRef(r); setPlan(null); }} /></div>
+          <div className="space-y-1.5"><Label id="switch-model-label">Model</Label><ModelSelect id="switch-model" labelledBy="switch-model-label" artifacts={choices} value={ref} onChange={(r) => { setRef(r); setPlan(null); }} /></div>
           {mode === "switch" && <div className="space-y-1.5"><Label htmlFor="new-name">New deployment name</Label><Input id="new-name" value={name} onChange={(e) => setName(e.target.value)} /></div>}
           <ConfigForm engine={deployment.engine} value={config} onChange={(c) => { setConfig(c); setPlan(null); }} showAdvanced={advanced} />
           <Button variant="link" className="h-auto p-0 text-xs" onClick={() => setAdvanced(!advanced)}>{advanced ? "Hide" : "Show"} advanced settings</Button>

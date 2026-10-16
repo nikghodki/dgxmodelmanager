@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { GIB, fmtBytes, fmtPct, fmtRelative } from "./format";
+import { GIB, engineLabel, fmtBytes, fmtPct, fmtRelative, shortRef } from "./format";
 
 describe("format", () => {
   it("formats bytes in binary units", () => {
@@ -22,5 +22,19 @@ describe("fmtRelative", () => {
     expect(fmtRelative("2026-10-16T11:55:00Z", now)).toBe("5 min ago");
     expect(fmtRelative("2026-10-16T09:00:00Z", now)).toBe("3 h ago");
     expect(fmtRelative("2026-10-13T12:00:00Z", now)).toBe("3 d ago");
+  });
+});
+
+describe("shortRef", () => {
+  it("keeps HF repo ids and shortens absolute GGUF paths to the file name", () => {
+    expect(shortRef("Qwen/Qwen3-8B")).toBe("Qwen/Qwen3-8B");
+    expect(shortRef("/data/gguf/models/Qwen3-0.6B-Q8_0.gguf")).toBe("Qwen3-0.6B-Q8_0.gguf");
+  });
+});
+
+describe("engineLabel", () => {
+  it("names engines for display", () => {
+    expect(engineLabel("llamacpp")).toBe("llama.cpp");
+    expect(engineLabel("vllm")).toBe("vLLM");
   });
 });

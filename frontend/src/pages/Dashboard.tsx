@@ -42,7 +42,7 @@ export function Dashboard() {
 
       {b && (
         <Card className="shadow-card">
-          <CardContent className="grid gap-6 p-6 md:grid-cols-[minmax(0,1fr)_minmax(0,2fr)] md:items-center">
+          <CardContent className="grid grid-cols-1 gap-6 p-6 md:grid-cols-[minmax(0,1fr)_minmax(0,2fr)] md:items-center">
             <div>
               <div className="text-sm text-muted-foreground">Free for new deployments</div>
               <div className={cn("mt-1 text-4xl font-semibold tabular-nums tracking-tight", freeTone)}>{fmtBytes(b.free_for_new)}</div>
@@ -52,8 +52,8 @@ export function Dashboard() {
                 <Button asChild size="sm" variant="outline"><Link to="/planner"><Puzzle className="mr-1 h-4 w-4" />Plan combinations</Link></Button>
               </div>
             </div>
-            <div>
-              <div className="mb-3 flex items-baseline justify-between">
+            <div className="min-w-0">
+              <div className="mb-3 flex flex-wrap items-baseline justify-between gap-x-2">
                 <span className="text-sm font-semibold">Unified memory</span>
                 <span className="text-xs text-muted-foreground tabular-nums">
                   {host.data?.gpu?.util != null ? `GPU ${host.data.gpu.util}% · ${host.data.gpu.temp_c ?? "?"}°C · ` : ""}disk {fmtBytes(host.data?.disk?.free)} free
@@ -95,10 +95,10 @@ export function Dashboard() {
       <ChartCard title="Memory over the last hour" description="Used, external and free-for-new memory" data={hostLive.data ?? []}
         fmt={(v) => fmtBytes(v, 0)} series={[{ key: "used", label: "Used", slot: 1 }, { key: "external", label: "External", slot: 2 }, { key: "free_for_new", label: "Free for new", slot: 3 }]} />
 
-      <div className="grid gap-4 lg:grid-cols-2">
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
         <AdoptCard />
         {host.data && host.data.external_top.length > 0 && (
-          <Card className="shadow-card">
+          <Card className="min-w-0 shadow-card">
             <CardHeader className="pb-2"><CardTitle className="text-sm">Largest external memory users</CardTitle>
               <CardDescription className="text-xs">Processes DGXMM does not manage. They are never touched.</CardDescription></CardHeader>
             <CardContent>

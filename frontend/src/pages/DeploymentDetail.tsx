@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useNavigate, useParams } from "react-router-dom";
-import { Activity, ArrowLeftRight, FileText, Gauge, Lightbulb, MoreHorizontal, Moon, Play, Power, RefreshCw, Settings2, Sun, Trash2 } from "lucide-react";
+import { Activity, ArrowLeftRight, FileText, Gauge, Lightbulb, Loader2, MoreHorizontal, Moon, Play, Power, RefreshCw, Settings2, Sun, Trash2 } from "lucide-react";
 import { api } from "@/api";
 import { useIsAdmin } from "@/auth";
 import { ConfirmDialog } from "@/components/app/confirm-dialog";
@@ -18,7 +18,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { fmtBytes, fmtMs, fmtNum } from "@/format";
+import { engineLabel, fmtBytes, fmtMs, fmtNum } from "@/format";
 import { useActionMutation } from "@/hooks/use-action-mutation";
 import { benchmarkSeries } from "@/lib/benchmarks";
 import { estimateParts } from "@/lib/estimate";
@@ -47,7 +47,7 @@ function Performance({ id }: { id: number }) {
   const data = (win === "live" ? live.data : hist.data) ?? [];
   const picker = <WindowPicker value={win} onChange={setWin} />;
   return (
-    <div className="grid gap-4 lg:grid-cols-2">
+    <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
       <ChartCard title="Throughput" description="tokens / second" actions={picker} data={data}
         series={[{ key: "gen_tps", label: "Generation", slot: 1 }, { key: "prompt_tps", label: "Prompt", slot: 3 }]} />
       <ChartCard title="Time to first token" data={data} fmt={(v) => fmtMs(v)}
@@ -68,11 +68,11 @@ function Advice({ d, onApply }: { d: Deployment; onApply: (patch: Record<string,
   const q = useQuery({ queryKey: ["advice", d.id], queryFn: () => api<any[]>(`/deployments/${d.id}/advice`), refetchInterval: 60000 });
   if (q.error) return <ErrorState error={q.error} onRetry={() => q.refetch()} />;
   if (!q.data?.length) return <EmptyState icon={Lightbulb} title="No suggestions right now" description="Advice appears as DGXMM collects metrics and benchmarks for this deployment." />;
-  const tone = (s: string) => (s === "warning" ? "bg-status-critical-bg text-status-critical" : s === "info" ? "bg-status-neutral-bg text-status-neutral" : "bg-primary/10 text-primary");
+  const tone = (s: string) => (s === "critical" ? "bg-status-critical-bg text-status-critical" : s === "warning" ? "bg-status-warning-bg text-status-warning" : s === "info" ? "bg-status-neutral-bg text-status-neutral" : "bg-primary/10 text-primary");
   return (
-    <div className="grid gap-3 md:grid-cols-2">
+    <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
       {q.data.map((a) => (
-        <Card key={a.id} className="shadow-card">
+        <Card key={a.id} className="min-w-0 shadow-card">
           <CardHeader className="space-y-1.5 pb-2">
             <div className="flex flex-wrap items-center gap-2">
               <span className={`rounded-full px-2 py-0.5 text-[11px] font-medium capitalize ${tone(a.severity)}`}>{a.severity}</span>
@@ -185,22 +185,26 @@ export function DeploymentDetail() {
   const d = dep.data;
   if (!d) return <ErrorState error={dep.error ?? new Error("Deployment not found")} onRetry={() => dep.refetch()} />;
   const acts = deploymentActions(d, admin);
+  const busy = act.isPending || remove.isPending;
+  // The in-flight action shows a spinner in place of its icon; every header action is disabled meanwhile.
+  const icon = (a: string, Icon: typeof Moon) => (act.isPending && act.variables === a
+    ? <Loader2 className="mr-1 h-4 w-4 animate-spin" aria-hidden /> : <Icon className="mr-1 h-4 w-4" />);
   const parts = estimateParts(d.estimate ?? {});
 
   return (
     <div className="space-y-6">
       <PageHeader
         title={<span className="flex items-center gap-3">{d.name}<StatusBadge state={d.state} /></span>}
-        description={<span className="break-all">{d.model_ref} · {d.engine === "llamacpp" ? "llama.cpp" : "vLLM"}</span>}
+        description={<span className="break-all">{d.model_ref} · {engineLabel(d.engine)}</span>}
         actions={<>
-          {acts.includes("sleep") && <Button variant="outline" size="sm" onClick={() => act.mutate("sleep")}><Moon className="mr-1 h-4 w-4" />Sleep</Button>}
-          {acts.includes("wake") && <Button variant="outline" size="sm" onClick={() => act.mutate("wake")}><Sun className="mr-1 h-4 w-4" />Wake</Button>}
-          {acts.includes("start") && <Button size="sm" onClick={() => act.mutate("start")}><Play className="mr-1 h-4 w-4" />Start</Button>}
-          {acts.includes("reconfigure") && <Button variant="outline" size="sm" onClick={() => setDialog({ mode: "reconfigure" })}><Settings2 className="mr-1 h-4 w-4" />Reconfigure</Button>}
+          {acts.includes("sleep") && <Button variant="outline" size="sm" disabled={busy} onClick={() => act.mutate("sleep")}>{icon("sleep", Moon)}Sleep</Button>}
+          {acts.includes("wake") && <Button variant="outline" size="sm" disabled={busy} onClick={() => act.mutate("wake")}>{icon("wake", Sun)}Wake</Button>}
+          {acts.includes("start") && <Button size="sm" disabled={busy} onClick={() => act.mutate("start")}>{icon("start", Play)}Start</Button>}
+          {acts.includes("reconfigure") && <Button variant="outline" size="sm" disabled={busy} onClick={() => setDialog({ mode: "reconfigure" })}><Settings2 className="mr-1 h-4 w-4" />Reconfigure</Button>}
           {admin && <Button variant="outline" size="sm" onClick={() => setLogs(true)}><FileText className="mr-1 h-4 w-4" />Logs</Button>}
           {(acts.includes("stop") || acts.includes("remove") || acts.includes("switch")) && (
             <DropdownMenu>
-              <DropdownMenuTrigger asChild><Button variant="outline" size="icon" className="h-8 w-8" aria-label="More actions"><MoreHorizontal className="h-4 w-4" /></Button></DropdownMenuTrigger>
+              <DropdownMenuTrigger asChild><Button variant="outline" size="icon" className="h-8 w-8" disabled={busy} aria-label="More actions"><MoreHorizontal className="h-4 w-4" /></Button></DropdownMenuTrigger>
               <DropdownMenuContent align="end">
                 {acts.includes("switch") && <DropdownMenuItem onSelect={() => setDialog({ mode: "switch" })}><ArrowLeftRight className="mr-2 h-4 w-4" />Switch model…</DropdownMenuItem>}
                 {acts.includes("switch") && <DropdownMenuSeparator />}
@@ -222,8 +226,8 @@ export function DeploymentDetail() {
           <TabsTrigger value="events">Events</TabsTrigger>
         </TabsList>
 
-        <TabsContent value="overview" className="mt-4 grid gap-4 lg:grid-cols-3">
-          <Card className="shadow-card">
+        <TabsContent value="overview" className="mt-4 grid grid-cols-1 gap-4 lg:grid-cols-3">
+          <Card className="min-w-0 shadow-card">
             <CardHeader className="pb-2"><CardTitle className="text-sm">Endpoints</CardTitle><CardDescription className="text-xs">OpenAI-compatible</CardDescription></CardHeader>
             <CardContent><dl>
               <KV label="Served name" value={d.served_name} mono copy={d.served_name} />
@@ -232,7 +236,7 @@ export function DeploymentDetail() {
               <KV label="LiteLLM" value={<span className="inline-flex items-center gap-2"><StatusBadge state={d.litellm_status} />{d.alias && <span className="font-mono text-xs">{d.alias}</span>}</span>} />
             </dl></CardContent>
           </Card>
-          <Card className="shadow-card">
+          <Card className="min-w-0 shadow-card">
             <CardHeader className="pb-2"><CardTitle className="text-sm">Memory</CardTitle>
               <CardDescription className="text-xs">confidence: {(d.estimate as any)?.confidence ?? "—"}</CardDescription></CardHeader>
             <CardContent><dl>
@@ -241,7 +245,7 @@ export function DeploymentDetail() {
               {parts.map((p) => <KV key={p.key} label={p.label} value={<span className="tabular-nums">{fmtBytes(p.bytes)}</span>} />)}
             </dl></CardContent>
           </Card>
-          <Card className="shadow-card">
+          <Card className="min-w-0 shadow-card">
             <CardHeader className="pb-2"><CardTitle className="text-sm">Configuration</CardTitle></CardHeader>
             <CardContent><dl>
               {Object.entries(d.config ?? {}).filter(([, v]) => v !== null && !(Array.isArray(v) && !v.length)).map(([k, v]) => (

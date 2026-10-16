@@ -30,4 +30,18 @@ describe("buildCommands", () => {
     expect(l).not.toContain("Deploy openai/whisper");
     expect(c.find((x) => x.label === "Deploy Qwen/Qwen3-8B")!.action).toEqual({ type: "navigate", to: "/deploy?model=Qwen%2FQwen3-8B" });
   });
+
+  it("carries the deployment state so stop can require typed confirmation", () => {
+    const c = buildCommands({ isAdmin: true, deployments, artifacts });
+    expect(c.find((x) => x.label === "Stop qwen")!.action).toEqual({ type: "deployment", op: "stop", id: 1, name: "qwen", state: "ready" });
+    expect(c.find((x) => x.label === "Stop coder")!.action).toEqual({ type: "deployment", op: "stop", id: 2, name: "coder", state: "sleeping" });
+  });
+
+  it("derives per-deployment actions from deploymentActions (no sleep without sleep support, no stop when failed)", () => {
+    const c = buildCommands({ isAdmin: true, deployments: [dep(4, "nosleep", "ready", false), dep(5, "bad", "failed")], artifacts: [] });
+    const l = labels(c);
+    expect(l).toContain("Stop nosleep");
+    expect(l).not.toContain("Sleep nosleep");
+    expect(l).not.toContain("Stop bad");
+  });
 });

@@ -12,12 +12,10 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { fmtBytes } from "@/format";
+import { engineLabel, fmtBytes, shortRef } from "@/format";
 import { useActionMutation } from "@/hooks/use-action-mutation";
 import { favouritePath } from "@/logic";
 import { cn } from "@/lib/utils";
-
-const short = (ref: string) => (ref.startsWith("/") ? ref.split("/").pop()! : ref);
 
 export function Planner() {
   const admin = useIsAdmin();
@@ -28,8 +26,8 @@ export function Planner() {
   const v = q.data;
   const slotOf = useMemo(() => new Map<string, number>((v?.candidates ?? []).map((c: any, i: number) => [c.ref, (i % 8) + 1])), [v?.candidates]);
   const columns = useMemo<ColumnDef<any, any>[]>(() => [
-    { accessorKey: "ref", header: "Model", cell: ({ row }) => <span className="block max-w-[40ch] truncate font-medium" title={row.original.ref}>{short(row.original.ref)}</span> },
-    { accessorKey: "engine", header: "Engine", cell: ({ getValue }) => (getValue() === "llamacpp" ? "llama.cpp" : "vLLM") },
+    { accessorKey: "ref", header: "Model", cell: ({ row }) => <span className="block max-w-[40ch] truncate font-medium" title={row.original.ref}>{shortRef(row.original.ref)}</span> },
+    { accessorKey: "engine", header: "Engine", cell: ({ getValue }) => engineLabel(getValue()) },
     { accessorKey: "required", header: "Needs", cell: ({ getValue }) => <span className="tabular-nums">{fmtBytes(getValue())}</span> },
     { id: "favourite", header: "Favourite", enableSorting: false, cell: ({ row }) => (
       <Button variant="ghost" size="icon" className="h-8 w-8" disabled={!admin || fav.isPending} aria-pressed={row.original.favourite}
@@ -53,10 +51,10 @@ export function Planner() {
       <section className="space-y-3">
         <h2 className="text-sm font-semibold">Best combinations</h2>
         {v && !v.combos.length ? <EmptyState icon={Puzzle} title="No combination fits" description="Free memory or lower the context per model." /> : (
-          <div className="grid gap-3 md:grid-cols-2">
+          <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
             {(v?.combos ?? []).map((c: any, i: number) => (
-              <Card key={i} className="shadow-card">
-                <CardHeader className="pb-2"><CardTitle className="flex items-baseline justify-between text-sm"><span>#{i + 1} · {c.models.length} model{c.models.length > 1 ? "s" : ""}</span>
+              <Card key={i} className="min-w-0 shadow-card">
+                <CardHeader className="pb-2"><CardTitle className="flex flex-wrap items-baseline justify-between gap-x-2 text-sm"><span>#{i + 1} · {c.models.length} model{c.models.length > 1 ? "s" : ""}</span>
                   <span className="text-xs font-normal tabular-nums text-muted-foreground">{fmtBytes(c.total)} · {fmtBytes(c.headroom)} spare</span></CardTitle></CardHeader>
                 <CardContent className="space-y-3">
                   <div className="flex h-2.5 gap-[2px]" role="img" aria-label="Capacity used by this combination">
@@ -65,7 +63,7 @@ export function Planner() {
                   </div>
                   <ul className="space-y-1 text-xs">{c.models.map((m: any) => (
                     <li key={m.ref} className="flex items-center justify-between gap-2"><span className="flex min-w-0 items-center gap-1.5"><span aria-hidden className="h-2 w-2 shrink-0 rounded-[2px]" style={{ background: `var(--chart-${slotOf.get(m.ref) ?? 1})` }} />
-                      <span className="truncate" title={m.ref}>{short(m.ref)}</span>{m.favourite && <Star className="h-3 w-3 shrink-0 fill-current text-status-warning" aria-label="favourite" />}</span>
+                      <span className="truncate" title={m.ref}>{shortRef(m.ref)}</span>{m.favourite && <Star className="h-3 w-3 shrink-0 fill-current text-status-warning" aria-label="favourite" />}</span>
                       <span className="shrink-0 tabular-nums text-muted-foreground">{fmtBytes(m.required)}</span></li>))}</ul>
                 </CardContent>
               </Card>
