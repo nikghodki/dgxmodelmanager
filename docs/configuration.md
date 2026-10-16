@@ -8,9 +8,11 @@ DGXMM reads its settings from three places:
 | `config.yaml` | `install.sh` (once, from `config.example.yaml`) | the DGXMM app | Everything DGXMM itself does: memory gate, engines, paths, LiteLLM, polling |
 | `secrets/*` | `install.sh` | Compose secrets → `/run/secrets/` | Hugging Face token, LiteLLM master key, first admin password |
 
-The installer never overwrites `.env`, `config.yaml` or a non-empty secret file. After you edit one,
-apply the change with `./install.sh`. Running it again is safe. It rebuilds and recreates the `dgxmm`
-container. Engine containers keep running.
+The installer never overwrites `.env`, `config.yaml` or a non-empty secret file. After you edit `.env`,
+apply the change with `./install.sh` (running it again is safe): Compose recreates the `dgxmm`
+container when its image or settings changed. DGXMM reads `config.yaml` and the HF token only at
+start, and `./install.sh` does not recreate an unchanged container, so after editing `config.yaml` run
+`docker restart dgxmm`. Engine containers keep running either way.
 
 A few settings can also be changed at runtime in the UI. They are stored in DGXMM's database and win
 over `config.yaml`: currently the [LiteLLM connection](#runtime-settings-and-precedence) (URLs, master
@@ -55,7 +57,7 @@ the container.
 | `images.llamacpp` | string | `ghcr.io/ggml-org/llama.cpp:server-cuda` | llama.cpp server image. |
 | `docker_network` | string | `dgxmm` | Docker network that engine containers join. **Must equal `DGXMM_NETWORK` in `.env`.** |
 | `port_range` | `[low, high]` | `[8100, 8199]` | Host ports handed to engine containers (1024–65535, ascending). Ports used by other containers are skipped. |
-| `publish_bind` | string or null | `127.0.0.1` | Host address that engine ports are published on. Keep it on loopback: clients should go through LiteLLM or the Docker network. |
+| `publish_bind` | string | `127.0.0.1` | Host address that engine ports are published on. Keep it on loopback: clients should go through LiteLLM or the Docker network. |
 | `engine_base_host` | string or null | `null` | `null`: DGXMM (and LiteLLM) reach engines as `dgxmm-<name>:<port>` on `docker_network`. Set a hostname or IP to use the published ports on that host instead. |
 | `startup_timeout_s` | int | `900` | Seconds an engine may take to become ready before DGXMM fails it. |
 | `vllm_cache_mounts` | list of `{host, target, mode}` | `~/.cache/vllm`, `~/.cache/flashinfer`, `~/.triton` → `/root/...` | Host directories mounted into vLLM containers so compiled kernels survive restarts. `mode` defaults to `rw`. |
@@ -88,7 +90,7 @@ the container.
 | `base_path` | string | `/dgxmm` | URL prefix of the UI and API. The frontend is built for `/dgxmm`, so leave this alone. |
 | `session_ttl_s` | int | `43200` (12 h) | Login session lifetime. It is extended on every request. |
 | `secure_cookies` | `auto` / `always` / `never` | `auto` | `auto`: the cookie is `Secure` when the request is HTTPS (directly or via `X-Forwarded-Proto`). Use `always` behind an HTTPS proxy. |
-| `trusted_proxies` | comma-separated IPs/CIDRs | `127.0.0.1,::1` | IPs/subnets trusted to set `X-Forwarded-For` (for correct client IPs in logs and rate limiting). Default is loopback-only. Set to your proxy's IP or docker network subnet (e.g., `<proxy-ip>` or `<network-subnet>`). |
+| `trusted_proxies` | comma-separated IPs/CIDRs (or a YAML list) | `127.0.0.1,::1` | IPs/subnets trusted to set `X-Forwarded-For` (for correct client IPs in logs and rate limiting). Default is loopback-only; an empty value means the default. Set it to your proxy's IP or Docker network subnet, for example `172.18.0.0/16`. `*` trusts every client (logged as a warning; not recommended). Invalid entries stop DGXMM from starting. `DGXMM_TRUSTED_PROXIES` in `.env` overrides it. |
 
 ### Polling intervals
 
@@ -157,18 +159,21 @@ from an older `.env` are appended.
 | `DGXMM_HOST_HOME` | `DGXMM_HOST_HOME` | `$HOME` | Home directory that `~` in `config.yaml` expands to. |
 | `DGXMM_WITH_LITELLM` | `--with-litellm` / `DGXMM_WITH_LITELLM=1` | `0` (key not written) | Run the [bundled LiteLLM](#bundled-litellm). Written only when enabled; set `0` to turn it off. |
 | `DGXMM_LITELLM_PORT` | `--litellm-port` / `DGXMM_LITELLM_PORT` | `4000` | Host port of the bundled LiteLLM, bound to `DGXMM_BIND`. |
+| `DGXMM_TRUSTED_PROXIES` | `DGXMM_TRUSTED_PROXIES` | empty | Passed to the container as an override of [`trusted_proxies`](#web-ui-and-sessions). Empty means `config.yaml` (or the loopback default) applies. |
 | `COMPOSE_PROFILES` | (written with `DGXMM_WITH_LITELLM=1`) | `litellm` | Makes a plain `docker compose up -d` start the bundled LiteLLM too. A stray shell value is never adopted. |
 
 Paths must be absolute and must not contain whitespace, a backtick, or any of `:` `"` `'` `\` `$` `#`.
 Binds must be IPv4.
 
-Variables that only affect one installer run:
+Variables and flags that only affect one installer run:
 
 | Variable | Meaning |
 |---|---|
 | `HF_TOKEN` | Written to `secrets/hf_token` when that file is missing or empty. |
 | `LITELLM_URL` | Written as `litellm_url` when `config.yaml` is generated. With `--with-litellm`, a URL other than the bundled one also means `litellm_public_url` is not set. |
-| `LITELLM_MASTER_KEY` | Written to `secrets/litellm_master_key` when that file is missing or empty. |
+| `LITELLM_MASTER_KEY` | Written to `secrets/litellm_master_key` when that file is missing or empty. When DGXMM is wired to the bundled LiteLLM, it also seeds `secrets/litellm_bundled_master_key` if that is missing. |
+| `--dry-run` / `-n` | Print what would be done and change nothing. |
+| `--allow-root` | Allow running the installer as root (not recommended: DGXMM's files should belong to a normal user). |
 | `DGXMM_PULL_ENGINES=1` | Pull the engine images listed in `config.yaml` before starting. |
 | `DGXMM_HEALTH_TIMEOUT` | Seconds to wait for the container to become healthy (default 300). |
 | `DGXMM_LITELLM_HEALTH_TIMEOUT` | Same for the bundled LiteLLM (default 300). `DGXMM_LITELLM_MAX_RESTARTS` (default 3) fails sooner on a crash loop. |
@@ -273,10 +278,14 @@ DGXMM_BIND=127.0.0.1 ./install.sh
 Set `secure_cookies: always` in `config.yaml` when the proxy terminates HTTPS. The proxy must disable
 response buffering for the event stream, allow long-lived connections, and pass `X-Forwarded-Proto`.
 
-**Important**: Configure `trusted_proxies` to match your proxy's IP or network:
-- **Proxy container on the DGXMM network**: set to the proxy container's IP or the docker network subnet (e.g., `DGXMM_TRUSTED_PROXIES=<network-subnet>`)
-- **Proxy on the host** (docker port publishing): set to the DGXMM network's gateway IP (find with `docker network inspect <network> -f '{{(index .IPAM.Config 0).Gateway}}'`).
+Set [`trusted_proxies`](#web-ui-and-sessions) (or `DGXMM_TRUSTED_PROXIES` in `.env`) to the address
+DGXMM sees the proxy connect from, otherwise its `X-Forwarded-For` header is ignored:
 
+- **Proxy container on the DGXMM network**: the proxy container's IP or the network's subnet, for
+  example `DGXMM_TRUSTED_PROXIES=172.18.0.0/16`.
+- **Proxy on the host** (through the published port): the DGXMM network's gateway IP, from
+  `docker network inspect <network> -f '{{(index .IPAM.Config 0).Gateway}}'`. A loopback install
+  prints this hint at the end.
 
 **nginx in a Docker container on the DGXMM network**: the shipped `deploy/nginx-dgxmm.conf`. It
 resolves `dgxmm` through Docker's DNS, so nginx still starts while DGXMM is down. Install with
