@@ -104,12 +104,16 @@ class VllmEngine:
 
     def __init__(self, settings: Settings):
         self.settings = settings
+        self.arch_source = None
 
     def validate_config(self, raw: dict[str, Any]) -> VllmConfig:
         return VllmConfig.model_validate(raw)
 
     def supports(self, artifact: ModelArtifact) -> bool:
-        return artifact.source == "hf" and artifact.format == "safetensors" and artifact.kind == "llm"
+        if not (artifact.source == "hf" and artifact.format == "safetensors" and artifact.kind == "llm"):
+            return False
+        archs = self.arch_source() if self.arch_source else None
+        return archs is None or artifact.architecture in archs
 
     def draft_ref(self, cfg: VllmConfig) -> str | None:
         return cfg.speculative.model if cfg.speculative and cfg.speculative.model else None
