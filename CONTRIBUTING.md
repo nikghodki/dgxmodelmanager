@@ -75,7 +75,7 @@ frontend/src/
 tests/            pytest suite
 install.sh        installer (see ./install.sh --help)
 docs/             user documentation; docs/superpowers/ holds design history
-deploy/           example reverse-proxy config
+deploy/           example nginx config, bundled LiteLLM config (deploy/litellm/)
 ```
 
 Conventions:
@@ -95,4 +95,5 @@ Conventions:
 - Keep `.venv/bin/pytest -q`, `npx vitest run` and `npm run build` green. Add tests with every
   behaviour change.
 - Update the docs in `docs/` when you change behaviour, configuration keys or installer options.
+- Add user-visible changes to the `[Unreleased]` section of [CHANGELOG.md](CHANGELOG.md).
 - Never commit `.env`, `config.yaml`, `data/` or `secrets/` (they are gitignored).

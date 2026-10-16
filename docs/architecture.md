@@ -15,6 +15,7 @@ DGXMM's decisions or to change the code. Each section names the source files it 
 - [Process view](#process-view)
 - [Startup and background loops](#startup-and-background-loops)
 - [Data model](#data-model)
+- [HTTP API](#http-api)
 - [Frontend](#frontend)
 - [Security model](#security-model)
 
@@ -514,6 +515,38 @@ SQLite tables (`dgxmm/db.py`):
 | `audit_log` | user, action, target, details, timestamp |
 
 Live metrics (about the last hour at the scrape interval) are kept in memory only.
+
+## HTTP API
+
+Every route is under `/dgxmm/api` (`dgxmm/api/`). All of them except login need a session; *user* means any
+signed-in user (`viewer` or `admin`). With a session, every request other than GET must also send the
+session's CSRF token in `X-CSRF-Token`. The UI uses exactly
+these routes, so this is also the API for scripts.
+
+| Area | Routes | Role |
+|---|---|---|
+| Auth | `POST /auth/login`, `POST /auth/logout`, `GET /auth/me`, `POST /auth/change-password` | login: none; others: user |
+| Host | `GET /host` (budget, GPU, disk), `GET /host/processes?scope=all\|external\|managed&limit=50` | user |
+| Deployments | `GET /deployments`, `GET /deployments/{id}`, `GET /deployments/{id}/litellm`, `POST /deployments/preview` | user |
+| | `POST /deployments`, `PATCH /deployments/{id}` (`{"alias": …, "rewrite_keys": true}`), `POST /deployments/{id}/start\|stop\|sleep\|wake\|switch\|reconfigure`, `DELETE /deployments/{id}`, `GET /deployments/{id}/logs` | admin |
+| Metrics and advice | `GET /deployments/{id}/metrics`, `GET /host/metrics`, `GET /deployments/{id}/advice`, `GET /deployments/{id}/benchmarks` | user |
+| | `POST /deployments/{id}/benchmark` | admin |
+| Inventory | `GET /inventory` | user |
+| | `POST /inventory/refresh`, `GET /inventory/delete-preview?ref=`, `DELETE /inventory?ref=`, `GET /inventory/cleanup-incomplete/preview`, `POST /inventory/cleanup-incomplete` | admin |
+| Catalog and downloads | `GET /catalog/search`, `GET /catalog/details`, `GET /downloads` | user |
+| | `POST /downloads`, `POST /downloads/{id}/cancel` | admin |
+| Planner | `GET /planner` | user |
+| | `PUT /planner/favourites/{ref}`, `DELETE /planner/favourites/{ref}` | admin |
+| LiteLLM | `GET /integrations/litellm` (`?probe=false` answers at once with the cached status), `GET /integrations/litellm/status`, `GET /integrations/litellm/models` (API bases only for admins) | user |
+| | `PUT /integrations/litellm`, `POST /integrations/litellm/test`, `POST /integrations/litellm/sync`, `GET\|POST /integrations/litellm/keys`, `PATCH\|DELETE /integrations/litellm/keys/{token}` | admin |
+| Engines | `GET /engines` | user |
+| Containers | `GET /containers/adoptable`, `POST /containers/{container}/adopt` | admin |
+| Users and audit | `GET\|POST /users`, `PATCH\|DELETE /users/{id}`, `GET /audit` | admin |
+| Events | `GET /stream` (server-sent events) | user |
+
+Errors are JSON, `{"detail": {"code": …, "message": …}}`, with a stable `code` (for example
+`model_name_taken`, `model_in_use`, `insufficient_memory`, `litellm_no_db`) and sometimes extra fields
+such as the deployment that holds a model name.
 
 ## Frontend
 
