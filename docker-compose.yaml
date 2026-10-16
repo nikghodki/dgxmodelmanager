@@ -28,11 +28,10 @@ services:
       - ./config.yaml:/app/config.yaml:ro
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8090/dgxmm/').status==200 else 1)"]
-      interval: 30s
+      interval: 10s               # short so ./install.sh sees "healthy" soon after start
       timeout: 5s
       retries: 3
-      start_period: 120s
-      start_interval: 2s          # Docker Engine 25+: quick checks while starting
+      start_period: 120s          # failures while starting do not count
     secrets: [litellm_master_key, hf_token]
 
 networks:
