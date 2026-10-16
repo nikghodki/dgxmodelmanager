@@ -108,3 +108,23 @@ def test_litellm_public_url_rejects_bad_values(tmp_path, bad):
     p.write_text(f"litellm_public_url: \"{bad}\"\n")
     with pytest.raises(ValueError):
         load_settings(str(p))
+
+
+BAD_URLS = ["ftp://x", "not a url", "http://", "http://u:p@h:4000", "http://h:4000/?q=1", "http://h:4000/#f",
+            "http://h:99999", "http://h :4000", "javascript:alert(1)"]
+
+
+@pytest.mark.parametrize("bad", BAD_URLS)
+def test_one_url_validator_for_config_and_api(bad):
+    """config.litellm_public_url and the LiteLLM settings API share one validator, so they cannot drift apart."""
+    from dgxmm.api import integrations
+    from fastapi import HTTPException
+    from dgxmm.config import Settings, validate_http_url
+    assert integrations.validate_http_url is validate_http_url
+    with pytest.raises(ValueError):
+        validate_http_url(bad)
+    with pytest.raises(ValueError):
+        Settings(litellm_public_url=bad)
+    with pytest.raises(HTTPException):
+        integrations._http_url("url", bad)
+    assert validate_http_url(" https://llm.example.com:8443/base/ ") == "https://llm.example.com:8443/base"

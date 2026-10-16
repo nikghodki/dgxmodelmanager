@@ -440,3 +440,129 @@ def test_public_url_seeded_from_config(lite):
     lite.put(BASE, headers=lite.h, json={"public_url": "http://10.0.0.5:4000"})
     assert lite.ctx.settings_store.get(LITELLM_PUBLIC_URL) is None
     assert lite.get(BASE).json()["public_url"] == "http://10.0.0.5:4000"
+
+
+def test_models_list_is_cached(lite):
+    """GET /models is viewer-reachable: it must not make an authenticated /model/info call per request."""
+    n = lambda: sum(1 for _, path in lite.fake.calls if path == "/model/info")  # noqa: E731
+    lite.get(BASE + "/models")
+    before = n()
+    lite.get(BASE + "/models")
+    as_viewer(lite)
+    lite.get(BASE + "/models")
+    assert n() == before
+    # DGXMM's own changes (sync add/delete) invalidate the cache
+    lite.ctx.litellm.client.invalidate_models()
+    lite.get(BASE + "/models")
+    assert n() == before + 1
+
+
+def test_models_cache_invalidated_by_sync(lite):
+    a = deploy(lite, lite.h, "a", alias="chat")
+    assert wait(lite, a["id"], "ready")
+    lite.get(BASE + "/models")
+    lite.post(BASE + "/sync", headers=lite.h)
+    assert "chat" in {m["model_name"] for m in lite.get(BASE + "/models").json()}
+
+
+# ---------- leaving a LiteLLM: DGXMM's entries are removed from it ----------
+
+def dgxmm_models(fake):
+    return [m["model_name"] for m in fake.models if (m.get("model_info") or {}).get("dgxmm_id")]
+
+
+@pytest.fixture
+def two(api_stack, settings):
+    """Two LiteLLMs: the default one (litellm-proxy) and new-litellm, routed by host."""
+    import httpx
+    Path(settings.litellm_key_file).write_text(MASTER)
+    old, new = FakeLiteLLM(master_key=MASTER), FakeLiteLLM(master_key="sk-new-host-key")
+    new.models = []
+    fakes = {"litellm-proxy": old, "new-litellm": new}
+    http = httpx.AsyncClient(transport=httpx.MockTransport(lambda req: fakes[req.url.host].handler(req)))
+    c = api_stack.ctx
+    c.litellm = LiteLLMSync(LiteLLMClient(http, c.settings_store.litellm), c.deployer, c.db, c.events)
+    api_stack.old, api_stack.new, api_stack.fake = old, new, old
+    api_stack.h = admin(api_stack)
+    a = deploy(api_stack, api_stack.h, "a", alias="chat")
+    assert wait(api_stack, a["id"], "ready")
+    assert api_stack.post(BASE + "/sync", headers=api_stack.h).status_code == 200
+    assert dgxmm_models(old) == ["chat"]
+    yield api_stack
+    api_stack.portal.call(http.aclose)
+
+
+def test_disable_deregisters_dgxmm_models(two):
+    r = two.put(BASE, headers=two.h, json={"enabled": False})
+    assert r.status_code == 200, r.text
+    j = r.json()
+    assert j["enabled"] is False and j["deregistered"] == 1 and j["deregister_error"] is None and j["warning"] is None
+    assert dgxmm_models(two.old) == [] and [m["model_name"] for m in two.old.models] == ["hand-written"]
+    detail = [d for a, _, d in audit_rows(two) if a == "litellm_settings_update"][-1]
+    assert detail["enabled"] is False and detail["deregistered"] == 1
+    # the sync loop does not put them back while disabled
+    two.post(BASE + "/sync", headers=two.h)
+    assert dgxmm_models(two.old) == []
+    # already disabled: nothing to do, no LiteLLM call
+    two.old.calls.clear()
+    r = two.put(BASE, headers=two.h, json={"public_url": "https://llm.example.com"})
+    assert r.json()["deregistered"] == 0 and not [c for c in two.old.calls if c[1].startswith("/model")]
+
+
+def test_url_change_deregisters_from_old_host_only(two):
+    r = two.put(BASE, headers=two.h, json={"url": "http://new-litellm:4000"})
+    assert r.status_code == 200, r.text
+    assert r.json()["deregistered"] == 1 and r.json()["url"] == "http://new-litellm:4000"
+    assert dgxmm_models(two.old) == []
+    assert [a for a in two.new.auth if a] == []  # no key ever went to the new host (none is bound to it)
+    assert not [c for c in two.new.calls if c[1].startswith("/model")]
+    two.post(BASE + "/sync", headers=two.h)
+    assert dgxmm_models(two.old) == [] and dgxmm_models(two.new) == []
+    # once a key is entered for the new URL, the deployment is registered there (and only there)
+    r = two.put(BASE, headers=two.h, json={"master_key": "sk-new-host-key"})
+    assert r.json()["deregistered"] == 0
+    assert two.post(BASE + "/sync", headers=two.h).status_code == 200
+    assert dgxmm_models(two.new) == ["chat"] and dgxmm_models(two.old) == []
+    assert set(a for a in two.new.auth if a) == {"Bearer sk-new-host-key"}
+    assert all(MASTER not in (a or "") for a in two.new.auth)
+
+
+def test_url_change_with_key_for_new_host(two):
+    r = two.put(BASE, headers=two.h, json={"url": "http://new-litellm:4000", "master_key": "sk-new-host-key"})
+    assert r.json()["deregistered"] == 1 and dgxmm_models(two.old) == []
+    assert all(MASTER not in (a or "") for a in two.new.auth)  # the old key is used with the old host only
+    assert all(a in (None, f"Bearer {MASTER}") for a in two.old.auth)
+
+
+def test_old_host_down_still_saves_with_warning(two):
+    two.old.down = True
+    r = two.put(BASE, headers=two.h, json={"enabled": False})
+    assert r.status_code == 200, r.text
+    j = r.json()
+    assert j["enabled"] is False and j["deregistered"] == 0 and "litellm-proxy:4000" in j["deregister_error"]
+    assert "1 DGXMM model" in j["warning"] and "http://litellm-proxy:4000" in j["warning"]
+    assert MASTER not in r.text
+    detail = [d for a, _, d in audit_rows(two) if a == "litellm_settings_update"][-1]
+    assert detail["deregistered"] == 0 and detail["deregister_error"]
+    # re-enabling cleans up / re-syncs as usual
+    two.old.down = False
+    assert two.put(BASE, headers=two.h, json={"enabled": True}).json()["enabled"] is True
+
+
+def test_invalid_put_does_not_deregister(two):
+    r = two.put(BASE, headers=two.h, json={"enabled": False, "public_url": "ftp://bad"})
+    assert r.status_code == 422
+    assert dgxmm_models(two.old) == ["chat"] and two.ctx.settings_store.litellm().enabled is True
+
+
+def test_settings_without_probe_and_separate_status(lite):
+    """The page renders the settings at once (no probe) and reads the status separately."""
+    r = lite.get(BASE, params={"probe": "false"})
+    assert r.status_code == 200 and r.json()["status"] is None and r.json()["url"] == "http://litellm-proxy:4000"
+    assert not [c for c in lite.fake.calls if c[1].startswith("/health")]
+    st = lite.get(BASE + "/status")
+    assert st.status_code == 200 and st.json()["reachable"] is True and st.json()["version"] == "1.100.0"
+    # once probed, the cached status comes along for free
+    assert lite.get(BASE, params={"probe": "false"}).json()["status"]["version"] == "1.100.0"
+    as_viewer(lite)
+    assert lite.get(BASE + "/status").status_code == 200

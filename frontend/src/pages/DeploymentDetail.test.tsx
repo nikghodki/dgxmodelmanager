@@ -89,6 +89,20 @@ describe("DeploymentDetail", () => {
     expect(await screen.findByText(/not registered in LiteLLM/i)).toBeInTheDocument();
   });
 
+  it("says a stopped deployment registers once ready, instead of warning that requests fail", async () => {
+    renderDetail([], { litellm: info({ registered: false, status: "none" }), extra: (url, opts) =>
+      url === "/deployments/1" && !opts?.method ? Promise.resolve({ ...dep, state: "stopped" }) : undefined });
+    const card = (await screen.findByRole("heading", { name: "API access" })).closest("[data-card]") as HTMLElement;
+    expect(await within(card).findByText(/Registers automatically when the deployment is ready/)).toBeInTheDocument();
+    expect(within(card).queryByText(/requests will fail/)).toBeNull();
+  });
+
+  it("keeps the snippet's copy button clear of the first line", async () => {
+    renderDetail();
+    const pre = await screen.findByLabelText("curl example");
+    expect(pre.className).toMatch(/\bpt-9\b/);   // the button sits in the top padding, above the code
+  });
+
   const taken = () => Promise.reject(new apiModule.ApiError(409, {
     code: "model_name_taken", message: "the model name taken is already used by deployment other (ready); choose a different model name (alias)",
     holder: { id: 2, name: "other", state: "ready" },

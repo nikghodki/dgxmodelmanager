@@ -342,6 +342,8 @@ _WRAPPER_VALUE_OPTS: dict[str, frozenset[str]] = {
     "incus": frozenset({"--env", "--user", "--group", "--cwd", "--project", "--mode"}),
     "flatpak-spawn": frozenset({"--env", "--directory", "--forward-fd", "--unset-env", "--app-path", "--usr-path"}),
 }
+# wrappers with an `exec` subcommand (docker exec -u USER c CMD), which must not be read as the shell builtin exec
+_EXEC_SUBCOMMAND_WRAPPERS = frozenset({"docker", "podman", "nerdctl", "kubectl", "oc", "crictl", "ctr", "lxc", "incus"})
 _CMD_VALUE_OPTS = frozenset({"--entrypoint"})  # docker run --entrypoint redis-cli: this option's value IS a command
 _TOOL_SCRIPT_FLAGS = {"lftp": {"-e", "-c"}}     # lftp -e 'open -u user,S h': the value is a script for the tool
 # tools with their own secret options: once one is active, later words never switch the context
@@ -406,6 +408,13 @@ class _Argv:
         if arg.startswith("-") or "=" in arg:
             return False
         return self.cmd_value or not self._prev_is_value_opt()
+
+    def _exec_subcommand(self, arg: str) -> bool:
+        """docker/podman/kubectl … exec: the wrapper's subcommand (its -u/-w values are option values), not the shell
+        builtin exec. True right after the wrapper itself or after one of its global option values."""
+        if arg != "exec" or not self.tools & _EXEC_SUBCOMMAND_WRAPPERS:
+            return False
+        return os.path.basename(self.prev) in _EXEC_SUBCOMMAND_WRAPPERS or self._prev_is_value_opt()
 
     def _can_switch(self, arg: str, base: str) -> bool:
         if base in self.tools or (base not in _KNOWN_TOOLS and base not in _WRAPPERS):
@@ -523,7 +532,8 @@ class _Argv:
                 if not any(c.isspace() for c in arg):
                     out.append(redact_text(arg, depth))
                     return
-        elif not self.pending and base in _PREFIX_COMMANDS and self.tools & _WRAPPERS and self._may_be_command(arg):
+        elif not self.pending and base in _PREFIX_COMMANDS and self.tools & _WRAPPERS and self._may_be_command(arg) \
+                and not self._exec_subcommand(arg):
             spec = _PREFIX_COMMANDS[base]  # ssh h sudo -i mysql, docker exec c env A=1 redis-cli
             self.prefix = [spec[0], spec[1], False, base]
             self.cmd_add = True
@@ -654,10 +664,22 @@ def _cap_input(argv: list[str]) -> tuple[list[str], bool]:
     return out, cut
 
 
+def _squeeze_empty(argv: list[str]) -> list[str]:
+    """Display only: drop trailing empty arguments and collapse runs of them (redis-server pads its rewritten title
+    with NULs). Done after redaction, so empty arguments still count as positionals for the redaction rules."""
+    out: list[str] = []
+    for a in argv:
+        if a or (out and out[-1]):
+            out.append(a)
+    while out and not out[-1]:
+        out.pop()
+    return out
+
+
 def format_command(argv: list[str]) -> tuple[str, bool]:
     """Redacted, shell-quoted command line, truncated to MAX_COMMAND_BYTES. Returns (command, truncated)."""
     capped, cut = _cap_input(argv)
-    text = " ".join(_quote(a) for a in redact_argv(capped))
+    text = " ".join(_quote(a) for a in _squeeze_empty(redact_argv(capped)))
     raw = text.encode()
     if len(raw) <= MAX_COMMAND_BYTES:
         return text, cut

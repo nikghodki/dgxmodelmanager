@@ -786,3 +786,16 @@ def test_delete_failed_audit_lists_removed_targets(settings, db, fake_hf_repo, m
         [row] = s.query(AuditLog).filter(AuditLog.action == "model_delete_failed").all()
         assert row.detail["removed"] == ["/host/hf/hub/.locks/models--Qwen--Qwen3-Tiny"]
         assert row.detail["failed"] == ["/host/hf/hub/models--Qwen--Qwen3-Tiny"]
+
+
+def test_preview_reports_recently_active_partial_files(settings, fake_hf_repo, make):
+    """The single-model clean-up dialog must know about the recent-partial rule before the user confirms."""
+    fake_hf_repo("org/fresh", config=QWEN_TINY, incomplete=True)
+    fake_hf_repo("org/stale", config=QWEN_TINY, incomplete=True)
+    t = time.time() - 3600
+    for b in (hub(settings) / "models--org--stale" / "blobs").glob("*.incomplete"):
+        os.utime(b, (t, t))
+    d, _ = make()
+    assert d.preview("org/fresh")["recently_active"] is True
+    assert d.preview("org/stale")["recently_active"] is False
+    assert d.preview("org/fresh")["blocked"] is False  # deleting the whole model is still allowed

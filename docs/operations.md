@@ -85,7 +85,11 @@ added to your `config.yaml`. They take their defaults until you add them.
 - **Secrets**: edit the file in `secrets/`, then `docker restart dgxmm`.
 - **LiteLLM connection** (URLs, master key, on/off): change it on the LiteLLM page. It applies
   immediately and wins over `config.yaml` (see
-  [configuration](configuration.md#runtime-settings-and-precedence)).
+  [configuration](configuration.md#runtime-settings-and-precedence)). Turning the integration off or
+  changing the internal URL first removes DGXMM's registrations (models with `model_info.dgxmm_id`) from
+  the LiteLLM being left, with that LiteLLM's key; the audit log entry records how many were removed. If
+  it was unreachable, the change is saved anyway with a warning: remove the leftover DGXMM models in that
+  LiteLLM, or re-enable the integration with that URL so the next save/sync cleans them up.
 
 ## Backup and restore
 

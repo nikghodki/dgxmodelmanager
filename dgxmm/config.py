@@ -14,6 +14,21 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 GIB = 1024**3
 
 
+def validate_http_url(v: str, field: str = "URL") -> str:
+    """An http(s) base URL with a host and no credentials, query or fragment; returned stripped, without a trailing
+    slash. Raises ValueError (message names ``field``). Shared by config.yaml and the LiteLLM settings API."""
+    v = v.strip()
+    parts = urlsplit(v)
+    if parts.scheme not in ("http", "https") or not parts.hostname or any(c.isspace() for c in v) \
+            or parts.query or parts.fragment or parts.username or parts.password:
+        raise ValueError(f"{field} must be an http:// or https:// URL without credentials, query or fragment")
+    try:
+        parts.port  # noqa: B018  (raises ValueError on an invalid port)
+    except ValueError:
+        raise ValueError(f"{field} has an invalid port") from None
+    return v.rstrip("/")
+
+
 def host_home() -> str:
     """Home directory of the host user DGXMM runs as.
 
@@ -115,14 +130,7 @@ class Settings(BaseModel):
     @classmethod
     def _validate_public_url(cls, v: str) -> str:
         v = (v or "").strip()
-        if not v:
-            return ""
-        parts = urlsplit(v)
-        if parts.scheme not in ("http", "https") or not parts.hostname or any(c.isspace() for c in v) \
-                or parts.query or parts.fragment or parts.username or parts.password:
-            raise ValueError("litellm_public_url must be an http:// or https:// URL without credentials or query")
-        parts.port  # noqa: B018  (raises ValueError on an invalid port)
-        return v.rstrip("/")
+        return validate_http_url(v, "litellm_public_url") if v else ""
 
     @field_validator("trusted_proxies", mode="before")
     @classmethod

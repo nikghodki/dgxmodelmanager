@@ -78,6 +78,8 @@ async def test_cancelled_version_fetch_is_negative_cached():
     clock.t += 16  # status cache expired, negative version cache (30 s) not
     out = await c.status()
     assert out["reachable"] is True and n(fake, "/openapi.json") == 1
+    for t in c._version_tasks.values():
+        t.cancel()
 
 
 async def test_not_a_litellm_endpoint():
@@ -149,3 +151,21 @@ async def test_key_list_cache():
     fake.add_key("y")
     c.invalidate_keys()
     assert len(await c.key_list(max_age=15)) == 2
+
+
+async def test_version_fetch_outliving_the_probe_deadline_fills_the_status():
+    """A cold, slow /openapi.json must not leave the page on "version unknown": the fetch finishes in the
+    background and the (still cached) status then carries the version."""
+    fake = FakeLiteLLM()
+
+    async def handler(req):
+        if req.url.path == "/openapi.json":
+            await asyncio.sleep(0.4)
+        return fake.handler(req)
+    c = LiteLLMClient.fixed("http://litellm:4000", "sk-test", httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    c.probe_deadline_s = 0.2
+    out = await c.status()
+    assert out["reachable"] is True and out["version"] is None
+    await asyncio.sleep(0.5)
+    out = await c.status()
+    assert out["version"] == "1.100.0" and n(fake, "/openapi.json") == 1

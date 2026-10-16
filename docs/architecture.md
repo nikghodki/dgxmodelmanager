@@ -375,9 +375,21 @@ checks LiteLLM's `/health/readiness`; without a connected database it answers `4
 Keys are identified by their hash; the full key is returned only in the create response. Keys created
 by DGXMM carry `metadata.created_by = "dgxmm"` and the user name.
 
-**Status** (`GET /api/integrations/litellm`) uses only unauthenticated calls (`/health/liveliness`,
-`/health/readiness`, and `/openapi.json` for the version), cached for 15 seconds. **Test connection**
-is always fresh and also checks the key with an authenticated `/model/info`.
+**Status** (`GET /api/integrations/litellm`, or on its own `GET /api/integrations/litellm/status`) uses
+only unauthenticated calls (`/health/liveliness`, `/health/readiness`, and `/openapi.json` for the
+version), cached for 15 seconds. The probe has a 4 s deadline; a slower version fetch finishes in the
+background and fills in the cached status. `GET /api/integrations/litellm?probe=false` returns the
+settings at once with the cached status (or `null`); the LiteLLM page uses it so the probe never holds
+the page up. **Test connection** is always fresh and also checks the key with an authenticated
+`/model/info`. `GET /api/integrations/litellm/models` caches LiteLLM's model list for 15 seconds (DGXMM's
+own registrations invalidate it).
+
+**Leaving a LiteLLM.** A `PUT /api/integrations/litellm` that disables the integration or changes the
+internal URL first deletes every model with `model_info.dgxmm_id` from the LiteLLM in effect before the
+change, using the key bound to that URL, under the sync lock (so the sync loop cannot re-register in
+between), then saves. It is best effort (15 s bound): the response carries `deregistered`,
+`deregister_error` and a `warning` naming the old URL when some may remain; the audit entry records the
+count and error. The settings are saved either way.
 
 ## Deleting weights
 
