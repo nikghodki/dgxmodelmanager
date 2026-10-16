@@ -29,8 +29,9 @@ _V_GRAPH = re.compile(r"Graph capturing finished in [\d.]+ secs?, took ([\d.]+) 
 _V_ACTUAL = re.compile(r"Actual usage is ([\d.]+) GiB for consumed memory \(weights \+ non-torch\), ([\d.]+) GiB for "
                        r"peak activation, and ([\d.]+) GiB for CUDAGraph memory.*?Current kv cache memory in use is "
                        r"([\d.]+) GiB")
-_L_START = re.compile(r"^build: \d+", re.M)
-_L_BUF = re.compile(r"^\S+:\s+(\S+)\s+(\w+) buffer size =\s*([\d.]+) (MiB|GiB)", re.M)
+# Unanchored so `--log-prefix` / `--log-timestamps` prefixes ("0.00.123.456 I ...") are tolerated.
+_L_START = re.compile(r"(?:^|\s)build: \d+", re.M)
+_L_BUF = re.compile(r"\b\w+:\s+(\S+)\s+(\w+) buffer size =\s*([\d.]+) (MiB|GiB)")
 
 
 @dataclass(frozen=True)
@@ -66,7 +67,11 @@ def parse_vllm(text: str) -> LogFootprint | None:
 
 def parse_llamacpp(text: str) -> LogFootprint | None:
     starts = [m.start() for m in _L_START.finditer(text)]
-    seg = text[starts[-1]:] if starts else text
+    if not starts:
+        # Without the startup banner we cannot tell restarts apart (a draft model also re-logs the loader lines),
+        # so summing the tail could double count. Fail closed.
+        return None
+    seg = text[starts[-1]:]
     parts: dict[str, int] = {}
     for m in _L_BUF.finditer(seg):
         _backend, kind, value, unit = m.groups()
