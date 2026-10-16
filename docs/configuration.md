@@ -80,6 +80,7 @@ the container.
 | `base_path` | string | `/dgxmm` | URL prefix of the UI and API. The frontend is built for `/dgxmm`, so leave this alone. |
 | `session_ttl_s` | int | `43200` (12 h) | Login session lifetime. It is extended on every request. |
 | `secure_cookies` | `auto` / `always` / `never` | `auto` | `auto`: the cookie is `Secure` when the request is HTTPS (directly or via `X-Forwarded-Proto`). Use `always` behind an HTTPS proxy. |
+| `trusted_proxies` | comma-separated IPs/CIDRs | `127.0.0.1,::1` | IPs/subnets trusted to set `X-Forwarded-For` (for correct client IPs in logs and rate limiting). Default is loopback-only. Behind a reverse proxy, set this to the proxy's IP or docker network subnet (e.g., `172.23.0.0/16`). |
 
 ### Polling intervals
 
@@ -264,7 +265,7 @@ it in your `server { }` block:
         proxy_pass $dgxmm_upstream;
         proxy_http_version 1.1;
         proxy_set_header Host $host;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;  # DGXMM trusts this from trusted_proxies only
         proxy_set_header X-Forwarded-Proto $scheme;
         proxy_buffering off;          # SSE
         proxy_read_timeout 1h;
