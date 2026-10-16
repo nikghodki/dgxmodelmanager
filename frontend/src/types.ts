@@ -40,6 +40,8 @@ export interface LiteLLMStatus { reachable: boolean; version: string | null; db:
 export interface LiteLLMSettings {
   enabled: boolean; url: string; public_url: string; endpoint: string;
   master_key_set: boolean; master_key_source: "settings" | "secret_file" | "none"; status: LiteLLMStatus;
+  /** Set when a key exists but is not valid for the effective URL (keys are bound to the URL they were entered for). */
+  master_key_hint: string | null;
 }
 export interface LiteLLMTestResult extends LiteLLMStatus { auth_ok: boolean | null; models: number | null }
 export interface LiteLLMSyncResult { ok: boolean; status: string; registered: number; removed: number; error: string | null }
@@ -57,6 +59,11 @@ export interface LiteLLMKey {
 /** Only the create response carries the full key. */
 export interface LiteLLMCreatedKey extends LiteLLMKey { key: string }
 export interface ApiProblem { code: string; message: string }
+export interface DeploymentRef { id: number; name: string; state: string }
+/** PATCH /deployments/{id} response: the deployment plus what happened to keys scoped to the old model name. */
+export interface AliasPatchResult extends Deployment {
+  affected_keys: { token: string; key_alias: string | null; models: string[] }[]; keys_rewritten: boolean | number | unknown[]; keys_error: ApiProblem | null;
+}
 export interface DeploymentLiteLLM {
   deployment_id: number; model_name: string; endpoint: string; registered: boolean | null; status: string; enabled: boolean;
   error: ApiProblem | null; keys: LiteLLMKey[]; keys_visible: boolean; keys_error: ApiProblem | null;

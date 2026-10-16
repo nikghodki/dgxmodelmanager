@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
+import { ApiError } from "@/api";
 import {
-  ALIAS_RE, aliasProblem, buildKeyCreateBody, buildKeyPatchBody, connectionPatch, curlSnippet, emptyKeyForm, endpointPreview,
+  ALIAS_RE, apiErrorText, keysScopedTo, nameFixHref, rewrittenCount, suggestAlias, takenHolder, aliasProblem, buildKeyCreateBody, buildKeyPatchBody, connectionPatch, curlSnippet, emptyKeyForm, endpointPreview,
   isAllModels, keyFormFromKey, keyFormProblems, litellmProblem, modelNameOptions, pythonSnippet, urlProblem,
 } from "./litellm";
 
@@ -29,22 +30,22 @@ describe("connectionPatch", () => {
   const saved = { enabled: true, url: "http://a:4000", public_url: "", master_key_set: true };
   it("sends only changed fields", () => {
     expect(connectionPatch(saved, { enabled: true, url: "http://a:4000", public_url: "https://x", keyMode: "keep", masterKey: "" }))
-      .toEqual({ body: { public_url: "https://x" }, needsKey: false });
+      .toEqual({ body: { public_url: "https://x" }, keyDetaches: false });
   });
-  it("requires the master key when the internal URL changes and a key is in effect", () => {
+  it("flags that the current key stops applying when the internal URL changes, without blocking the save", () => {
     const r = connectionPatch(saved, { enabled: true, url: "http://evil:4000", public_url: "", keyMode: "keep", masterKey: "" });
-    expect(r.needsKey).toBe(true);
+    expect(r).toEqual({ body: { url: "http://evil:4000" }, keyDetaches: true });
     const ok = connectionPatch(saved, { enabled: true, url: "http://b:4000", public_url: "", keyMode: "replace", masterKey: "sk-new" });
-    expect(ok).toEqual({ body: { url: "http://b:4000", master_key: "sk-new" }, needsKey: false });
+    expect(ok).toEqual({ body: { url: "http://b:4000", master_key: "sk-new" }, keyDetaches: false });
   });
-  it("does not require a key for a URL change when none is set, and clear sends an empty key", () => {
-    expect(connectionPatch({ ...saved, master_key_set: false }, { enabled: true, url: "http://b:4000", public_url: "", keyMode: "keep", masterKey: "" }).needsKey).toBe(false);
+  it("no key, no detach; clear sends an empty key", () => {
+    expect(connectionPatch({ ...saved, master_key_set: false }, { enabled: true, url: "http://b:4000", public_url: "", keyMode: "keep", masterKey: "" }).keyDetaches).toBe(false);
     expect(connectionPatch(saved, { enabled: false, url: "http://a:4000", public_url: "", keyMode: "clear", masterKey: "" }).body)
       .toEqual({ enabled: false, master_key: "" });
   });
   it("ignores trailing slashes when comparing URLs", () => {
     expect(connectionPatch(saved, { enabled: true, url: "http://a:4000/", public_url: "", keyMode: "keep", masterKey: "" }))
-      .toEqual({ body: {}, needsKey: false });
+      .toEqual({ body: {}, keyDetaches: false });
   });
 });
 
@@ -114,5 +115,45 @@ describe("litellmProblem", () => {
     expect(litellmProblem({ code: "litellm_not_configured", message: "m" }).title).toMatch(/master key/i);
     expect(litellmProblem({ code: "litellm_unreachable", message: "could not reach" }).title).toMatch(/reach/i);
     expect(litellmProblem({ code: "weird", message: "boom" }).description).toBe("boom");
+  });
+});
+
+describe("model name conflicts", () => {
+  const taken = new ApiError(409, { code: "model_name_taken", message: "the model name chat is already used", holder: { id: 7, name: "other", state: "ready" } });
+  it("finds the holder and always names it in error text", () => {
+    expect(takenHolder(taken)).toEqual({ id: 7, name: "other", state: "ready" });
+    expect(takenHolder(new Error("x"))).toBeNull();
+    expect(apiErrorText(taken)).toBe("the model name chat is already used (held by deployment other)");
+    const named = new ApiError(409, { code: "model_name_taken", message: "used by deployment other (ready)", holder: { id: 7, name: "other", state: "ready" } });
+    expect(apiErrorText(named)).toBe("used by deployment other (ready)");
+    expect(apiErrorText(new Error("boom"))).toBe("boom");
+  });
+  it("explains a sync conflict and shows the key hint for a missing key", () => {
+    expect(litellmProblem({ code: "model_name_conflict", message: "model name chat is already registered for deployment a" }).description).toMatch(/registered for deployment a/);
+    expect(litellmProblem({ code: "litellm_not_configured", message: "re-enter it for this URL" }).description).toBe("re-enter it for this URL");
+  });
+  it("keysScopedTo lists only keys naming the model explicitly", () => {
+    const k = (models: string[]) => ({ token: models.join(), models } as any);
+    expect(keysScopedTo([k(["chat"]), k([]), k(["all-proxy-models"]), k(["chat", "x"]), k(["x"])], "chat").map((x) => x.token)).toEqual(["chat", "chat,x"]);
+  });
+});
+
+describe("model name fixes", () => {
+  it("suggests a stable, valid alias from served name + deployment name", () => {
+    expect(suggestAlias("qwen3-8b", "coder")).toBe("qwen3-8b-coder");
+    expect(suggestAlias("Qwen/Qwen3 8B", "a b")).toBe("Qwen/Qwen3-8B-a-b");
+    expect(suggestAlias(null, "coder")).toBe("coder");
+    expect(suggestAlias("x".repeat(60), "deployment")).toHaveLength(64);
+    expect(ALIAS_RE.test(suggestAlias("x".repeat(60), "deployment"))).toBe(true);
+  });
+  it("links to the deployment's LiteLLM tab with the suggestion prefilled", () => {
+    expect(nameFixHref({ id: 3, name: "coder", served_name: "qwen" })).toBe("/deployments/3?tab=litellm&alias=qwen-coder");
+  });
+  it("counts rewritten keys whether the backend sends a bool, a number or a list", () => {
+    expect(rewrittenCount(true, 2)).toBe(2);
+    expect(rewrittenCount(false, 2)).toBe(0);
+    expect(rewrittenCount(1, 2)).toBe(1);
+    expect(rewrittenCount([{ token: "a" }], 2)).toBe(1);
+    expect(rewrittenCount(undefined, 2)).toBe(0);
   });
 });
