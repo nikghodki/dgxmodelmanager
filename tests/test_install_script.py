@@ -523,3 +523,9 @@ def test_mdns_url_printed_after_ip_urls(box):
 def test_compose_healthcheck_works_on_old_engines():
     text = (ROOT / "docker-compose.yaml").read_text()
     assert "start_interval" not in text and "start_period" in text
+
+
+def test_trusted_proxies_env_accepted(box):
+    """DGXMM_TRUSTED_PROXIES env var is accepted and doesn't break install."""
+    p = box.run("--dry-run", DGXMM_TRUSTED_PROXIES="172.23.0.0/16")
+    assert p.returncode == 0, p.out

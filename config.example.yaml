@@ -67,6 +67,8 @@ litellm_url: http://litellm-proxy:4000
 # base_path: /dgxmm           # URL prefix; the frontend is built for /dgxmm, so leave as is
 # session_ttl_s: 43200        # login session lifetime (seconds)
 # secure_cookies: auto        # auto (Secure when the request is HTTPS) | always | never
+# trusted_proxies: 127.0.0.1,::1  # IPs/CIDRs trusted to set X-Forwarded-For (comma-separated)
+#                                  # Default is loopback-only; set to your reverse proxy IP/subnet
 
 # --- Polling intervals (seconds) ----------------------------------------------------------
 # monitor_poll_s: 3           # deployment state checks while starting/stopping
@@ -80,3 +82,4 @@ litellm_url: http://litellm-proxy:4000
 # host_proc: /host/proc       # host /proc (read-only mount)
 # host_cgroup: /host/sys/fs/cgroup
 # llmfit_bin: llmfit          # llmfit CLI used for catalog fit scores
+
