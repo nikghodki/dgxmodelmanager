@@ -242,7 +242,7 @@ load_settings() {
   NETWORK=$(resolve DGXMM_NETWORK "$FLAG_NETWORK" dgxmm)
   HF_CACHE=$(expand_tilde "$(resolve DGXMM_HF_CACHE "$FLAG_HF" "$HOST_HOME/.cache/huggingface")")
   MODELS_DIR=$(expand_tilde "$(resolve DGXMM_MODELS_DIR "$FLAG_MODELS" "$HOST_HOME/models")")
-  DGXMM_TRUSTED_PROXIES=
+  TRUSTED_PROXIES=$(resolve DGXMM_TRUSTED_PROXIES "" "")
 
   if ! [[ $PORT =~ ^[0-9]+$ ]] || ((PORT < 1 || PORT > 65535)); then
     die "DGXMM_PORT must be a port number 1-65535 (got '$PORT')"
@@ -278,7 +278,7 @@ env_value() {  # env_value KEY -> effective value for .env
     DGXMM_MODELS_DIR) printf '%s' "$MODELS_DIR" ;;
     DGXMM_NETWORK) printf '%s' "$NETWORK" ;;
     DGXMM_HOST_HOME) printf '%s' "$HOST_HOME" ;;
-    DGXMM_TRUSTED_PROXIES) printf %s "${DGXMM_TRUSTED_PROXIES:-}" ;;
+    DGXMM_TRUSTED_PROXIES) printf '%s' "$TRUSTED_PROXIES" ;;
   esac
 }
 
@@ -639,18 +639,16 @@ print_urls() {
 }
 
 proxy_hint() {
-  # Print reverse proxy trusted_proxies hint when BIND is loopback and TRUSTED_PROXIES unset
-  if [ "$BIND" = "127.0.0.1" ] || [ "$BIND" = "::1" ]; then
-    if [ -z "$DGXMM_TRUSTED_PROXIES" ]; then
-      local gw
-      gw=$(docker network inspect "$NETWORK" -f '{{(index .IPAM.Config 0).Gateway}}' 2>/dev/null || true)
-      if [ -n "$gw" ]; then
-        printf '
-'
-        info "Behind a reverse proxy? Set DGXMM_TRUSTED_PROXIES in .env to your proxy's address"
-        note "For a proxy on this host use $gw (docker network inspect $NETWORK -f '{{(index .IPAM.Config 0).Gateway}}'). Then re-run ./install.sh"
-      fi
-    fi
+  # Loopback bind and no trusted proxies: a reverse proxy on this host reaches DGXMM from the docker
+  # network gateway, so its X-Forwarded-For would be ignored until DGXMM_TRUSTED_PROXIES is set.
+  case $BIND in 127.0.0.1|::1) ;; *) return 0 ;; esac
+  [ -z "$TRUSTED_PROXIES" ] || return 0
+  local gw
+  gw=$(docker network inspect "$NETWORK" -f '{{(index .IPAM.Config 0).Gateway}}' 2>/dev/null || true)
+  printf '\n'
+  info "Behind a reverse proxy? Set DGXMM_TRUSTED_PROXIES in .env to your proxy's address, then re-run ./install.sh"
+  if [ -n "$gw" ]; then
+    note "for a proxy on this host use the docker network gateway: DGXMM_TRUSTED_PROXIES=$gw"
   fi
 }
 
