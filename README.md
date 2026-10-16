@@ -80,6 +80,7 @@ DGXMM_BIND=127.0.0.1 ./install.sh                         # loopback only (behin
 ./install.sh --hf-cache /data/hf --models-dir /data/gguf  # where models live
 HF_TOKEN=hf_xxx ./install.sh                              # token for gated Hugging Face models
 LITELLM_URL=http://litellm:4000 LITELLM_MASTER_KEY=sk-xxx ./install.sh   # LiteLLM registration
+./install.sh --with-litellm                               # also run a bundled LiteLLM: one /v1 endpoint for all models
 DGXMM_BIND=127.0.0.1 DGXMM_NETWORK=gateway ./install.sh   # join an existing proxy's Docker network
 ```
 
