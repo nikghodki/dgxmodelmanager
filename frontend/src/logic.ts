@@ -26,3 +26,19 @@ export function finiteSeries<T extends Record<string, any>>(data: T[], keys: str
     return out as T;
   });
 }
+
+export type DeploymentAction = "open" | "sleep" | "wake" | "switch" | "reconfigure" | "stop" | "start" | "remove";
+
+/** Which row/header actions a user may take on a deployment in its current state. */
+export function deploymentActions(d: { state: string; sleep_capable: boolean }, isAdmin: boolean): DeploymentAction[] {
+  const out: DeploymentAction[] = ["open"];
+  if (!isAdmin) return out;
+  if (d.state === "ready" && d.sleep_capable) out.push("sleep");
+  if (d.state === "sleeping") out.push("wake");
+  if (d.state === "ready" || d.state === "sleeping") out.push("switch");
+  if (["ready", "sleeping", "stopped", "failed"].includes(d.state)) out.push("reconfigure");
+  if (["ready", "sleeping", "starting", "loading", "unknown"].includes(d.state)) out.push("stop");
+  if (d.state === "stopped" || d.state === "failed") out.push("start");
+  if (canRemove(d.state)) out.push("remove");
+  return out;
+}
