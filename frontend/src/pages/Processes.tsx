@@ -1,7 +1,7 @@
 import { useMemo, useRef, useState, type KeyboardEvent } from "react";
 import { useQuery } from "@tanstack/react-query";
 import type { ColumnDef } from "@tanstack/react-table";
-import { Box, Check, Monitor, Pause } from "lucide-react";
+import { Box, Check, Monitor, Pause, Play } from "lucide-react";
 import { api } from "@/api";
 import { CopyButton } from "@/components/app/copy-button";
 import { DataTable } from "@/components/app/data-table";
@@ -11,7 +11,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { fmtBytes } from "@/format";
-import { containerLabel, filterScope, groupByContainer, processSearchText, userLabel, type ProcessGroup, type ProcessScope } from "@/lib/processes";
+import { containerLabel, filterScope, groupByContainer, labelTitle, processSearchText, userLabel, type ProcessGroup, type ProcessScope } from "@/lib/processes";
 import { cn } from "@/lib/utils";
 import type { ContainerRef, ManagedRef, ProcessesResponse, ProcessInfo } from "@/types";
 
@@ -28,7 +28,12 @@ function ManagedBadge({ managed }: { managed: ManagedRef | null }) {
   return <Badge variant="secondary" className="text-[11px]" title={managed.name ? `Deployment ${managed.name}` : undefined}>DGXMM</Badge>;
 }
 
-function ContainerCell({ container, managed }: { container: ContainerRef | null; managed: ManagedRef | null }) {
+function LabelBadge({ label }: { label: ManagedRef | null | undefined }) {
+  if (!label) return null;
+  return <Badge variant="outline" className="text-[11px]" title={labelTitle(label)}>DGXMM-labelled</Badge>;
+}
+
+function ContainerCell({ container, managed, label }: { container: ContainerRef | null; managed: ManagedRef | null; label?: ManagedRef | null }) {
   const Icon = container ? Box : Monitor;
   return (
     <div className="flex min-w-0 flex-wrap items-center gap-1.5">
@@ -36,6 +41,7 @@ function ContainerCell({ container, managed }: { container: ContainerRef | null;
       <span className="font-medium">{containerLabel(container)}</span>
       {container?.image && <Badge variant="outline" className="max-w-[28ch] truncate font-mono text-[11px]" title={container.image}>{container.image}</Badge>}
       <ManagedBadge managed={managed} />
+      <LabelBadge label={label} />
     </div>
   );
 }
@@ -117,7 +123,7 @@ export function Processes() {
 
   const processCols = useMemo<ColumnDef<ProcessInfo, any>[]>(() => [
     { id: "command", accessorFn: (r) => r.command, header: "Command", enableSorting: false, cell: ({ row }) => <CommandText command={row.original.command} />, meta: { className: "min-w-[24ch] max-w-[70ch]", hideOnMobile: true } },
-    { id: "container", accessorFn: (r) => containerLabel(r.container), header: "Container", cell: ({ row }) => <ContainerCell container={row.original.container} managed={row.original.managed} /> },
+    { id: "container", accessorFn: (r) => containerLabel(r.container), header: "Container", cell: ({ row }) => <ContainerCell container={row.original.container} managed={row.original.managed} label={row.original.dgxmm_label} /> },
     { accessorKey: "user", header: "User", cell: ({ row }) => <UserText p={row.original} /> },
     ...memCols<ProcessInfo>(),
     { accessorKey: "pid", header: "PID", meta: { className: "text-right" } },
@@ -125,7 +131,7 @@ export function Processes() {
 
   const groupCols = useMemo<ColumnDef<ProcessGroup, any>[]>(() => [
     { id: "name", accessorFn: (g) => g.name, header: "Container", cell: ({ row }) => (
-      <ContainerCell container={row.original.key === "host" ? null : { id: row.original.key, name: row.original.name, image: row.original.image }} managed={row.original.managed} />) },
+      <ContainerCell container={row.original.key === "host" ? null : { id: row.original.key, name: row.original.name, image: row.original.image }} managed={row.original.managed} label={row.original.label} />) },
     { id: "count", accessorFn: (g) => g.processes.length, header: "Processes", meta: { className: "text-right" } },
     ...memCols<ProcessGroup>(),
     { id: "top", accessorFn: (g) => g.processes[0]?.command ?? "", header: "Largest process", enableSorting: false,
@@ -145,7 +151,7 @@ export function Processes() {
             {q.data && <span className="text-xs text-muted-foreground tabular-nums">{q.data.total} processes · scanned in {Math.round(q.data.duration_ms)} ms</span>}
             <span className="text-xs text-muted-foreground" aria-live="polite">{paused ? "Auto-refresh paused" : `Refreshing every ${REFRESH_MS / 1000} s`}</span>
             <Button size="sm" variant={paused ? "secondary" : "outline"} aria-pressed={paused} aria-label="Pause auto-refresh" onClick={() => setPaused(!paused)}>
-              <Pause className="mr-1 h-4 w-4" aria-hidden />Pause
+              {paused ? <Play className="mr-1 h-4 w-4" aria-hidden /> : <Pause className="mr-1 h-4 w-4" aria-hidden />}{paused ? "Resume" : "Pause"}
             </Button>
           </>
         } />
@@ -164,7 +170,7 @@ export function Processes() {
         <DataTable key="process" columns={processCols} data={shown} loading={q.isLoading} getRowId={(r) => String(r.pid)}
           searchPlaceholder="Search command, container, user, pid" searchText={processSearchText}
           initialSort={{ id: "rss", desc: true }} renderDetail={(p) => <ProcessDetail p={p} />}
-          mobileTitle={(p) => <CommandText command={p.command} />} />
+          mobileTitle={(p) => `${containerLabel(p.container)} · pid ${p.pid}`} />
       ) : (
         <DataTable key="container" columns={groupCols} data={groups} loading={q.isLoading} getRowId={(g) => g.key}
           searchPlaceholder="Search container, image, command" searchText={(g) => `${g.name} ${g.image ?? ""} ${g.processes.map(processSearchText).join(" ")}`}

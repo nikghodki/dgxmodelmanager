@@ -93,7 +93,7 @@ def test_processes_fields_exclusions_and_sort(settings, tmp_path):
     for item in ps:
         assert SECRET not in repr(item.as_dict())
         assert set(item.as_dict()) == {"pid", "ppid", "uid", "user", "user_scope", "name", "exe", "command",
-                                       "command_truncated", "container", "managed", "rss", "gpu"}
+                                       "command_truncated", "container", "managed", "dgxmm_label", "rss", "gpu"}
 
 
 def test_user_falls_back_to_numeric_uid_without_passwd(settings, tmp_path):
@@ -102,21 +102,27 @@ def test_user_falls_back_to_numeric_uid_without_passwd(settings, tmp_path):
     assert p[300].user == "1000" and p[100].user == "root"
 
 
-def test_managed_flag_from_container_label_uses_the_deployment_name(settings, tmp_path):
+def test_labelled_but_inactive_container_is_external_with_a_dgxmm_label(settings, tmp_path):
     probe = build(settings, tmp_path)
     p = by_pid(probe.processes({}, {7: "qwen-old"}))
-    assert p[100].managed == {"deployment_id": 7, "name": "qwen-old"}
-    assert p[200].managed is None
-    assert by_pid(probe.processes({}))[100].managed == {"deployment_id": 7, "name": None}  # never the container name
+    assert p[100].managed is None  # not an active deployment: its memory counts as external in the budget
+    assert p[100].dgxmm_label == {"deployment_id": 7, "name": "qwen-old"}  # deployment name, never the container's
+    assert p[200].dgxmm_label is None
+    assert by_pid(probe.processes({}))[100].dgxmm_label == {"deployment_id": 7, "name": None}
+    active = by_pid(probe.processes({CID: {"deployment_id": 7, "name": "qwen"}}))
+    assert active[100].managed == {"deployment_id": 7, "name": "qwen"} and active[100].dgxmm_label is None
 
 
 def test_sample_and_processes_share_one_managed_definition(settings, tmp_path):
     probe = build(settings, tmp_path)
-    # label-managed container not in the active deployment rows: managed in /processes AND not "external" in sample
+    # same rule both ways: managed = active deployment container; labelled-only shows up as external, tagged
     s = probe.sample(set())
-    managed_pids = {p.pid for p in probe.processes({}) if p.managed}
-    assert managed_pids == {100, 101}
-    assert not managed_pids & {p.pid for p in s.external_top}
+    top = by_pid(s.external_top)
+    assert {100, 101} <= set(top) and top[100].dgxmm_label == {"deployment_id": 7, "name": None}
+    assert {p.pid for p in probe.processes({}) if p.managed} == set()
+    s = probe.sample({CID})
+    assert not {100, 101} & {p.pid for p in s.external_top}
+    assert {p.pid for p in probe.processes({CID: {"deployment_id": 7, "name": "q"}}) if p.managed} == {100, 101}
 
 
 def test_sample_uses_cache_only_container_lookups(settings, tmp_path):
@@ -142,6 +148,7 @@ def test_sample_external_top_is_enriched_and_redacted(settings, tmp_path):
     probe = build(settings, tmp_path)
     s = probe.sample({CID})
     assert [p.pid for p in s.external_top] == [300, 200, 400]
+    assert all(p.dgxmm_label is None for p in s.external_top)
     top = by_pid(s.external_top)
     assert top[300].command == "python train.py --hf-token=***" and top[300].user == "nikghodki-dgx"
     assert top[300].user_scope == "host" and (top[200].user, top[200].user_scope) == ("root", "container")

@@ -1,9 +1,10 @@
 import { Link } from "react-router-dom";
 import { Box, Monitor } from "lucide-react";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { fmtBytes } from "@/format";
-import { containerLabel, userLabel } from "@/lib/processes";
+import { containerLabel, labelTitle, userLabel } from "@/lib/processes";
 import type { ProcMem } from "@/types";
 
 /** Dashboard card: the largest processes DGXMM does not manage, with where they run and what they are. */
@@ -27,6 +28,10 @@ export function ExternalProcessesCard({ items }: { items: ProcMem[] }) {
                   <div className="flex min-w-0 items-center gap-1.5">
                     <Icon className="h-3.5 w-3.5 shrink-0 text-muted-foreground" aria-hidden />
                     <span className="truncate font-medium">{p.container === undefined ? p.name : containerLabel(p.container)}</span>
+                    {p.dgxmm_label && (
+                      <Badge variant="outline" className="shrink-0 text-[11px]"
+                        title={labelTitle(p.dgxmm_label)}>DGXMM-labelled</Badge>
+                    )}
                     <span className="shrink-0 text-xs text-muted-foreground">pid {p.pid}</span>
                     {p.user && <span className="truncate text-xs text-muted-foreground" title={userLabel(p.user, p.user_scope).title}>· {userLabel(p.user, p.user_scope).text}</span>}
                   </div>

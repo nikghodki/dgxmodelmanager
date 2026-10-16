@@ -176,6 +176,31 @@ LEAK_CASES = {
     "mysql -p in sh": ["bash", "-c", "mysql -uroot -p" + S + " -e 'select 1'"],
     "sshpass -p": ["sshpass", "-p", S, "ssh", "host"],
     "slack token": ["x", "xoxb-" + S + "-" + S],
+    # fix round 2
+    "sshpass -p glued": ["sshpass", "-p" + S, "ssh", "host"],
+    "curl -u glued": ["curl", "-uuser:" + S, "http://x"],
+    "htpasswd -b": ["htpasswd", "-b", "/etc/nginx/htpasswd", "admin", S],
+    "htpasswd -bc": ["htpasswd", "-bc", "/f", "admin", S],
+    "htpasswd -nb": ["htpasswd", "-nb", "admin", S],
+    "openssl -k": ["openssl", "enc", "-aes-256-cbc", "-k", S, "-in", "f"],
+    "openssl -pass pass:": ["openssl", "enc", "-pass", "pass:" + S],
+    "openssl -passin pass:": ["openssl", "rsa", "-passin", "pass:" + S, "-in", "k.pem"],
+    "openssl pass: in sh": ["sh", "-c", "openssl pkcs12 -export -passout pass:" + S + " -out x.p12"],
+    "os.environ sq": ["python", "-c", "import os; os.environ['API_KEY']='" + S + "'; main()"],
+    "os.environ dq": ["python", "-c", 'import os; os.environ["X_TOKEN"] = "' + S + '"'],
+    "environ setdefault": ["python", "-c", "os.environ.setdefault('HF_TOKEN', '" + S + "')"],
+    "tool flag in python list": ["python", "-c", "subprocess.run(['redis-cli','-a','" + S + "','ping'])"],
+    "mysql in python list": ["python", "-c", 'subprocess.run(["mysql", "-p' + S + '", "db"])'],
+    "nested sh -c": ["sh", "-c", "sh -c 'redis-cli -a " + S + " ping'"],
+    "nested sh -c x3": ["bash", "-c", "sh -c \"sh -c 'mysql -p" + S + " db'\""],
+    "shlex glued quotes": ["sh", "-c", "redis-cli -a 'Zq9SEC'RETvalue7 ping"],
+    "shlex backslash": ["sh", "-c", "redis-cli -a Zq9SEC\\RETvalue7 ping"],
+    "shlex dq pieces": ["sh", "-c", 'app --api-key "Zq9"SECRET"value7" --port 1'],
+    "--password:": ["app", "--password:" + S],
+    "--password: in sh": ["sh", "-c", "app --password:" + S + " run"],
+    "rewritten argv0 title": ["redis-cli -h r -a " + S + " ping"],
+    "env prefix in sh": ["sh", "-c", "env A=1 redis-cli -a " + S],
+    "sudo mysql in sh": ["sh", "-c", "sudo /usr/bin/mysql -p" + S],
 }
 
 
@@ -183,6 +208,7 @@ LEAK_CASES = {
 def test_reviewer_leak_cases(name):
     out = format_command(LEAK_CASES[name])[0]
     assert S not in out, out
+    assert "value7" not in out and "Zq9SEC" not in out, out  # no fragment of a split/quoted secret survives
     for prefix in ("ghp_", "github_pat_", "AKIA", "xoxb-"):
         assert prefix not in out, out
 
@@ -201,3 +227,20 @@ def test_reviewer_cases_keep_the_non_secret_parts():
 def test_curl_dash_k_is_insecure_not_a_key():
     # curl -k is --insecure (boolean): the next arg is the URL and must stay visible
     assert format_command(["curl", "-k", "https://h/x"])[0] == "curl -k https://h/x"
+
+
+def test_round2_keeps_the_non_secret_parts():
+    f = lambda argv: format_command(argv)[0]  # noqa: E731
+    assert f(["sshpass", "-p" + S, "ssh", "host"]) == "sshpass -p*** ssh host"
+    assert f(["curl", "-uuser:" + S, "http://x"]) == "curl -u*** http://x"
+    assert f(["htpasswd", "-b", "/etc/h", "admin", S]) == "htpasswd -b /etc/h admin ***"
+    assert f(["htpasswd", "-c", "/etc/h", "admin"]) == "htpasswd -c /etc/h admin"  # prompts: nothing secret
+    assert f(["openssl", "rsa", "-passin", "pass:" + S, "-in", "k.pem"]) == "openssl rsa -passin *** -in k.pem"
+    assert f(["app", "--password:" + S]) == "app --password:***"
+    assert f(["sh", "-c", "redis-cli -a 'Zq9SEC'RETvalue7 ping"]) == "sh -c 'redis-cli -a *** ping'"
+    assert f(["sh", "-c", "cd /x && redis-cli -h r -a " + S + " ping; echo ok"]) == \
+        "sh -c 'cd /x && redis-cli -h r -a *** ping; echo ok'"
+    out = f(["python", "-c", "subprocess.run(['redis-cli','-a','" + S + "','ping'])"])
+    assert "'\"'\"'redis-cli'\"'\"'" in out and "ping" in out
+    out = f(["sh", "-c", "sh -c 'redis-cli -a " + S + " ping'"])
+    assert "redis-cli -a *** ping" in out
