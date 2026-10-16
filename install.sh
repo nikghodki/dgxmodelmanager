@@ -242,6 +242,7 @@ load_settings() {
   NETWORK=$(resolve DGXMM_NETWORK "$FLAG_NETWORK" dgxmm)
   HF_CACHE=$(expand_tilde "$(resolve DGXMM_HF_CACHE "$FLAG_HF" "$HOST_HOME/.cache/huggingface")")
   MODELS_DIR=$(expand_tilde "$(resolve DGXMM_MODELS_DIR "$FLAG_MODELS" "$HOST_HOME/models")")
+  DGXMM_TRUSTED_PROXIES=
 
   if ! [[ $PORT =~ ^[0-9]+$ ]] || ((PORT < 1 || PORT > 65535)); then
     die "DGXMM_PORT must be a port number 1-65535 (got '$PORT')"
@@ -637,6 +638,22 @@ print_urls() {
   esac
 }
 
+proxy_hint() {
+  # Print reverse proxy trusted_proxies hint when BIND is loopback and TRUSTED_PROXIES unset
+  if [ "$BIND" = "127.0.0.1" ] || [ "$BIND" = "::1" ]; then
+    if [ -z "$DGXMM_TRUSTED_PROXIES" ]; then
+      local gw
+      gw=$(docker network inspect "$NETWORK" -f '{{(index .IPAM.Config 0).Gateway}}' 2>/dev/null || true)
+      if [ -n "$gw" ]; then
+        printf '
+'
+        info "Behind a reverse proxy? Set DGXMM_TRUSTED_PROXIES in .env to your proxy's address"
+        note "For a proxy on this host use $gw (docker network inspect $NETWORK -f '{{(index .IPAM.Config 0).Gateway}}'). Then re-run ./install.sh"
+      fi
+    fi
+  fi
+}
+
 cmd_install() {
   load_settings
   preflight
@@ -670,21 +687,9 @@ cmd_install() {
 
   if ((DRY_RUN)); then
     note "[dry-run] would wait for the healthcheck, then save a first-run admin password to secrets/admin_password"
-    # Reverse proxy trusted_proxies hint
-    if [ "$BIND" = "127.0.0.1" ] || [ "$BIND" = "::1" ]; then
-      if [ -z "${DGXMM_TRUSTED_PROXIES:-}" ]; then
-        local gw
-        gw=$(docker network inspect "$NETWORK" -f '{{(index .IPAM.Config 0).Gateway}}' 2>/dev/null || true)
-        if [ -n "$gw" ]; then
-          printf '
-'
-          note "[dry-run] Behind a reverse proxy? Set DGXMM_TRUSTED_PROXIES in .env to your proxy's address"
-          note "           For a proxy on this host use $gw (the gateway IP of $NETWORK), then re-run ./install.sh"
-        fi
-      fi
-    fi
     info "Dry run complete: nothing was changed. DGXMM would be reachable at:"
     print_urls
+    proxy_hint
     return 0
   fi
 
@@ -701,6 +706,7 @@ cmd_install() {
     note "admin password: see secrets/admin_password, or reset it (see docs/operations.md)"
   fi
   note "manage: ./install.sh status | logs | upgrade | uninstall"
+  proxy_hint
 }
 
 cmd_upgrade() {
