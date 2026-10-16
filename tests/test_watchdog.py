@@ -31,7 +31,8 @@ async def test_levels_and_events(stack):
 async def test_auto_protect_stops_lowest_priority_once_per_minute(stack):
     stack.http.all_healthy = True
     lo = await stack.deployer.deploy(DeployRequest(name="lo", engine="vllm", model_ref="Qwen/Qwen3-Tiny", config=SMALL, priority=0), 1)
-    hi = await stack.deployer.deploy(DeployRequest(name="hi", engine="vllm", model_ref="Qwen/Qwen3-Tiny", config=SMALL, priority=50), 1)
+    hi = await stack.deployer.deploy(DeployRequest(name="hi", engine="vllm", model_ref="Qwen/Qwen3-Tiny", config=SMALL, priority=50,
+                                                 alias="hi"), 1)  # distinct LiteLLM model names (same model twice)
     for d in (lo, hi):
         await stack.deployer.wait_ready(d["id"], 5)
     off = Watchdog(stack.settings, stack.deployer, stack.events, stack.db)
