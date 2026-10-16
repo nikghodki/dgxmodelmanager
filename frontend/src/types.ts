@@ -4,7 +4,7 @@ export interface Budget {
   total: number; available: number; margin: number; os_reserve: number; usable: number; committed: number;
   managed_actual: number; external: number; free_for_new: number; deployments: DeploymentUsage[];
 }
-export interface ProcMem { pid: number; name: string; rss: number; gpu: number; cmdline: string }
+export interface ProcMem { pid: number; name: string; rss: number; gpu: number }
 export interface Alert { level: "ok" | "warning" | "critical"; message?: string; since?: string; action?: string }
 export interface HostInfo { budget: Budget; external_top: ProcMem[]; gpu: Record<string, number | null>; alert: Alert; disk: { total: number; free: number } | null }
 export interface Artifact {
@@ -22,7 +22,7 @@ export interface PlanAction { type: "sleep" | "stop" | "patch"; deployment_id?: 
 export interface PlanOption { id: string; title: string; detail: string; new_required: number; frees: number; fits: boolean; actions: PlanAction[]; patch: Record<string, unknown> | null; model_ref?: string | null }
 export interface Preview {
   estimate: Estimate; fit: Fit; budget: Budget; served_name: string; config: Record<string, unknown>;
-  gpu_memory_utilization?: number; plans?: PlanOption[]; llmfit?: Record<string, any> | null;
+  gpu_memory_utilization?: number; kv_pool_tokens?: number | null; plans?: PlanOption[]; llmfit?: Record<string, any> | null;
 }
 export interface DeploymentEvent { ts: string; from: string; to: string; message: string; log_tail: string | null }
 export interface Deployment {
