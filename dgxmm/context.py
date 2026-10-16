@@ -113,10 +113,10 @@ def build_context(settings: Settings) -> AppContext:
         await inventory.run()
 
     from dgxmm.litellm import LiteLLMClient, LiteLLMSync
-    key = settings.read_secret(settings.litellm_key_file)
-    if not key:
-        log.warning("no LiteLLM master key at %s; LiteLLM registration disabled", settings.litellm_key_file)
-    litellm = LiteLLMSync(LiteLLMClient(settings.litellm_url, key, http) if key else None, deployer, db, events)
+    if not ctx.settings_store.litellm().master_key:
+        log.warning("no LiteLLM master key (settings or %s); LiteLLM registration disabled until one is set",
+                    settings.litellm_key_file)
+    litellm = LiteLLMSync(LiteLLMClient(http, ctx.settings_store.litellm), deployer, db, events)
     deployer.state_hooks.append(litellm.on_state)
     ctx.litellm = litellm
     ctx.background.append(litellm.run)
