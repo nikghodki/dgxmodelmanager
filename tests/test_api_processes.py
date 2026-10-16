@@ -68,20 +68,30 @@ def test_host_external_top_is_enriched_and_backward_compatible(api_stack, tmp_pa
     top = body["external_top"]
     assert [p["pid"] for p in top] == [300, 200, 400]
     for p in top:
-        assert {"pid", "name", "rss", "gpu", "command", "user", "user_scope", "container"} <= set(p)
+        assert {"pid", "name", "rss", "gpu", "command", "user", "user_scope", "container", "dgxmm_label"} <= set(p)
     assert top[1]["container"]["name"] == "litellm-proxy" and top[0]["container"] is None
     assert SECRET not in str(body)
 
 
-def test_label_managed_container_gets_the_deployment_name(api_stack, tmp_path):
+def test_labelled_inactive_container_is_external_with_deployment_name(api_stack, tmp_path):
     from dgxmm.db import Deployment
     wire(api_stack, tmp_path)
     api_stack.ctx.deployer.usage_rows = lambda: []  # deployment 7 not active, container still labelled
     viewer(api_stack)
     with api_stack.ctx.db.session() as s:
         s.add(Deployment(id=7, name="qwen-old", engine="vllm", model_ref="Qwen/Qwen3-8B", state="stopped"))
-    body = api_stack.get("/dgxmm/api/host/processes?scope=managed").json()
-    assert [p["managed"] for p in body["processes"]] == [{"deployment_id": 7, "name": "qwen-old"}] * 2
+    assert api_stack.get("/dgxmm/api/host/processes?scope=managed").json()["total"] == 0
+    body = api_stack.get("/dgxmm/api/host/processes?scope=external").json()
+    tagged = [p for p in body["processes"] if p["dgxmm_label"]]
+    assert [p["pid"] for p in tagged] == [100, 101]
+    assert tagged[0]["dgxmm_label"] == {"deployment_id": 7, "name": "qwen-old"} and tagged[0]["managed"] is None
+    group = next(g for g in body["containers"] if g["name"] == "dgxmm-qwen")
+    assert group["managed"] is None and group["dgxmm_label"] == {"deployment_id": 7, "name": "qwen-old"}
+    api_stack.ctx.budget.usage_provider = lambda: []
+    api_stack.ctx.budget.probe = api_stack.ctx.probe
+    api_stack.ctx.budget._current = None
+    top = {p["pid"]: p for p in api_stack.get("/dgxmm/api/host").json()["external_top"]}
+    assert top[100]["dgxmm_label"] == {"deployment_id": 7, "name": "qwen-old"}  # explains the external figure
 
 
 def test_many_processes(api_stack, tmp_path):

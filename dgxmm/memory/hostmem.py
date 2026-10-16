@@ -45,6 +45,7 @@ class ProcMem:
     user: str = ""
     container: dict | None = None  # {id, name, image}; None = host process
     user_scope: str = "host"  # "container": uid as seen inside the container, not a host account
+    dgxmm_label: dict | None = None  # {deployment_id, name}: DGXMM-labelled container that is not an active deployment
 
 
 @dataclass(frozen=True)
@@ -60,7 +61,8 @@ class ProcInfo:
     command: str
     command_truncated: bool
     container: dict | None
-    managed: dict | None  # {deployment_id, name} when inside a DGXMM engine container
+    managed: dict | None  # {deployment_id, name} when inside an ACTIVE deployment's container
+    dgxmm_label: dict | None  # {deployment_id, name}: DGXMM-labelled container, not an active deployment (external)
     rss: int
     gpu: int
 
@@ -123,21 +125,25 @@ def user_for(users: UserNames, uid: int | None, in_container: bool) -> tuple[str
 
 
 def managed_ref(cid: str | None, deployments: dict[str, dict | None], container: dict | None,
-                names: dict[int, str] | None = None) -> dict | None:
-    """THE definition of "managed" (sample() and /processes): the process runs in a container that is an active
-    deployment's container, or that carries DGXMM's managed/deployment labels. Returns {deployment_id, name}."""
+                names: dict[int, str] | None = None) -> tuple[dict | None, dict | None]:
+    """THE definition of "managed", used by sample() and /processes. Returns (managed, dgxmm_label):
+    - managed: the process runs in an ACTIVE deployment's container (matched by id or id prefix). Its memory is
+      the deployment's (budget managed_actual) and it is never external.
+    - dgxmm_label: the container carries DGXMM's managed/deployment labels but is not an active deployment (e.g. a
+      stale or oneshot container). Its memory counts as budget *external*, so it IS listed as external — tagged,
+      so the external figure is explained. Names are deployment names, never container names."""
     if cid is None:
-        return None
+        return None, None
     if cid in deployments:
         ref = deployments[cid]
     else:
         ref = next((v for k, v in deployments.items() if k and cid.startswith(k)), _MISSING)
     if ref is not _MISSING:
-        return dict(ref) if ref else {"deployment_id": None, "name": None}
+        return (dict(ref) if ref else {"deployment_id": None, "name": None}), None
     dep_id = (container or {}).get("deployment_id")
     if dep_id is not None:
-        return {"deployment_id": dep_id, "name": (names or {}).get(dep_id)}
-    return None
+        return None, {"deployment_id": dep_id, "name": (names or {}).get(dep_id)}
+    return None, None
 
 
 _MISSING = object()
@@ -293,9 +299,10 @@ class HostProbe:
             c = self._container(p.cid, refresh=True)
             user, scope = user_for(self.users, p.uid, p.cid is not None)
             command, truncated = format_command(self._argv(p.pid))
+            mg, label = managed_ref(p.cid, managed, c, names)
             out.append(ProcInfo(pid=p.pid, ppid=p.ppid, uid=p.uid, user=user, user_scope=scope, name=p.name,
                                 exe=self._exe(p.pid, p.name), command=command, command_truncated=truncated,
-                                container=_public(c), managed=managed_ref(p.cid, managed, c, names),
+                                container=_public(c), managed=mg, dgxmm_label=label,
                                 rss=p.rss, gpu=p.gpu))
         out.sort(key=lambda x: x.rss + x.gpu, reverse=True)
         return out
@@ -305,23 +312,20 @@ class HostProbe:
         mem = self.meminfo()
         gpu_by_pid = self.gpu.process_gpu_bytes() if self.gpu else {}
         managed = {cid: self._cgroup_anon(cid) for cid in managed_ids}
-        rows: dict[str, dict | None] = {cid: None for cid in managed_ids}
         self.users.refresh()
         external: list[tuple[_Proc, dict | None]] = []
         for p in self._scan(gpu_by_pid):
             if p.cid in managed:
                 managed[p.cid] += p.gpu
                 continue
-            c = self._container(p.cid, refresh=False)
-            if managed_ref(p.cid, rows, c) is not None:
-                continue  # label-managed (e.g. a deployment no longer active): DGXMM's, not external
-            external.append((p, c))
+            external.append((p, self._container(p.cid, refresh=False)))  # managed_ref(...)[0] is None here
         external.sort(key=lambda pc: pc[0].rss + pc[0].gpu, reverse=True)
         top = []
         for p, c in external[:top_n]:
             user, scope = user_for(self.users, p.uid, p.cid is not None)
             top.append(ProcMem(pid=p.pid, name=p.name, rss=p.rss, gpu=p.gpu, command=format_command(self._argv(p.pid))[0],
-                               user=user, user_scope=scope, container=_public(c)))
+                               user=user, user_scope=scope, container=_public(c),
+                               dgxmm_label=managed_ref(p.cid, {}, c)[1]))
         return HostSample(mem=mem, managed=managed, external_top=top,
                           gpu=self.gpu.device_stats() if self.gpu else {})
 

@@ -15,6 +15,8 @@ describe("ExternalProcessesCard", () => {
           { pid: 2, name: "python3", rss: GIB, gpu: 0, command: "litellm --port 4000", user: "uid 1000", user_scope: "container",
             container: { id: "bbbbbbbbbbbb", name: "litellm-proxy", image: "ghcr.io/berriai/litellm:main-latest" } },
           { pid: 3, name: "oldserver", rss: GIB, gpu: 0 },
+          { pid: 4, name: "python3", rss: GIB, gpu: 0, command: "vllm serve old", user: "root", user_scope: "container",
+            container: { id: "dddddddddddd", name: "dgxmm-old", image: "vllm" }, dgxmm_label: { deployment_id: 9, name: "old-qwen" } },
         ]} />
       </MemoryRouter>,
     );
@@ -24,6 +26,7 @@ describe("ExternalProcessesCard", () => {
     expect(screen.getByText(/RAM 48\.0 GiB/)).toBeInTheDocument();
     expect(screen.getByText(/GPU 27\.0 GiB/)).toBeInTheDocument();
     expect(screen.getByText(/uid 1000 \(in container\)/)).toHaveAttribute("title", "uid as seen inside the container; not a host account");
+    expect(screen.getByText("DGXMM-labelled")).toHaveAttribute("title", expect.stringMatching(/old-qwen/));
     expect(screen.getByText("oldserver")).toBeInTheDocument(); // older servers: falls back to the process name
     expect(screen.getByRole("link", { name: /view all processes/i })).toHaveAttribute("href", "/processes");
   });

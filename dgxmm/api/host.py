@@ -11,13 +11,30 @@ from dgxmm.context import AppContext
 router = APIRouter(prefix="/api/host", tags=["host"])
 
 
+def _deployment_names(ctx: AppContext) -> dict[int, str]:
+    from sqlalchemy import select
+
+    from dgxmm.db import Deployment
+    with ctx.db.session() as s:
+        return {i: n for i, n in s.execute(select(Deployment.id, Deployment.name))}
+
+
+def _label(label: dict | None, names: dict[int, str]) -> dict | None:
+    if not label:
+        return None
+    return {"deployment_id": label["deployment_id"], "name": label.get("name") or names.get(label["deployment_id"])}
+
+
 def host_payload(ctx: AppContext, budget) -> dict:
     sample = ctx.budget.last_sample
+    top = sample.external_top if sample else []
+    names = _deployment_names(ctx) if any(p.dgxmm_label for p in top) else {}
     out = {"budget": budget.as_dict(),
            # `command` is redacted by the probe (dgxmm.memory.redact); viewers see the same data.
            "external_top": [{"pid": p.pid, "name": p.name, "rss": p.rss, "gpu": p.gpu, "command": p.command,
-                             "user": p.user, "user_scope": p.user_scope, "container": p.container}
-                            for p in sample.external_top] if sample else [],
+                             "user": p.user, "user_scope": p.user_scope, "container": p.container,
+                             "dgxmm_label": _label(p.dgxmm_label, names)}
+                            for p in top],
            "gpu": sample.gpu if sample else {},
            "alert": ctx.watchdog.state() if ctx.watchdog else {"level": "ok"}}
     try:
@@ -39,14 +56,6 @@ def _managed_map(ctx: AppContext) -> dict[str, dict]:
     return {cid: {"deployment_id": dep_id, "name": name} for (dep_id, name, _state, _res, cid) in rows if cid}
 
 
-def _deployment_names(ctx: AppContext) -> dict[int, str]:
-    from sqlalchemy import select
-
-    from dgxmm.db import Deployment
-    with ctx.db.session() as s:
-        return {i: n for i, n in s.execute(select(Deployment.id, Deployment.name))}
-
-
 def processes_payload(procs: list, scope: str, limit: int) -> dict:
     if scope == "external":
         procs = [p for p in procs if p.managed is None]
@@ -59,7 +68,7 @@ def processes_payload(procs: list, scope: str, limit: int) -> dict:
             g = host
         else:
             g = groups.setdefault(p.container["id"], {**p.container, "rss": 0, "gpu": 0, "process_count": 0,
-                                                      "managed": p.managed})
+                                                      "managed": p.managed, "dgxmm_label": p.dgxmm_label})
         g["rss"] += p.rss
         g["gpu"] += p.gpu
         g["process_count"] += 1
