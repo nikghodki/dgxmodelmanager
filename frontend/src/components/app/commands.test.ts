@@ -12,6 +12,7 @@ describe("buildCommands", () => {
   it("gives viewers navigation only — no admin pages or actions", () => {
     const c = buildCommands({ isAdmin: false, deployments, artifacts });
     expect(labels(c)).toContain("Open qwen");
+    expect(c.find((x) => x.label === "Processes")!.action).toEqual({ type: "navigate", to: "/processes" });
     expect(labels(c)).not.toContain("Users");
     expect(labels(c)).not.toContain("LiteLLM");
     expect(labels(c)).not.toContain("Deploy a model");

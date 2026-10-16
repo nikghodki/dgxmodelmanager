@@ -75,7 +75,7 @@ def build_context(settings: Settings) -> AppContext:
     from dgxmm.auth.bootstrap import bootstrap_admin
     from dgxmm.deployer.reconcile import reconcile
     from dgxmm.deployer.service import Deployer
-    from dgxmm.docker_ctl import DockerController
+    from dgxmm.docker_ctl import CONTAINER_CACHE_TTL_S, DockerController
     from dgxmm.engines.registry import build_engines
     from dgxmm.inventory.service import InventoryService
     from dgxmm.memory.budget import BudgetService
@@ -88,7 +88,7 @@ def build_context(settings: Settings) -> AppContext:
     inventory = InventoryService(settings)
     docker = DockerController.from_env()
     engines = build_engines(settings)
-    probe = HostProbe(settings, NvmlGpu())
+    probe = HostProbe(settings, NvmlGpu(), containers=docker.lookup)
     deployer = Deployer(settings=settings, db=db, docker=docker, inventory=inventory, engines=engines, http=http,
                         events=events)
     budget = BudgetService(settings, probe, deployer.usage_rows)
@@ -171,6 +171,12 @@ def build_context(settings: Settings) -> AppContext:
     ctx.advisor = AdvisorService(deployer, inventory, store, db)
     ctx.benchmarks = BenchmarkRunner(db, events)
 
+    async def _containers_loop():
+        # keeps the read-only container-name cache warm for the budget loop, which only reads the cache
+        while True:
+            await asyncio.to_thread(docker.directory.refresh)
+            await asyncio.sleep(CONTAINER_CACHE_TTL_S)
+
     ctx.startup += [_bootstrap, _recover_downloads, _inventory, _reconcile]
-    ctx.background += [_budget_loop, _inventory_loop]
+    ctx.background += [_budget_loop, _inventory_loop, _containers_loop]
     return ctx
