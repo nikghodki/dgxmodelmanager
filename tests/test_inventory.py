@@ -56,3 +56,20 @@ def test_inventory_service_get(settings, fake_hf_repo):
     inv = InventoryService(settings)
     inv.refresh()
     assert inv.get("Qwen/Qwen3-Tiny").complete and inv.get("nope/nope") is None
+
+
+def test_only_scans_hub_subdir_not_cache_root(settings, fake_hf_repo):
+    # Regression: ensure we only scan <cache>/hub/, not <cache>/ directly
+    # Create a repo under hub/ (correct location)
+    fake_hf_repo("org/under-hub", config=QWEN_TINY, files={"model.safetensors": 100})
+    # Create a repo at cache root (stray location that vLLM cannot load)
+    cache_root = Path(settings.hf_cache.local)
+    stray = cache_root / "models--org--at-root"
+    (stray / "snapshots" / "abc").mkdir(parents=True)
+    (stray / "refs").mkdir(parents=True)
+    (stray / "refs" / "main").write_text("abc")
+    inv = InventoryService(settings)
+    inv.refresh()
+    refs = {a.ref for a in inv.list()}
+    assert "org/under-hub" in refs
+    assert "org/at-root" not in refs
