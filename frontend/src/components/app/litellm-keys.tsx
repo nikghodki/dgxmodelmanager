@@ -25,7 +25,8 @@ import { ResponsiveDialog } from "./responsive-dialog";
 export function CodeBlock({ code, label }: { code: string; label: string }) {
   return (
     <div className="relative min-w-0">
-      <pre aria-label={label} className="overflow-x-auto whitespace-pre rounded-md border bg-muted/50 p-3 pr-10 font-mono text-xs leading-relaxed">{code}</pre>
+      {/* pt-9: the copy button sits in the top padding, so it never covers the first (often long) line */}
+      <pre aria-label={label} className="overflow-x-auto whitespace-pre rounded-md border bg-muted/50 p-3 pt-9 font-mono text-xs leading-relaxed">{code}</pre>
       <div className="absolute right-1.5 top-1.5"><CopyButton value={code} label={`Copy ${label}`} /></div>
     </div>
   );

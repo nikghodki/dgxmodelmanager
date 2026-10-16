@@ -73,8 +73,10 @@ def _error_message(r: httpx.Response) -> str:
 class LiteLLMClient:
     STATUS_TTL_S = 15.0       # cached connection status (GET /integrations/litellm, viewers included)
     DB_TTL_S = 15.0           # cached "does LiteLLM have a DB" answer used before key operations
+    MODELS_TTL_S = 15.0       # cached model list for GET /integrations/litellm/models (viewers included)
     VERSION_TTL_S = 600.0
     VERSION_NEG_TTL_S = 30.0  # failed version lookups are retried after this long
+    VERSION_FETCH_MAX_S = 30.0  # a version fetch may outlive the probe deadline (it finishes in the background)
     OPENAPI_MAX_BYTES = 4 * 1024 * 1024
     probe_deadline_s = 4.0    # one overall deadline for a status probe
 
@@ -85,8 +87,10 @@ class LiteLLMClient:
         self._status: dict[str, tuple[float, dict]] = {}
         self._db: dict[str, tuple[float, Any]] = {}
         self._keys: dict[str, tuple[float, list[dict]]] = {}
+        self._models: dict[str, tuple[float, list[dict]]] = {}
         self._status_lock = asyncio.Lock()
         self._version_lock = asyncio.Lock()
+        self._version_tasks: dict[str, asyncio.Future] = {}
 
     @classmethod
     def fixed(cls, base_url: str, key: str | None, http: httpx.AsyncClient) -> "LiteLLMClient":
@@ -129,9 +133,11 @@ class LiteLLMClient:
             return LiteLLMError(400, "litellm_rejected", f"LiteLLM rejected the request: {msg}")
         return LiteLLMError(502, "litellm_error", f"LiteLLM returned HTTP {r.status_code}: {msg}")
 
-    async def _json(self, method: str, path: str, **kw) -> dict:
-        """Authenticated call that must return a JSON object (anything else is a mapped LiteLLMError)."""
-        cfg = self.config()
+    async def _json(self, method: str, path: str, *, cfg: LiteLLMConfig | None = None, **kw) -> dict:
+        """Authenticated call that must return a JSON object (anything else is a mapped LiteLLMError). ``cfg``
+        defaults to the current settings; pass an explicit one only as resolved by the settings store (its key
+        is bound to its URL)."""
+        cfg = cfg or self.config()
         r = await self._request(method, path, cfg=cfg, **kw)
         if r.status_code >= 400:
             raise self._error(r, cfg)
@@ -144,23 +150,36 @@ class LiteLLMClient:
         return j
 
     # ---------- models ----------
-    async def list_models(self) -> list[dict]:
-        data = (await self._json("GET", "/model/info", timeout=10)).get("data", [])
+    async def list_models(self, max_age: float = 0, *, cfg: LiteLLMConfig | None = None) -> list[dict]:
+        """Every model LiteLLM serves. ``max_age`` > 0 allows a cached copy that young (DGXMM's own add/delete
+        invalidate it); without it the list is always fetched fresh (sync, connection test)."""
+        url = (cfg or self.config()).url
+        if max_age and (hit := self._fresh(self._models, url, max_age)) is not None:
+            return list(hit)
+        data = (await self._json("GET", "/model/info", cfg=cfg, timeout=10)).get("data", [])
         if not isinstance(data, list):
             raise LiteLLMError(502, "litellm_error", "LiteLLM returned an unexpected model list")
-        return [m for m in data if isinstance(m, dict)]
+        out = [m for m in data if isinstance(m, dict)]
+        self._models[url] = (self.clock(), out)
+        return list(out)
 
-    async def list_dgxmm(self) -> list[dict]:
-        return [m for m in await self.list_models() if (m.get("model_info") or {}).get("dgxmm_id")]
+    async def list_dgxmm(self, *, cfg: LiteLLMConfig | None = None) -> list[dict]:
+        return [m for m in await self.list_models(cfg=cfg) if (m.get("model_info") or {}).get("dgxmm_id")]
 
     async def add(self, model_name: str, api_base: str, served: str, dgxmm_id: str) -> None:
         body = {"model_name": model_name,
                 "litellm_params": {"model": f"openai/{served}", "api_base": api_base, "api_key": "none"},
                 "model_info": {"dgxmm_id": dgxmm_id}}
-        await self._json("POST", "/model/new", json=body)
+        try:
+            await self._json("POST", "/model/new", json=body)
+        finally:
+            self.invalidate_models()
 
-    async def delete(self, model_id: str) -> None:
-        await self._json("POST", "/model/delete", json={"id": model_id})
+    async def delete(self, model_id: str, *, cfg: LiteLLMConfig | None = None) -> None:
+        try:
+            await self._json("POST", "/model/delete", cfg=cfg, json={"id": model_id})
+        finally:
+            self.invalidate_models()
 
     # ---------- health ----------
     async def _readiness(self, cfg: LiteLLMConfig, timeout: float) -> dict:
@@ -203,18 +222,34 @@ class LiteLLMClient:
         ok, v = cached()
         if ok:
             return v
-        async with self._version_lock:  # single flight: concurrent first lookups share one fetch
+        async with self._version_lock:  # single flight: concurrent lookups share one fetch
             ok, v = cached()
             if ok:
                 return v
-            # LiteLLM >= 1.7x no longer reports its version in /health/readiness; the OpenAPI document does
-            try:
-                v = await self._openapi_version(cfg, timeout)
-            except asyncio.CancelledError:  # probe deadline hit: don't refetch on every probe
-                self._versions[cfg.url] = (self.clock(), None)
-                raise
-            self._versions[cfg.url] = (self.clock(), v)
-            return v
+            task = self._version_tasks.get(cfg.url)
+            if task is None or task.done():
+                task = asyncio.ensure_future(self._fetch_version(cfg, timeout))
+                self._version_tasks[cfg.url] = task
+        # Shielded: when the probe deadline cancels this wait the fetch carries on (bounded by
+        # VERSION_FETCH_MAX_S) and fills the cache, so the next status read has the version.
+        return await asyncio.shield(task)
+
+    async def _fetch_version(self, cfg: LiteLLMConfig, timeout: float) -> str | None:
+        # LiteLLM >= 1.7x no longer reports its version in /health/readiness; the OpenAPI document does
+        try:
+            v = await asyncio.wait_for(self._openapi_version(cfg, timeout), self.VERSION_FETCH_MAX_S)
+        except asyncio.TimeoutError:
+            v = None
+        self._versions[cfg.url] = (self.clock(), v)
+        return v
+
+    def _with_version(self, url: str, out: dict) -> dict:
+        """A status probed before the version was known gets it once a background fetch has found it."""
+        if out.get("reachable") and not out.get("version"):
+            hit = self._versions.get(url)
+            if hit is not None and hit[1]:
+                out["version"] = hit[1]
+        return out
 
     async def _probe_into(self, out: dict, cfg: LiteLLMConfig, timeout: float) -> None:
         live = await self._request("GET", "/health/liveliness", cfg=cfg, auth=False, timeout=timeout)
@@ -252,14 +287,20 @@ class LiteLLMClient:
                 out.update(auth_ok=False if e.code == "litellm_auth_failed" else None, error=e.message)
         return out
 
+    def cached_status(self) -> dict | None:
+        """The status as of the last probe if still fresh (no network call), else None."""
+        url = self.config().url
+        hit = self._fresh(self._status, url, self.STATUS_TTL_S)
+        return self._with_version(url, dict(hit)) if hit is not None else None
+
     async def status(self, *, force: bool = False) -> dict:
         """Unauthenticated connection status, cached STATUS_TTL_S per URL and fetched single-flight."""
         url = self.config().url
         if not force and (hit := self._fresh(self._status, url, self.STATUS_TTL_S)) is not None:
-            return dict(hit)
+            return self._with_version(url, dict(hit))
         async with self._status_lock:
             if not force and (hit := self._fresh(self._status, url, self.STATUS_TTL_S)) is not None:
-                return dict(hit)
+                return self._with_version(url, dict(hit))
             out = await self.probe()
             self._status[url] = (self.clock(), out)
             return dict(out)
@@ -279,6 +320,9 @@ class LiteLLMClient:
 
     def invalidate_keys(self) -> None:
         self._keys.clear()
+
+    def invalidate_models(self) -> None:
+        self._models.clear()
 
     async def key_list(self, max_age: float = 0) -> list[dict]:
         """All keys (every page). ``max_age`` > 0 allows a cached copy that young."""
@@ -343,6 +387,45 @@ class LiteLLMSync:
 
     def active(self) -> bool:
         return self.client is not None and self.client.config().active
+
+    DEREGISTER_TIMEOUT_S = 15.0
+
+    async def leave(self, cfg: LiteLLMConfig, apply: Callable[[], Any]) -> dict:
+        """Remove every DGXMM-owned model (``model_info.dgxmm_id``) from the LiteLLM described by ``cfg`` — the
+        settings in effect BEFORE a disable or URL change, so its key is the one bound to that URL and is sent
+        nowhere else — then run ``apply`` (which persists the new settings). Both happen under the sync lock, so
+        the sync loop cannot re-register in between. Best effort: ``apply`` runs even if LiteLLM is unreachable;
+        the result says what was removed and what may remain."""
+        async with self._lock:
+            removed, listed, error = 0, None, None
+            if self.client is not None and cfg.active:
+                async def run():
+                    nonlocal removed, listed
+                    mine = await self.client.list_dgxmm(cfg=cfg)
+                    listed = len(mine)
+                    for m in mine:
+                        await self.client.delete(m["model_info"]["id"], cfg=cfg)
+                        removed += 1
+                try:
+                    await asyncio.wait_for(run(), self.DEREGISTER_TIMEOUT_S)
+                except LiteLLMError as e:
+                    error = e.message
+                except asyncio.TimeoutError:
+                    error = f"timed out after {self.DEREGISTER_TIMEOUT_S:g}s talking to LiteLLM at {cfg.url}"
+                except (httpx.HTTPError, KeyError, ValueError, TypeError) as e:
+                    error = f"unexpected response from LiteLLM at {cfg.url} ({type(e).__name__})"
+            warning = None
+            if error is not None:
+                left = listed - removed if listed is not None else (
+                    len(self.registrations) if self.last.get("ok") and self.registrations else None)
+                what = f"{left} DGXMM model{'' if left == 1 else 's'}" if left else "DGXMM models"
+                warning = (f"{what} may remain registered in {cfg.url}; remove them there, or re-enable the "
+                           "integration with that URL to clean up")
+                log.warning("LiteLLM: could not remove DGXMM models from %s: %s", cfg.url, error)
+            else:
+                self.registrations = {}
+            apply()
+            return {"deregistered": removed, "deregister_error": error, "warning": warning}
 
     def desired(self) -> dict[tuple[str, str], tuple[str, str]]:
         """(deployment id, model name) -> (api_base, served name). Exactly one entry per ready deployment, and

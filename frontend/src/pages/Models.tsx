@@ -16,6 +16,7 @@ import { useActionMutation } from "@/hooks/use-action-mutation";
 import { cn } from "@/lib/utils";
 import type { Artifact, CleanupPreview } from "@/types";
 
+const KIND_LABEL: Record<string, string> = { llm: "LLM", draft: "Draft", other: "Other" };
 const KINDS = [{ key: "all", label: "All" }, { key: "llm", label: "LLM" }, { key: "draft", label: "Draft" }, { key: "other", label: "Other" }];
 
 export function Models() {
@@ -41,13 +42,13 @@ export function Models() {
     { accessorKey: "ref", header: "Model", cell: ({ row }) => (
       <div className="min-w-0"><div className="max-w-[40ch] truncate font-medium" title={row.original.ref}>{shortRef(row.original.ref)}</div>
         {row.original.revision && <div className="font-mono text-[11px] text-muted-foreground">{row.original.revision.slice(0, 8)}</div>}</div>) },
-    { accessorKey: "kind", header: "Kind", cell: ({ getValue }) => <Badge variant={getValue() === "llm" ? "default" : "secondary"} className="capitalize">{getValue()}</Badge> },
+    { accessorKey: "kind", header: "Kind", cell: ({ getValue }) => <Badge variant={getValue() === "llm" ? "default" : "secondary"}>{KIND_LABEL[getValue() as string] ?? getValue()}</Badge> },
     { id: "format", header: "Format", accessorFn: (a) => `${a.format} ${a.quant ?? ""}`, cell: ({ row }) => (
       <div className="flex flex-wrap gap-1"><Badge variant="outline">{row.original.format}</Badge>{row.original.quant && <Badge variant="outline">{row.original.quant}</Badge>}
         {row.original.has_mtp && <Badge variant="outline">MTP</Badge>}{row.original.is_moe && <Badge variant="outline">MoE</Badge>}</div>) },
     { accessorKey: "weights_bytes", header: "Weights", cell: ({ getValue }) => <span className="tabular-nums">{fmtBytes(getValue())}</span> },
-    { accessorKey: "max_context", header: "Context", meta: { hideOnMobile: true }, cell: ({ getValue }) => <span className="tabular-nums">{getValue()?.toLocaleString() ?? "—"}</span> },
-    { accessorKey: "architecture", header: "Architecture", meta: { hideOnMobile: true, className: "text-xs text-muted-foreground" } },
+    { accessorKey: "max_context", header: "Context", meta: { hideOnMobile: true, className: "hidden 2xl:table-cell" }, cell: ({ getValue }) => <span className="tabular-nums">{getValue()?.toLocaleString() ?? "—"}</span> },
+    { accessorKey: "architecture", header: "Architecture", meta: { hideOnMobile: true, className: "hidden 2xl:table-cell text-xs text-muted-foreground" } },
     { id: "status", header: "Status", accessorFn: (a) => (a.complete ? 1 : 0), cell: ({ row }) => (
       <div className="flex items-center gap-1.5">
         {row.original.complete

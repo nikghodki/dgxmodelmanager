@@ -30,6 +30,9 @@ export interface DataTableProps<T> {
   initialSort?: { id: string; desc?: boolean };
 }
 
+/** Row actions stay pinned to the right edge of a wide table (opaque background + left edge: index.css). */
+const STICKY_ACTIONS = "sticky right-0 z-10 sticky-actions";
+
 const metaOf = (c: { columnDef: ColumnDef<any, any> }) => (c.columnDef.meta ?? {}) as ColumnMeta;
 const headerText = (c: { id: string; columnDef: ColumnDef<any, any> }) =>
   metaOf(c).label ?? (typeof c.columnDef.header === "string" ? c.columnDef.header : c.id);
@@ -145,7 +148,7 @@ export function DataTable<T>({
                     </TableHead>
                   );
                 })}
-                {rowActions && <TableHead className="w-12"><span className="sr-only">Actions</span></TableHead>}
+                {rowActions && <TableHead className={cn("w-12", STICKY_ACTIONS)}><span className="sr-only">Actions</span></TableHead>}
               </TableRow>
             ))}
           </TableHeader>
@@ -171,7 +174,7 @@ export function DataTable<T>({
                         {flexRender(c.column.columnDef.cell, c.getContext())}
                       </TableCell>
                     ))}
-                    {rowActions && <TableCell className="w-12 text-right" onClick={(e) => e.stopPropagation()}>{rowActions(row.original)}</TableCell>}
+                    {rowActions && <TableCell className={cn("w-12 whitespace-nowrap text-right", STICKY_ACTIONS)} onClick={(e) => e.stopPropagation()}>{rowActions(row.original)}</TableCell>}
                   </TableRow>
                   {detail && isOpen && (
                     <TableRow className="bg-muted/40 hover:bg-muted/40">

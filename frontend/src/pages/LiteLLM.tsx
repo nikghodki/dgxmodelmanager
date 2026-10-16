@@ -20,7 +20,7 @@ import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { useActionMutation } from "@/hooks/use-action-mutation";
 import { connectionPatch, endpointPreview, litellmProblem, modelNameOptions, syncMessage, urlProblem, type KeyMode } from "@/lib/litellm";
-import type { Deployment, LiteLLMModel, LiteLLMKey, LiteLLMSettings, LiteLLMSyncResult, LiteLLMTestResult } from "@/types";
+import type { Deployment, LiteLLMModel, LiteLLMKey, LiteLLMSaveResult, LiteLLMSettings, LiteLLMStatus, LiteLLMSyncResult, LiteLLMTestResult } from "@/types";
 
 const SOURCE: Record<LiteLLMSettings["master_key_source"], string> = { settings: "Set (from settings)", secret_file: "Set (from secret file)", none: "Not set" };
 
@@ -60,7 +60,7 @@ function TestResult({ r }: { r: LiteLLMTestResult }) {
   );
 }
 
-function ConnectionCard({ s }: { s: LiteLLMSettings }) {
+function ConnectionCard({ s, onSaved }: { s: LiteLLMSettings; onSaved: (r: LiteLLMSaveResult) => void }) {
   const qc = useQueryClient();
   const [url, setUrl] = useState(s.url);
   const [pub, setPub] = useState(s.public_url);
@@ -83,9 +83,15 @@ function ConnectionCard({ s }: { s: LiteLLMSettings }) {
   const reset = (next: LiteLLMSettings) => {
     setUrl(next.url); setPub(next.public_url); setEnabled(next.enabled); setKeyMode("keep"); setMasterKey("");
   };
-  const save = useActionMutation(() => api<LiteLLMSettings>("/integrations/litellm", { method: "PUT", body }), {
-    success: "LiteLLM settings saved", invalidate: [["litellm-models"], ["litellm-keys"], ["deployments"]], gcTime: 0,
-    onSuccess: (next) => { qc.setQueryData(["litellm"], next); reset(next); setTest(null); },
+  const save = useActionMutation(() => api<LiteLLMSaveResult>("/integrations/litellm", { method: "PUT", body }), {
+    success: (r) => (r.deregistered ? `LiteLLM settings saved · removed ${r.deregistered} DGXMM model${r.deregistered === 1 ? "" : "s"} from ${s.url}` : "LiteLLM settings saved"),
+    invalidate: [["litellm-models"], ["litellm-keys"], ["deployments"]], gcTime: 0,
+    onSuccess: (next) => {
+      const { deregistered: _d, deregister_error: _e, warning: _w, ...settings } = next;
+      qc.setQueryData(["litellm"], settings);
+      if (next.status) qc.setQueryData(["litellm-status"], next.status);
+      reset(next); setTest(null); onSaved(next);
+    },
   });
   const runTest = useActionMutation(() => api<LiteLLMTestResult>("/integrations/litellm/test", { method: "POST" }), { onSuccess: setTest });
   const runSync = useActionMutation(() => api<LiteLLMSyncResult>("/integrations/litellm/sync", { method: "POST" }), {
@@ -156,7 +162,7 @@ function ConnectionCard({ s }: { s: LiteLLMSettings }) {
 
           <div className="flex items-center justify-between gap-3 rounded-md border p-3">
             <div><Label htmlFor="ll-enabled">Integration enabled</Label>
-              <p className="text-xs text-muted-foreground">When on, ready deployments are registered in LiteLLM automatically.</p></div>
+              <p className="text-xs text-muted-foreground">When on, ready deployments are registered in LiteLLM automatically. Turning it off (or changing the internal URL) first removes the models DGXMM registered there.</p></div>
             <Switch id="ll-enabled" checked={enabled} onCheckedChange={setEnabled} />
           </div>
 
@@ -186,11 +192,12 @@ function ConnectionCard({ s }: { s: LiteLLMSettings }) {
 }
 
 /** Why models / keys cannot be listed right now, or null if they can. */
-function blocker(s: LiteLLMSettings, needsDb: boolean): { title: string; description: string } | null {
+function blocker(s: LiteLLMSettings, status: LiteLLMStatus | null, needsDb: boolean): { title: string; description: string } | null {
   if (!s.master_key_set) return litellmProblem({ code: "litellm_not_configured", message: s.master_key_hint ?? "" });
   if (!s.enabled) return litellmProblem({ code: "litellm_disabled", message: "" });
-  if (!s.status.reachable) return litellmProblem({ code: "litellm_unreachable", message: s.status.error ?? "LiteLLM did not answer." });
-  if (needsDb && s.status.db && s.status.db !== "connected") return litellmProblem({ code: "litellm_no_db", message: "" });
+  if (!status) return null; // still probing: don't hold the lists up, they report their own errors
+  if (!status.reachable) return litellmProblem({ code: "litellm_unreachable", message: status.error ?? "LiteLLM did not answer." });
+  if (needsDb && status.db && status.db !== "connected") return litellmProblem({ code: "litellm_no_db", message: "" });
   return null;
 }
 
@@ -199,8 +206,8 @@ function Problem({ icon, p, onRetry }: { icon: typeof Boxes; p: { title: string;
     action={onRetry && <Button variant="outline" size="sm" onClick={onRetry}><RotateCw className="mr-1 h-3.5 w-3.5" />Retry</Button>} />;
 }
 
-function ModelsCard({ s }: { s: LiteLLMSettings }) {
-  const block = blocker(s, false);
+function ModelsCard({ s, status }: { s: LiteLLMSettings; status: LiteLLMStatus | null }) {
+  const block = blocker(s, status, false);
   const q = useQuery({ queryKey: ["litellm-models"], queryFn: () => api<LiteLLMModel[]>("/integrations/litellm/models"), enabled: !block });
   const columns = useMemo<ColumnDef<LiteLLMModel, any>[]>(() => [
     { accessorKey: "model_name", header: "Model name", meta: { mono: true } },
@@ -230,8 +237,8 @@ function ModelsCard({ s }: { s: LiteLLMSettings }) {
   );
 }
 
-function KeysCard({ s }: { s: LiteLLMSettings }) {
-  const block = blocker(s, true);
+function KeysCard({ s, status }: { s: LiteLLMSettings; status: LiteLLMStatus | null }) {
+  const block = blocker(s, status, true);
   const q = useQuery({ queryKey: ["litellm-keys"], queryFn: () => api<LiteLLMKey[]>("/integrations/litellm/keys"), enabled: !block });
   const deps = useQuery({ queryKey: ["deployments"], queryFn: () => api<Deployment[]>("/deployments"), enabled: !block });
   const options = modelNameOptions(deps.data ?? []);
@@ -252,26 +259,37 @@ function KeysCard({ s }: { s: LiteLLMSettings }) {
 }
 
 function LiteLLMPage() {
-  const q = useQuery({ queryKey: ["litellm"], queryFn: () => api<LiteLLMSettings>("/integrations/litellm") });
+  // Settings come back at once (no probe); the connection status is probed separately so it never holds the page up.
+  const q = useQuery({ queryKey: ["litellm"], queryFn: () => api<LiteLLMSettings>("/integrations/litellm?probe=false") });
+  const st = useQuery({
+    queryKey: ["litellm-status"], queryFn: () => api<LiteLLMStatus>("/integrations/litellm/status"),
+    // a cold LiteLLM may not report its version on the first probe: look again shortly
+    refetchInterval: (query) => (query.state.data?.reachable && !query.state.data.version ? 20000 : false),
+  });
+  const [leaveWarning, setLeaveWarning] = useState<string | null>(null);
   if (q.isLoading) return <PageSkeleton />;
   const s = q.data;
+  const status = st.data ?? s?.status ?? null;
   const header = <PageHeader title="LiteLLM" description="One OpenAI-compatible endpoint for every deployment: clients pick a deployment with the model field." />;
   if (!s) return <div className="space-y-4">{header}<ErrorState error={q.error ?? new Error("Could not load LiteLLM settings")} onRetry={() => q.refetch()} /></div>;
   const saved = `${s.url}|${s.public_url}|${s.enabled}|${s.master_key_source}`;
   return (
     <div className="space-y-4">
       {header}
-      {!s.status.reachable && <Notice tone="critical" title="Cannot reach LiteLLM">{s.status.error ?? `No answer from ${s.url}.`} Check the internal URL and that the proxy is running.</Notice>}
+      {leaveWarning && <Notice tone="warning" title="DGXMM models may remain in the previous LiteLLM">{leaveWarning}</Notice>}
+      {status && !status.reachable && <Notice tone="critical" title="Cannot reach LiteLLM">{status.error ?? `No answer from ${s.url}.`} Check the internal URL and that the proxy is running.</Notice>}
       {!s.master_key_set && <Notice tone="warning" title="No master key set">{s.master_key_hint ?? "DGXMM needs the LiteLLM master key to register deployments and manage keys. Set it below."}</Notice>}
-      {s.master_key_set && !s.enabled && <Notice tone="warning" title="Integration disabled">Deployments are not registered in LiteLLM while the integration is off.</Notice>}
-      {s.status.reachable && (
+      {s.master_key_set && !s.enabled && <Notice tone="warning" title="Integration disabled">Deployments are not registered in LiteLLM while the integration is off; turning it off removes the models DGXMM registered there.</Notice>}
+      {!status ? (
+        <p role="status" className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground"><Loader2 aria-hidden className="h-3.5 w-3.5 animate-spin" />Checking LiteLLM…</p>
+      ) : status.reachable && (
         <p className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-          <Network aria-hidden className="h-3.5 w-3.5" />LiteLLM {s.status.version ?? "(version unknown)"} · database {s.status.db ?? "unknown"}
+          <Network aria-hidden className="h-3.5 w-3.5" />{status.version ? `LiteLLM ${status.version}` : "LiteLLM (version not reported yet)"} · database {status.db ?? "unknown"}
         </p>
       )}
-      <ConnectionCard key={saved} s={s} />
-      <ModelsCard s={s} />
-      <KeysCard s={s} />
+      <ConnectionCard key={saved} s={s} onSaved={(r) => setLeaveWarning(r.warning ?? null)} />
+      <ModelsCard s={s} status={status} />
+      <KeysCard s={s} status={status} />
     </div>
   );
 }

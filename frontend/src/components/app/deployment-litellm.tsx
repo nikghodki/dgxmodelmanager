@@ -58,7 +58,9 @@ export function ApiAccessCard({ d, info, loading, error }: { d: Deployment; info
         </dl>
         {!!error && <ErrorState error={error} />}
         {info && !info.enabled && <Warn>The LiteLLM integration is disabled, so this model is not served through the endpoint.</Warn>}
-        {info?.enabled && info.registered === false && <Warn>This model is not registered in LiteLLM yet; requests will fail until the next sync.</Warn>}
+        {info?.enabled && info.registered === false && (d.state === "ready"
+          ? <Warn>This model is not registered in LiteLLM yet; requests will fail until the next sync.</Warn>
+          : <p className="text-xs text-muted-foreground">Registers automatically when the deployment is ready.</p>)}
         {info?.error && info.error.code !== "litellm_disabled" && <Warn>{litellmProblem(info.error).title}: {litellmProblem(info.error).description}</Warn>}
         {endpoint && model && (
           <div className="grid grid-cols-1 gap-3 xl:grid-cols-2">

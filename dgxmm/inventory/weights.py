@@ -315,7 +315,7 @@ class WeightsDeleter:
         return {"ref": plan.ref, "source": plan.source, "name": plan.name,
                 "paths": [self._host_or_local(t.path) for t in plan.targets], "bytes": plan.bytes,
                 "deployments_blocking": plan.blocking, "deployments_affected": plan.affected,
-                "download_active": plan.download_active, "notes": plan.notes,
+                "download_active": plan.download_active, "recently_active": plan.recently_active, "notes": plan.notes,
                 "blocked": bool(plan.blocking or plan.download_active)}
 
     def preview(self, ref: str) -> dict:

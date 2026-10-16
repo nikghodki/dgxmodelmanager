@@ -34,6 +34,8 @@ export interface DeploymentRef { id: number; name: string; state: string }
 export interface DeletePreview {
   ref: string; source: "hf" | "gguf"; name: string; paths: string[]; bytes: number;
   deployments_blocking: DeploymentRef[]; deployments_affected: DeploymentRef[]; download_active: boolean; blocked: boolean;
+  /** Partial files were written in the last 10 minutes: a clean-up (not a full delete) is refused. */
+  recently_active: boolean;
   notes: string[];
 }
 export interface DeleteResult { ref: string; freed_bytes: number; paths: string[]; method: string; warnings: DeploymentRef[]; notes: string[] }
@@ -73,12 +75,15 @@ export interface EngineInfo { name: string; supports_sleep: boolean; defaults: R
 export interface LiteLLMStatus { reachable: boolean; version: string | null; db: string | null; error: string | null; checked_at: string }
 export interface LiteLLMSettings {
   enabled: boolean; url: string; public_url: string; endpoint: string;
-  master_key_set: boolean; master_key_source: "settings" | "secret_file" | "none"; status: LiteLLMStatus;
+  /** null when read with ?probe=false before any probe (the page then reads GET /integrations/litellm/status). */
+  master_key_set: boolean; master_key_source: "settings" | "secret_file" | "none"; status: LiteLLMStatus | null;
   /** Set when a key exists but is not valid for the effective URL (keys are bound to the URL they were entered for). */
   master_key_hint: string | null;
   /** The config default internal URL (an empty URL in the form resets to it). */
   default_url?: string;
 }
+/** PUT /integrations/litellm: the saved settings plus what was removed from the LiteLLM being left (disable/URL change). */
+export interface LiteLLMSaveResult extends LiteLLMSettings { deregistered: number; deregister_error: string | null; warning: string | null }
 export interface LiteLLMTestResult extends LiteLLMStatus { auth_ok: boolean | null; models: number | null }
 export interface LiteLLMSyncResult { ok: boolean; status: string; registered: number; removed: number; error: string | null }
 export interface LiteLLMModel {

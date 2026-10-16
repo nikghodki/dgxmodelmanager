@@ -45,6 +45,9 @@ function PreviewBody({ p, mode }: { p: DeletePreview; mode: "delete" | "cleanup"
         <Notice tone="critical">In use by {depList(p.deployments_blocking)}. {p.deployments_blocking.length === 1 ? "Stop it first." : "Stop them first."}</Notice>
       )}
       {p.download_active && <Notice tone="critical">A download for this model is still running. Cancel it on the Downloads page first.</Notice>}
+      {mode === "cleanup" && p.recently_active && !p.download_active && (
+        <Notice tone="critical">Partial files were written in the last 10 minutes; a download may still be running. Try again later.</Notice>
+      )}
       {p.notes?.map((n) => <Notice key={n} tone="warning">{n}</Notice>)}
       {p.deployments_affected.length > 0 && (
         <Notice tone="warning">Used by stopped deployment{p.deployments_affected.length === 1 ? "" : "s"} {depList(p.deployments_affected)}. They will fail to start until the model is downloaded again.</Notice>
@@ -79,7 +82,7 @@ export function DeleteWeightsDialog({ artifact, mode, onClose }: { artifact: Art
       description={description} destructive
       confirmLabel={mode === "delete" ? "Delete weights" : "Clean up"}
       requireText={mode === "delete" && p ? p.name : undefined}
-      disabled={!p || p.blocked} pending={del.isPending || clean.isPending}
+      disabled={!p || p.blocked || (mode === "cleanup" && p.recently_active)} pending={del.isPending || clean.isPending}
       onConfirm={() => (mode === "delete" ? del.mutate(undefined) : clean.mutate(undefined))} />
   );
 }

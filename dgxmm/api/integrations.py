@@ -7,14 +7,14 @@ from __future__ import annotations
 
 import re
 from typing import Any
-from urllib.parse import urlsplit
 
-from fastapi import APIRouter, Body, Depends, Path, Response
+from fastapi import APIRouter, Body, Depends, Path, Query, Response
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, ValidationError
 
 from dgxmm.api.errors import api_error
 from dgxmm.audit import audit
 from dgxmm.auth.deps import Principal, current_principal, get_ctx, require_admin
+from dgxmm.config import validate_http_url
 from dgxmm.context import AppContext
 from dgxmm.litellm import UNRESTRICTED, LiteLLMClient, LiteLLMError
 from dgxmm.settings_store import (LITELLM_ENABLED, LITELLM_MASTER_KEY, LITELLM_MASTER_KEY_URL, LITELLM_PUBLIC_URL,
@@ -70,19 +70,13 @@ def key_allows(k: dict, model_name: str) -> bool:
 
 
 def _http_url(field: str, v: str) -> str:
-    v = v.strip()
-    parts = urlsplit(v)
-    if parts.scheme not in ("http", "https") or not parts.hostname or any(c.isspace() for c in v) \
-            or parts.query or parts.fragment or parts.username or parts.password:
-        raise api_error(422, "invalid_settings", f"{field} must be an http:// or https:// URL", field=field)
     try:
-        parts.port  # noqa: B018  (raises on an invalid port)
-    except ValueError:
-        raise api_error(422, "invalid_settings", f"{field} has an invalid port", field=field) from None
-    return v.rstrip("/")
+        return validate_http_url(v, field)
+    except ValueError as e:
+        raise api_error(422, "invalid_settings", str(e), field=field) from None
 
 
-def settings_out(ctx: AppContext, status: dict) -> dict:
+def settings_out(ctx: AppContext, status: dict | None) -> dict:
     cfg = ctx.settings_store.litellm()
     return {"enabled": cfg.enabled, "url": cfg.url, "public_url": cfg.public_url, "endpoint": cfg.endpoint,
             "master_key_set": bool(cfg.master_key), "master_key_source": cfg.master_key_source,
@@ -107,8 +101,19 @@ class SettingsIn(BaseModel):
 
 
 @router.get("")
-async def get_settings(p: Principal = Depends(current_principal), ctx: AppContext = Depends(get_ctx)):
+async def get_settings(probe: bool = Query(True), p: Principal = Depends(current_principal),
+                       ctx: AppContext = Depends(get_ctx)):
+    """``probe=false``: answer at once with the cached status (or null) so a page is never held up by the probe;
+    the status then comes from GET /status."""
+    if not probe:
+        cached = ctx.litellm.client.cached_status() if ctx.litellm is not None and ctx.litellm.client else None
+        return settings_out(ctx, cached)
     return settings_out(ctx, await _status(ctx))
+
+
+@router.get("/status")
+async def get_status(p: Principal = Depends(current_principal), ctx: AppContext = Depends(get_ctx)):
+    return await _status(ctx)
 
 
 @router.put("")
@@ -124,42 +129,67 @@ async def put_settings(raw: Any = Body(...), p: Principal = Depends(require_admi
         raise api_error(422, "invalid_settings", f"invalid value for {field}", field=field) from None
     fields = body.model_fields_set
     store, changes = ctx.settings_store, {}
+    # Validate everything before anything is stored or any LiteLLM call is made.
+    url = pub = mk = None
     if "url" in fields and body.url is not None:
         url = _http_url("url", body.url) if body.url.strip() else None
         if url is not None and norm_url(url) == norm_url(ctx.settings.litellm_url):
             url = None  # the config default is stored as "unset"
-        if url != store.get(LITELLM_URL):
-            store.set(LITELLM_URL, url)
-            changes["url"] = url or "(default)"
     if "public_url" in fields and body.public_url is not None:
         pub = norm_url(_http_url("public_url", body.public_url)) if body.public_url.strip() else ""
-        # The config default (litellm_public_url) is stored as "unset"; clearing it while a config default
-        # exists is stored as "" so it stays cleared instead of reverting to the default.
-        new = None if pub == norm_url(ctx.settings.litellm_public_url or "") else pub
-        if new != store.get(LITELLM_PUBLIC_URL):
-            store.set(LITELLM_PUBLIC_URL, new)
-            changes["public_url"] = pub
     if "master_key" in fields and body.master_key is not None:
         mk = body.master_key
         if mk and (len(mk) > 512 or any(c.isspace() or not c.isprintable() for c in mk)):
             raise api_error(422, "invalid_settings", "invalid value for master_key", field="master_key")
-        # Bound to the URL in effect after this request: it is never used with any other URL (see
-        # SettingsStore.litellm), so repointing the URL later cannot disclose it.
-        url_now = store.litellm().url
-        if mk and (mk != store.get(LITELLM_MASTER_KEY) or url_now != store.get(LITELLM_MASTER_KEY_URL)):
-            store.set_master_key(mk, url_now)
-            changes["master_key"] = "set"
-        elif not mk and store.get(LITELLM_MASTER_KEY) is not None:
-            store.set_master_key(None)
-            changes["master_key"] = "cleared"
-    if "enabled" in fields and body.enabled is not None and store.get(LITELLM_ENABLED) != str(body.enabled).lower():
-        store.set_bool(LITELLM_ENABLED, body.enabled)
-        changes["enabled"] = body.enabled
+    set_url = "url" in fields and body.url is not None and url != store.get(LITELLM_URL)
+
+    def apply() -> None:
+        if set_url:
+            store.set(LITELLM_URL, url)
+            changes["url"] = url or "(default)"
+        if pub is not None:
+            # The config default (litellm_public_url) is stored as "unset"; clearing it while a config default
+            # exists is stored as "" so it stays cleared instead of reverting to the default.
+            new = None if pub == norm_url(ctx.settings.litellm_public_url or "") else pub
+            if new != store.get(LITELLM_PUBLIC_URL):
+                store.set(LITELLM_PUBLIC_URL, new)
+                changes["public_url"] = pub
+        if mk is not None:
+            # Bound to the URL in effect after this request: it is never used with any other URL (see
+            # SettingsStore.litellm), so repointing the URL later cannot disclose it.
+            url_now = store.litellm().url
+            if mk and (mk != store.get(LITELLM_MASTER_KEY) or url_now != store.get(LITELLM_MASTER_KEY_URL)):
+                store.set_master_key(mk, url_now)
+                changes["master_key"] = "set"
+            elif not mk and store.get(LITELLM_MASTER_KEY) is not None:
+                store.set_master_key(None)
+                changes["master_key"] = "cleared"
+        if "enabled" in fields and body.enabled is not None and store.get(LITELLM_ENABLED) != str(body.enabled).lower():
+            store.set_bool(LITELLM_ENABLED, body.enabled)
+            changes["enabled"] = body.enabled
+
+    # Leaving the current LiteLLM (disabling, or pointing at another URL): first remove DGXMM's models from it,
+    # with the key bound to it, so they do not linger there as dead entries.
+    old = store.litellm()
+    new_url = norm_url(url or ctx.settings.litellm_url) if set_url else old.url
+    leaving = old.active and ((body.enabled is False and "enabled" in fields) or new_url != old.url)
+    result = {"deregistered": 0, "deregister_error": None, "warning": None}
+    if leaving and ctx.litellm is not None:
+        result = await ctx.litellm.leave(old, apply)
+    else:
+        apply()
     if changes:
+        if leaving:
+            changes["deregistered"] = result["deregistered"]
+            if result["deregister_error"]:
+                changes["deregister_error"] = result["deregister_error"]
         audit(ctx.db, p.user.id, "litellm_settings_update", "litellm", changes)
         if ctx.litellm is not None:
+            if ctx.litellm.client is not None:
+                ctx.litellm.client.invalidate_keys()
+                ctx.litellm.client.invalidate_models()
             ctx.litellm.trigger()
-    return settings_out(ctx, await _status(ctx, force=bool(changes)))
+    return {**settings_out(ctx, await _status(ctx, force=bool(changes))), **result}
 
 
 @router.post("/test")
@@ -183,7 +213,7 @@ async def sync_now(p: Principal = Depends(require_admin), ctx: AppContext = Depe
 async def list_models(p: Principal = Depends(current_principal), ctx: AppContext = Depends(get_ctx)):
     c = require_enabled(ctx)
     try:
-        models = await c.list_models()
+        models = await c.list_models(max_age=c.MODELS_TTL_S)
     except LiteLLMError as e:
         raise litellm_error(e)
     deps = {str(v["id"]): v for v in ctx.deployer.list_views()} if ctx.deployer is not None else {}
