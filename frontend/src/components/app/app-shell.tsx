@@ -6,6 +6,7 @@ import { useAuth, useIsAdmin } from "@/auth";
 import { useLiveUpdates } from "@/stream";
 import type { HostInfo } from "@/types";
 import { AlertBanner } from "./alert-banner";
+import { CommandPalette } from "./command-palette";
 import { MobileTabBar } from "./mobile-tab-bar";
 import { Sidebar } from "./sidebar";
 import { TopBar } from "./top-bar";
@@ -40,8 +41,7 @@ export function AppShell() {
         </main>
       </div>
       <MobileTabBar isAdmin={isAdmin} />
-      {/* CommandPalette is mounted here in Task 8: <CommandPalette open={paletteOpen} onOpenChange={setPaletteOpen} /> */}
-      <span hidden data-palette-open={paletteOpen} />
+      <CommandPalette open={paletteOpen} onOpenChange={setPaletteOpen} />
     </div>
   );
 }

@@ -42,7 +42,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 }
 
 export const useAuth = () => useContext(Ctx);
-export const useIsAdmin = () => useAuth().user?.role === "admin";
+export const useIsAdmin = () => useAuth()?.user?.role === "admin";
 
 export function RequireAuth({ children }: { children: ReactNode }) {
   const { user, loading } = useAuth();
