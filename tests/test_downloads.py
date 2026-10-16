@@ -112,6 +112,8 @@ async def test_permission_error_has_actionable_message(stack):
     await s.launch(v["id"])
     out = await wait_state(s, v["id"])
     assert out["state"] == "failed" and "owned by root" in out["error"] and "chown" in out["error"]
+    import os
+    assert f"chown -R {os.getuid()}:{os.getgid()} " in out["error"]
 
 
 async def test_cancel_between_files(stack):

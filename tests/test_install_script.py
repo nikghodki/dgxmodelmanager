@@ -315,7 +315,7 @@ def test_pull_engines(box):
     p = box.run(DGXMM_PULL_ENGINES="1")
     assert p.returncode == 0, p.out
     calls = box.calls()
-    assert "docker pull vllm/vllm-openai:pinned-2026-08-27" in calls
+    assert "docker pull vllm/vllm-openai@sha256:22d3b1217fda569653f32f1e00a2a4e64119c1601c67ff94cc72d7ca5ef352c8" in calls
     assert "docker pull ghcr.io/ggml-org/llama.cpp:server-cuda" in calls
 
 
@@ -444,3 +444,82 @@ def test_install_script_is_executable():
 @pytest.mark.skipif(not shutil.which("shellcheck"), reason="shellcheck not installed (run `make lint`)")
 def test_shellcheck_clean():
     subprocess.run(["shellcheck", str(ROOT / "install.sh")], check=True)
+
+
+# --- review fix round 1 -------------------------------------------------------------------------
+
+def test_port_busy_detected_with_large_ss_output(box):
+    # grep -q closing the pipe early must not make a busy port look free (SIGPIPE under pipefail)
+    p = box.run("--dry-run", FAKE_PORT_BUSY="8090", FAKE_SS_FILLER="30000")
+    assert p.returncode != 0 and "port 8090 is already in use" in p.out
+
+
+def test_port_busy_detected_ipv6_listener(box):
+    p = box.run("--dry-run", FAKE_PORT_BUSY="8090", FAKE_SS_V6="1")
+    assert p.returncode != 0 and "port 8090 is already in use" in p.out
+
+
+def test_other_port_not_reported_busy(box):
+    p = box.run("--dry-run", FAKE_PORT_BUSY="18090")
+    assert p.returncode == 0, p.out
+
+
+def test_compose_up_failure_has_hint(box):
+    p = box.run(FAKE_COMPOSE_UP="fail")
+    assert p.returncode != 0
+    assert "docker compose up failed" in p.out and "./install.sh logs" in p.out
+
+
+def test_engine_pull_failure_has_hint(box):
+    p = box.run(DGXMM_PULL_ENGINES="1", FAKE_PULL="fail")
+    assert p.returncode != 0
+    assert "could not pull" in p.out and "compose up" not in box.calls()
+
+
+def test_stale_password_not_captured_when_container_not_recreated(box):
+    p = box.run(FAKE_RECREATE="0", FAKE_DGXMM_STATE="running", FAKE_DGXMM_WORKDIR=str(box.repo.resolve()),
+                FAKE_LOGS=FIRST_RUN)
+    assert p.returncode == 0, p.out
+    assert PW not in p.out and not (box.repo / "secrets" / "admin_password").exists()
+    assert "docs/operations.md" in p.out
+
+
+def test_password_line_older_than_this_run_not_captured(box):
+    p = box.run(FAKE_LOGS=FIRST_RUN, FAKE_LOGS_OLD="1")
+    assert p.returncode == 0, p.out
+    assert PW not in p.out and not (box.repo / "secrets" / "admin_password").exists()
+    assert "docs/operations.md" in p.out
+
+
+def test_password_captured_with_since_this_run(box):
+    p = box.run(FAKE_LOGS=FIRST_RUN)
+    assert p.returncode == 0, p.out
+    assert "docker logs --since " in box.calls()
+    assert p.out.count(PW) == 1
+
+
+@pytest.mark.parametrize("value", ["abc", "0", "-5", "1.5", ""])
+def test_health_timeout_must_be_positive_integer(box, value):
+    p = box.run("--dry-run", DGXMM_HEALTH_TIMEOUT=value)
+    if value == "":
+        assert p.returncode == 0, p.out  # unset/empty -> default
+    else:
+        assert p.returncode != 0 and "DGXMM_HEALTH_TIMEOUT" in p.out
+
+
+@pytest.mark.parametrize("value", ["0", "abc", "-1", "65536"])
+def test_port_must_be_valid(box, value):
+    p = box.run("--dry-run", DGXMM_PORT=value)
+    assert p.returncode != 0 and "DGXMM_PORT" in p.out
+
+
+def test_mdns_url_printed_after_ip_urls(box):
+    p = box.run()
+    assert p.returncode == 0, p.out
+    assert "http://spark-test.local:8090/dgxmm/" in p.out
+    assert p.out.index("http://192.168.10.20:8090/dgxmm/") < p.out.index("http://spark-test.local:8090/dgxmm/")
+
+
+def test_compose_healthcheck_works_on_old_engines():
+    text = (ROOT / "docker-compose.yaml").read_text()
+    assert "start_interval" not in text and "start_period" in text

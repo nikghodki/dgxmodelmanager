@@ -8,7 +8,7 @@ def test_defaults_when_file_missing(tmp_path):
     assert s.safety_margin_gib == 8 and s.margin_bytes == 8 * GIB
     assert s.os_reserve_bytes == 4 * GIB
     assert s.port_range == (8100, 8199)
-    assert s.images.vllm == "vllm/vllm-openai:pinned-2026-08-27"
+    assert s.images.vllm == "vllm/vllm-openai@sha256:22d3b1217fda569653f32f1e00a2a4e64119c1601c67ff94cc72d7ca5ef352c8"
     assert s.auto_protect is False
     assert s.base_path == "/dgxmm"
     assert s.docker_network == "dgxmm"
@@ -85,3 +85,11 @@ def test_example_config_loads_and_is_generic(tmp_path, monkeypatch):
     assert s.hf_cache.host == "/srv/carol/.cache/huggingface"
     assert s.gguf_roots[0].host == "/srv/carol/models"
     assert s.docker_network == "dgxmm"
+
+
+def test_example_config_vllm_image_is_public_digest():
+    from pathlib import Path
+    import yaml
+    example = Path(__file__).resolve().parent.parent / "config.example.yaml"
+    images = yaml.safe_load(example.read_text())["images"]
+    assert images["vllm"].startswith("vllm/vllm-openai@sha256:") and "pinned" not in images["vllm"]

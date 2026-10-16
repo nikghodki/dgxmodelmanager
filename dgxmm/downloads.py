@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import fnmatch
 import logging
+import os
 import re
 import shutil
 from pathlib import Path
@@ -171,7 +172,7 @@ class DownloadService:
                 repo_dir = self.hub_dir / ("models--" + v["repo_id"].replace("/", "--"))
                 self._update(dl_id, state="failed", bytes_done=done,
                              error=(f"permission denied writing {path}. The repo folder is probably owned by root "
-                                    f"(created by a container). Fix on the DGX: sudo chown -R 1000:1000 "
+                                    f"(created by a container). Fix on the host: sudo chown -R {os.getuid()}:{os.getgid()} "
                                     f"{repo_dir.as_posix().replace(self.settings.hf_cache.local, self.settings.hf_cache.host)}"))
                 return
             except Exception as e:

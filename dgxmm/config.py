@@ -66,7 +66,7 @@ def _default_vllm_cache_mounts() -> list[Mount]:
 
 
 class Images(BaseModel):
-    vllm: str = "vllm/vllm-openai:pinned-2026-08-27"
+    vllm: str = "vllm/vllm-openai@sha256:22d3b1217fda569653f32f1e00a2a4e64119c1601c67ff94cc72d7ca5ef352c8"
     llamacpp: str = "ghcr.io/ggml-org/llama.cpp:server-cuda"
 
 
