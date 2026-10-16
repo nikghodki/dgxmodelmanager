@@ -6,7 +6,7 @@ export const ENGINE_FIELDS: Record<string, FieldDef[]> = {
     { key: "max_model_len", label: "Context length (tokens)", type: "int", help: "Max tokens per request (prompt + output)." },
     { key: "max_num_seqs", label: "Concurrent sequences", type: "int", help: "Requests decoded in parallel." },
     { key: "kv_cache_dtype", label: "KV cache dtype", type: "select", options: ["auto", "fp8", "fp8_e4m3", "fp8_e5m2"], help: "fp8 halves KV memory." },
-    { key: "kv_tokens", label: "KV pool tokens (optional)", type: "int", help: "Total KV tokens across sequences. Empty = context × sequences." },
+    { key: "kv_tokens", label: "KV pool tokens (optional)", type: "int", help: "Total KV tokens shared by all sequences. Empty = min(context × sequences, 2 × context)." },
     { key: "max_num_batched_tokens", label: "Max batched tokens", type: "int", advanced: true },
     { key: "enable_prefix_caching", label: "Prefix caching", type: "bool" },
     { key: "enable_chunked_prefill", label: "Chunked prefill", type: "bool", advanced: true },

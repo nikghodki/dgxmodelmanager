@@ -10,6 +10,7 @@ import { Badge, Button, Card, ErrorBox, Stat, Table } from "../components/ui";
 import { fmtBytes, fmtNum, fmtPct, stateTone } from "../format";
 import { type Deployment, type HostInfo } from "../types";
 import { useLive } from "../stream";
+import { canRemove } from "../logic";
 
 function LiveCell({ id, field, fmt }: { id: number; field: string; fmt: (v: any) => string }) {
   const q = useLive(id);
@@ -24,7 +25,8 @@ export function Dashboard() {
   const host = useQuery({ queryKey: ["host"], queryFn: () => api<HostInfo>("/host") });
   const deps = useQuery({ queryKey: ["deployments"], queryFn: () => api<Deployment[]>("/deployments") });
   const act = useMutation({
-    mutationFn: ({ id, action }: { id: number; action: string }) => api(`/deployments/${id}/${action}`, { method: "POST" }),
+    mutationFn: ({ id, action }: { id: number; action: string }) =>
+      action === "remove" ? api(`/deployments/${id}`, { method: "DELETE" }) : api(`/deployments/${id}/${action}`, { method: "POST" }),
     onSettled: () => qc.invalidateQueries({ queryKey: ["deployments"] }),
   });
   const hostLive = useQuery({ queryKey: ["host-metrics"], queryFn: () => api<any[]>("/host/metrics?window=live"), refetchInterval: 10000 });
@@ -75,6 +77,9 @@ export function Dashboard() {
                 {admin && ["stopped", "failed"].includes(d.state) && (
                   <Button onClick={() => act.mutate({ id: d.id, action: "start" })}>Start</Button>
                 )}
+                {admin && canRemove(d.state) && (
+                  <Button variant="danger" onClick={() => confirm(`Remove ${d.name}? Its settings and history are deleted.`) && act.mutate({ id: d.id, action: "remove" })}>Remove</Button>
+                )}
               </td>
             </tr>
           ))}
@@ -85,12 +90,11 @@ export function Dashboard() {
       <AdoptCard />
       {host.data && host.data.external_top.length > 0 && (
         <Card title="Largest external memory users (not managed; never touched)">
-          <Table head={["PID", "Process", "RSS", "GPU", "Command"]}>
+          <Table head={["PID", "Process", "RSS", "GPU"]}>
             {host.data.external_top.map((p) => (
               <tr key={p.pid}>
                 <td className="td tabular-nums">{p.pid}</td><td className="td">{p.name}</td>
                 <td className="td tabular-nums">{fmtBytes(p.rss)}</td><td className="td tabular-nums">{fmtBytes(p.gpu)}</td>
-                <td className="td max-w-md truncate font-mono text-xs" title={p.cmdline}>{p.cmdline}</td>
               </tr>
             ))}
           </Table>
@@ -116,7 +120,9 @@ function AdoptCard() {
         {rows.data.map((c) => (
           <tr key={c.id}>
             <td className="td font-mono">{c.name}</td><td className="td">{c.status}</td><td className="td text-xs">{c.image}</td>
-            <td className="td">{c.adopted_as ? <Badge tone="green">adopted as {c.adopted_as}</Badge> : admin && <Button onClick={() => adopt.mutate(c)}>Adopt settings</Button>}</td>
+            <td className="td">{c.adopted_as ? <Badge tone="green">adopted as {c.adopted_as}</Badge>
+              : c.adoptable === false ? <span className="text-xs text-slate-500">{c.reason}</span>
+              : admin && <Button onClick={() => adopt.mutate(c)}>Adopt settings</Button>}</td>
           </tr>
         ))}
       </Table>

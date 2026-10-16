@@ -24,6 +24,9 @@ export function EstimatePanel({ preview }: { preview: Preview }) {
           {rows.filter(([, v]) => v !== 0).map(([k, v]) => (
             <tr key={k}><td className="py-0.5 text-slate-500">{k}</td><td className="py-0.5 text-right tabular-nums">{fmtBytes(v)}</td></tr>
           ))}
+          {preview.kv_pool_tokens != null && (
+            <tr><td className="py-0.5 text-slate-500">KV pool tokens (shared by all sequences)</td><td className="py-0.5 text-right tabular-nums">{preview.kv_pool_tokens.toLocaleString()}</td></tr>
+          )}
           {preview.gpu_memory_utilization !== undefined && (
             <tr><td className="py-0.5 text-slate-500">vLLM --gpu-memory-utilization</td><td className="py-0.5 text-right tabular-nums">{preview.gpu_memory_utilization.toFixed(2)}</td></tr>
           )}
