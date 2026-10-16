@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Loader2 } from "lucide-react";
-import { api } from "@/api";
+import { ApiError, api } from "@/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -46,9 +46,21 @@ export function SwitchDialog({ mode, deployment, initialPatch, onClose }: {
     ? api(`/deployments/${deployment.id}/switch`, { method: "POST", body: { request: { name, engine: deployment.engine, model_ref: ref, config, priority: deployment.priority }, actions } })
     : api(`/deployments/${deployment.id}/reconfigure`, { method: "POST", body: { config, model_ref: ref === deployment.model_ref ? null : ref, actions } })), {
     success: mode === "switch" ? "Switched — the new deployment is ready" : "Reconfigured and restarted",
-    invalidate: [["deployments"], ["deployment", deployment.id]], onSuccess: onClose,
+    invalidate: [["deployments"], ["deployment", deployment.id]],
+    onSuccess: onClose,
   });
+
+  useEffect(() => {
+    if (go.error instanceof ApiError && go.error.code === "insufficient_memory") {
+      setPlan(null);
+      if (go.error.detail?.fit && go.error.detail?.plans) {
+        setPreview({ ...preview!, fit: go.error.detail.fit, plans: go.error.detail.plans });
+      }
+    }
+  }, [go.error, preview]);
+
   const submit = submitState(preview, actions, go.isPending, mode);
+  const memoryChanged = go.error instanceof ApiError && go.error.code === "insufficient_memory";
 
   return (
     <ResponsiveDialog open onOpenChange={(o) => !o && !go.isPending && onClose()}
@@ -56,9 +68,9 @@ export function SwitchDialog({ mode, deployment, initialPatch, onClose }: {
       description={mode === "switch" ? `${deployment.name} is put to sleep (or stopped) and its LiteLLM alias moves to the new deployment.` : "The deployment restarts with the new settings."}>
       <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_340px]">
         <div className="space-y-4">
-          <div className="space-y-1.5"><Label>Model</Label><ModelSelect artifacts={choices} value={ref} onChange={setRef} /></div>
+          <div className="space-y-1.5"><Label>Model</Label><ModelSelect artifacts={choices} value={ref} onChange={(r) => { setRef(r); setPlan(null); }} /></div>
           {mode === "switch" && <div className="space-y-1.5"><Label htmlFor="new-name">New deployment name</Label><Input id="new-name" value={name} onChange={(e) => setName(e.target.value)} /></div>}
-          <ConfigForm engine={deployment.engine} value={config} onChange={setConfig} showAdvanced={advanced} />
+          <ConfigForm engine={deployment.engine} value={config} onChange={(c) => { setConfig(c); setPlan(null); }} showAdvanced={advanced} />
           <Button variant="link" className="h-auto p-0 text-xs" onClick={() => setAdvanced(!advanced)}>{advanced ? "Hide" : "Show"} advanced settings</Button>
           <p className="text-xs text-muted-foreground">If the new deployment fails to become ready, DGXMM rolls back automatically.</p>
         </div>
@@ -69,6 +81,7 @@ export function SwitchDialog({ mode, deployment, initialPatch, onClose }: {
             <PlanChooser plans={preview.plans ?? []} selectedId={plan?.id ?? null}
               onSelect={(o) => { setPlan({ id: o.id, actions: o.actions.filter((a) => a.type !== "patch") }); if (o.patch) setConfig({ ...config, ...o.patch }); if (o.model_ref) setRef(o.model_ref); }} />
           )}
+          {memoryChanged && <p className="text-xs text-status-critical">Memory changed since the preview — choose a plan again.</p>}
           <Button className="w-full" disabled={submit.disabled} onClick={() => go.mutate(undefined)}>
             {go.isPending && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}{submit.label}
           </Button>

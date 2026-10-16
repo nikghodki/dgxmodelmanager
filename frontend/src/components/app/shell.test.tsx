@@ -5,7 +5,7 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { Sidebar } from "@/components/app/sidebar";
 import { AlertBanner } from "@/components/app/alert-banner";
 
-const wrap = (ui: React.ReactNode) => render(<MemoryRouter><TooltipProvider>{ui}</TooltipProvider></MemoryRouter>);
+const wrap = (ui: React.ReactNode) => render(<MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}><TooltipProvider>{ui}</TooltipProvider></MemoryRouter>);
 
 describe("shell", () => {
   it("sidebar shows grouped nav and hides admin links for viewers", () => {
@@ -22,7 +22,7 @@ describe("shell", () => {
   it("alert banner renders for warning/critical only, with icon text", () => {
     const { rerender } = wrap(<AlertBanner alert={{ level: "ok" }} />);
     expect(screen.queryByRole("alert")).toBeNull();
-    rerender(<MemoryRouter><TooltipProvider><AlertBanner alert={{ level: "critical", message: "only 5.0 GiB available" }} /></TooltipProvider></MemoryRouter>);
+    rerender(<MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}><TooltipProvider><AlertBanner alert={{ level: "critical", message: "only 5.0 GiB available" }} /></TooltipProvider></MemoryRouter>);
     expect(screen.getByRole("alert")).toHaveTextContent("Memory critical");
     expect(screen.getByRole("alert")).toHaveTextContent("only 5.0 GiB available");
   });

@@ -26,7 +26,7 @@ describe("CommandPalette", () => {
     qc.setQueryData(["inventory"], []);
     render(
       <QueryClientProvider client={qc}>
-        <MemoryRouter initialEntries={["/"]}>
+        <MemoryRouter initialEntries={["/"]} future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
           <Routes><Route path="*" element={<><CommandPalette open onOpenChange={() => undefined} /><Where /></>} /></Routes>
         </MemoryRouter>
       </QueryClientProvider>,
