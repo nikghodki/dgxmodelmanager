@@ -10,6 +10,9 @@ DGXMM's decisions or to change the code. Each section names the source files it 
 - [Deployment state machine](#deployment-state-machine)
 - [Switch and reconfigure with rollback](#switch-and-reconfigure-with-rollback)
 - [Watchdog](#watchdog)
+- [LiteLLM integration](#litellm-integration)
+- [Deleting weights](#deleting-weights)
+- [Process view](#process-view)
 - [Startup and background loops](#startup-and-background-loops)
 - [Data model](#data-model)
 - [Frontend](#frontend)
@@ -30,29 +33,35 @@ flowchart LR
   end
   subgraph host["Host"]
     docker["Docker Engine<br/>/var/run/docker.sock"]
-    probes["/proc, cgroup v2,<br/>NVML"]
+    probes["/proc, cgroup v2,<br/>/etc/passwd, NVML"]
     disk[("HF cache +<br/>GGUF directories")]
+    helper["delete helper<br/>(short-lived, dgxmm.helper=true,<br/>no network)"]
   end
   subgraph net["Docker network (default: dgxmm)"]
     vllm["vLLM engine<br/>dgxmm-NAME"]
     llama["llama.cpp engine<br/>dgxmm-NAME"]
-    litellm["LiteLLM proxy<br/>(optional)"]
+    litellm["LiteLLM proxy<br/>(external or bundled)"]
   end
+  clients["Clients<br/>(OpenAI SDK, curl)"]
   hub["Hugging Face Hub"]
 
   browser -- "HTTP /dgxmm/api, SSE /dgxmm/api/stream" --> api
   api --> db
   api --> llmfit
   api -- "create / stop / remove<br/>(label dgxmm.managed=true)" --> docker
+  api -- "list containers (read-only)" --> docker
   docker --> vllm
   docker --> llama
-  api -- "read memory, cgroups, GPU" --> probes
+  docker -- "run once per delete" --> helper
+  helper -- "rm (one bind-mounted directory)" --> disk
+  api -- "read memory, cgroups, processes, GPU" --> probes
   api -- "scan" --> disk
   vllm -- "mount" --> disk
   llama -- "mount (read-only)" --> disk
   api -- "health, /metrics, sleep/wake" --> vllm
   api -- "health, /metrics" --> llama
-  api -- "/model/new, /model/delete" --> litellm
+  api -- "/model/new, /model/delete,<br/>/key/*, /health" --> litellm
+  clients -- "one /v1 endpoint,<br/>model = model name" --> litellm
   litellm -- "OpenAI API" --> vllm
   litellm -- "OpenAI API" --> llama
   api -- "search, download" --> hub
@@ -63,16 +72,21 @@ flowchart LR
 - **FastAPI.** Uvicorn listens on port 8090 in the container (`dgxmm/__main__.py`). All routes live
   under the base path `/dgxmm` (`dgxmm/app.py`), and `/` redirects there.
 - **SQLite.** One file, `data/dgxmm.sqlite3`, in WAL mode. The schema is created on start
-  (`Base.metadata.create_all`). There are no migrations.
+  (`Base.metadata.create_all`), so new tables appear automatically. There is no migration framework.
+  It also holds the runtime settings (`app_settings`) that the UI can change.
 - **Docker API.** DGXMM starts engine containers through the mounted Docker socket. Engines join the
   configured Docker network, where DGXMM reaches them as `http://dgxmm-<name>:<port>`. Their ports are
   also published on the host at `publish_bind` (default `127.0.0.1`).
-- **Host probes.** `/proc` and `/sys/fs/cgroup` are mounted read-only. DGXMM reads `/proc/meminfo`, each
-  engine container's `memory.stat` (cgroup v2 path `system.slice/docker-<id>.scope`) and per-process
-  data. NVML (via the `nvidia` runtime) adds GPU utilisation, temperature, power and per-process GPU
-  memory.
-- **LiteLLM** (optional). Ready deployments are registered through LiteLLM's model management API, so
-  clients can use a single OpenAI-compatible endpoint.
+- **Host probes.** `/proc`, `/sys/fs/cgroup` and `/etc/passwd` are mounted read-only. DGXMM reads
+  `/proc/meminfo`, each engine container's `memory.stat` (cgroup v2 path `system.slice/docker-<id>.scope`)
+  and per-process data (see [process view](#process-view)). NVML (via the `nvidia` runtime) adds GPU
+  utilisation, temperature, power and per-process GPU memory.
+- **Delete helper.** To delete model files that engine containers left owned by root, DGXMM starts a
+  short-lived, locked-down container that runs `rm` on one bind-mounted directory (see
+  [deleting weights](#deleting-weights)).
+- **LiteLLM** (optional; an existing proxy or the bundled one). Each ready deployment is registered once
+  through LiteLLM's model management API, so clients use a single OpenAI-compatible endpoint. DGXMM
+  also proxies LiteLLM's virtual-key API for the UI (see [LiteLLM integration](#litellm-integration)).
 - **Hugging Face Hub.** Catalog search, model details and downloads (with the optional HF token).
 - **llmfit.** A Python CLI bundled in the image. It adds fit levels, scores and expected tok/s to
   catalog results. It never decides whether a deploy may proceed.
@@ -90,26 +104,28 @@ flowchart LR
 | `events.py` | In-process publish/subscribe used by the SSE stream (slow clients drop their oldest events). |
 | `audit.py` | Writes audit log rows. |
 | `auth/` | `bootstrap` (first admin), `passwords` (argon2id), `sessions`, `ratelimit`, `deps` (auth, CSRF, roles). |
-| `api/` | HTTP routers: auth, users, host, inventory, engines, deployments, stream, audit, containers, catalog, downloads, planner, metrics. |
+| `settings_store.py` | Runtime settings in the `app_settings` table, with a cache and typed accessors (LiteLLM URLs, master key and its URL binding, enabled). |
+| `api/` | HTTP routers: auth, users, host (incl. processes), inventory (incl. delete and clean-up), engines, deployments, integrations (LiteLLM), stream, audit, containers, catalog, downloads, planner, metrics. |
 | `deployer/service.py` | Deployment lifecycle: prepare, preview, deploy, monitor, stop, restart, sleep/wake, switch, reconfigure. |
 | `deployer/states.py` | Deployment states and allowed transitions. |
 | `deployer/reconcile.py` | After a restart: brings the database in line with the containers that actually exist. |
 | `deployer/adopt.py` | Copies the settings of an unmanaged vLLM container into a new, stopped deployment. |
-| `docker_ctl.py` | The only module that calls Docker. Every write requires the `dgxmm.managed=true` label. |
+| `docker_ctl.py` | The only module that calls Docker. Every write requires the `dgxmm.managed=true` label, except the delete helpers it creates itself (`dgxmm.helper=true`). Also holds the read-only, cached container directory (id → name, image, deployment). |
 | `engines/` | Engine plug-ins (`vllm`, `llamacpp`): config schema, container spec, health check, metrics parsing, sleep. `argguard` holds the extra-flag allowlist and `prom` parses Prometheus metrics. |
 | `memory/estimate.py`, `kv.py` | Memory estimates per engine (weights, KV cache, state, activations, runtime). |
 | `memory/budget.py` | The host memory budget and `free_for_new`. |
-| `memory/hostmem.py` | Reads `/proc/meminfo`, container cgroups, external processes and NVML. |
+| `memory/hostmem.py` | Reads `/proc/meminfo`, container cgroups, processes (with container, user and command) and NVML. |
+| `memory/redact.py` | Masks secrets in process command lines before they leave the probe. |
 | `memory/calibration.py` | Corrects estimates with measured usage and out-of-memory kills. |
 | `planner/fit.py`, `plans.py` | Fit check and "ways to make it fit" plans. |
 | `planner/colocate.py` | "What runs together" combinations for the Planner page. |
-| `inventory/` | Scans the HF cache and GGUF roots; parses `config.json` and GGUF headers into architecture specs. |
+| `inventory/` | Scans the HF cache and GGUF roots; parses `config.json` and GGUF headers into architecture specs. `weights.py` plans and performs weight deletion and incomplete clean-up. |
 | `catalog/` | Hugging Face search and details (`hub`), llmfit wrapper, vLLM-supported architectures (`support`), fit badges. |
 | `downloads.py` | Background Hugging Face downloads with a disk-space guard. |
 | `metrics/` | Engine `/metrics` scraper and storage (live ring buffer plus 1-minute rollups). |
 | `advisor/` | Tuning rules (`rules`) and the built-in load test (`benchmark`). |
 | `watchdog.py` | Memory alerts and optional automatic protection. |
-| `litellm.py` | Keeps LiteLLM's model list in sync with ready deployments. |
+| `litellm.py` | LiteLLM client (URL and key resolved per call, errors scrubbed of keys, cached status) and the sync that keeps LiteLLM's model list in line with ready deployments. |
 
 ## Deploying a model, step by step
 
@@ -189,8 +205,8 @@ free_for_new = usable − committed − external
 
 - *measured* is the engine container's cgroup `anon` + `kernel` memory.
 - *external* is everything DGXMM does not manage (desktop, notebooks, other containers). DGXMM never
-  touches it. The Dashboard lists the largest external processes (name, pid, RSS and GPU memory, but
-  never command lines).
+  touches it. The Dashboard lists the largest external processes with their container, user, masked
+  command line, RSS and GPU memory (see [process view](#process-view)).
 - **GB10 unified memory:** CUDA allocations are not charged to the container's cgroup, so a running
   model's memory shows up in `used` but only partly in *measured*. For `ready` deployments the gap
   between reservation and measurement (`ready_gap`) is credited back, so it does not appear as external
@@ -296,7 +312,7 @@ engine's `/sleep?level=1`. That frees the KV cache while the model stays loaded 
 1. Estimate B. The memory A frees counts as available. DGXMM sleeps A when that frees enough, and stops
    it otherwise, unless you chose what happens to A yourself. Any other plan actions are added.
 2. If it still does not fit, return `409` with fresh plans and change nothing.
-3. Apply the actions. Move A's LiteLLM alias to B. Deploy B and wait for `ready` (up to
+3. Apply the actions. Move A's LiteLLM model name (its alias) to B. Deploy B and wait for `ready` (up to
    `startup_timeout_s` + 30 s).
 4. **Rollback** if B does not become ready: stop and remove B, give the alias back to A, and undo every
    action in reverse order (wake what was slept, restart what was stopped). If any undo step fails,
@@ -320,6 +336,119 @@ Level changes are logged and sent to the UI as an alert banner. If `auto_protect
 `critical`, the watchdog stops the lowest-priority `ready`, `sleeping` or `unknown` deployment (the
 largest reservation goes first within the same priority). It acts at most once every 60 seconds and
 audits the stop as `watchdog_stop`. With the default `auto_protect: false` it only warns.
+
+## LiteLLM integration
+
+**Settings store** (`settings_store.py`). The LiteLLM connection is resolved on every call from the
+`app_settings` table, falling back to `config.yaml`: internal URL (`litellm.url` > `litellm_url`), public
+URL (`litellm.public_url` > `litellm_public_url`), master key (`litellm.master_key` > the
+`litellm_key_file` secret) and `litellm.enabled` (default: on when a key is available). Values are cached
+in memory and the cache is updated on write, so a change made on the LiteLLM page applies to the next
+call without a restart.
+
+**Master key bound to its URL.** A stored key is saved together with the internal URL in effect at that
+moment (`litellm.master_key_url`) and is used only while the internal URL is still that URL. The
+secret-file key is used only with the configured default `litellm_url`. Pointing the internal URL at
+another host therefore never sends an existing write-only key there; the API reports
+`master_key_hint` instead and the UI asks for the key. The key is never returned by the API, never
+logged and never audited, and error texts from LiteLLM are scrubbed of the key, `sk-…` tokens and key
+hashes before they are logged or returned.
+
+**One registration per deployment** (`LiteLLMSync`). The desired state is one entry per `ready`
+deployment, keyed by deployment id and model name (`alias` or served name), with
+`model_info.dgxmm_id` marking it as DGXMM's. Each sync lists the models carrying a `dgxmm_id`, deletes
+every one that is not desired (stopped deployments, an old model name after a rename, duplicates, and
+the second, served-name entry that older versions registered next to an alias), and adds what is
+missing. That makes the migration from the old two-name scheme automatic on the first sync, and a
+rename re-registers exactly once. Syncs are serialised by a lock. If two ready deployments end up with
+one name anyway (the deployer prevents it when names are claimed), the oldest keeps it and the others
+get `litellm_status: error` with a `model_name_conflict` reason. The last sync's result and conflicts
+feed `litellm_error` in deployment views and the per-deployment `GET /deployments/{id}/litellm`, so
+those read paths never call LiteLLM.
+
+**Model names are unique.** The deployer checks names under its memory lock when a deployment is
+deployed, started, woken or renamed: a name is taken if it is another deployment's alias (in any state)
+or the model name of another deployment that is planned, starting, loading, ready or unknown.
+
+**Virtual keys** are proxied to LiteLLM's `/key/*` API with the master key. Before a key operation DGXMM
+checks LiteLLM's `/health/readiness`; without a connected database it answers `409 litellm_no_db`.
+Keys are identified by their hash; the full key is returned only in the create response. Keys created
+by DGXMM carry `metadata.created_by = "dgxmm"` and the user name.
+
+**Status** (`GET /api/integrations/litellm`) uses only unauthenticated calls (`/health/liveliness`,
+`/health/readiness`, and `/openapi.json` for the version), cached for 15 seconds. **Test connection**
+is always fresh and also checks the key with an authenticated `/model/info`.
+
+## Deleting weights
+
+`inventory/weights.py` plans and performs deletions; the API (`DELETE /api/inventory?ref=`, with
+`GET /api/inventory/delete-preview` and `/api/inventory/cleanup-incomplete[/preview]`) is admin-only.
+
+**Plan.** A Hugging Face ref maps to `<hub>/models--org--name` plus its `.locks` directory. A GGUF path
+maps to the file and all its split shards. When a GGUF inside the HF cache is a snapshot symlink, the
+blob it points to is deleted too, unless another snapshot link still uses that blob (then only the link
+goes, and 0 bytes are reported).
+
+**Safety rules**, enforced on the server:
+
+- **Containment.** Refs containing `..` are refused. Both the link location and the fully resolved path
+  must lie inside the HF hub or a configured GGUF root, so symlinks cannot escape. A target that is, or
+  contains, a configured root (hub, `hf_cache.local`, `.locks`, a GGUF root) is refused (`400
+  unsafe_path`). Symlink loops and other path errors are refused the same way.
+- **In use.** Every deployment's model and draft model are mapped to paths. A non-terminal deployment
+  whose paths lie in a target blocks the delete (`409 model_in_use`, listing the deployments). Stopped
+  and failed ones are returned as warnings.
+- **Downloads.** A queued or running download of the repo blocks it (`409 download_active`).
+- **Races.** The deleter publishes the targets it is about to delete, then plans again with a fresh
+  database read. Deploy, start, restart, switch, reconfigure and download starts check those markers
+  (and check again after creating their row), so either the deleter sees the new deployment or the
+  deployment sees the deletion and is refused (`409 model_being_deleted`). Deletions are serialised.
+
+**Execution.** One helper container runs per parent directory, from DGXMM's own image (`helper_image`;
+it is never pulled):
+
+- user `0:0`, so files left owned by root by engine containers can be removed;
+- one bind mount: the target's parent host directory at `/x`, and nothing else;
+- command `rm -rf -- /x/<name>…` (`rm -f` for files) as the entrypoint;
+- `network_mode: none`, read-only root filesystem, all capabilities dropped except `DAC_OVERRIDE` and
+  `FOWNER`, `no-new-privileges`, a process limit, `auto_remove`;
+- label `dgxmm.helper=true` (never `dgxmm.managed`), and a `helper_timeout_s` (120 s) limit after which
+  only that container is force-removed.
+
+Anything the helper could not remove, or everything when the helper cannot run (no Docker, image
+missing), is deleted in-process. A permission error there fails with `500 delete_failed` and a
+`sudo chown -R <uid>:<gid> <path>` hint. Afterwards the inventory is refreshed. Every deletion, refusal
+and failure is audited (`model_delete`, `model_delete_refused`, `model_delete_failed`; clean-ups add one
+`incomplete_cleanup` summary row).
+
+**Incomplete clean-up** applies the same rules to artifacts that are not complete only. Complete models
+are never deleted through it, and Hugging Face repos with a partial blob written in the last 10 minutes
+are skipped as `recently_active`.
+
+## Process view
+
+`memory/hostmem.py` scans `/proc` for `GET /api/host/processes` and for the external processes in the
+budget. Per process it reads `status` first and skips kernel threads, zombies and processes with no
+RSS and no GPU memory, then reads `cgroup` (to find the Docker container id) and `cmdline`.
+`/proc/<pid>/environ` is never opened. GPU memory comes from NVML.
+
+- **User.** Host processes get their name from the host's `/etc/passwd` (re-read when it changes).
+  Processes in containers show the uid as seen inside the container, because container uids are not
+  host accounts.
+- **Container.** The cgroup's container id is resolved to name and image through the container
+  directory in `docker_ctl.py`: one read-only `docker ps` listing, cached for 30 seconds and refreshed by
+  a background loop. A miss may refresh early, at most every 5 seconds; Docker errors keep the last
+  map. The budget loop only reads the cache, so it never waits for Docker.
+- **Managed.** A process is DGXMM-managed when its container is an active deployment's container. A
+  container with DGXMM labels that is not an active deployment is reported as `dgxmm_label`, and its
+  memory counts as external.
+- **Command.** `memory/redact.py` masks passwords, tokens and keys in the argv before it leaves the
+  probe. Values that cannot be parsed reliably are masked as a whole (fail closed), and input size is
+  capped so masking cost stays bounded. The result is shell-quoted and cut at 4 KiB. Masking is
+  best-effort and favours over-masking; `tests/test_redact.py` documents the cases it covers.
+
+Viewers and admins get the same masked data. The scan runs in a worker thread and takes tens of
+milliseconds on a DGX Spark.
 
 ## Startup and background loops
 
@@ -348,7 +477,8 @@ Background loops:
 | Budget | `budget_interval_s` (2 s) | Refresh memory, push SSE `budget`, run the watchdog and the liveness check. |
 | Metrics scraper | `scrape_interval_s` (5 s) | Scrape each ready engine's `/metrics` and record host samples. Roll up to 1-minute rows every 60 s and drop rollups older than 30 days. |
 | Inventory | `inventory_interval_s` (300 s) | Rescan model directories. |
-| LiteLLM sync | when a deployment enters or leaves `ready`, else every 60 s | Add missing registrations and remove stale ones. After a failure it retries in 5 s, doubling up to 600 s. |
+| LiteLLM sync | when a deployment enters or leaves `ready`, its model name changes or the LiteLLM settings change, else every 60 s | Add missing registrations and remove stale ones (one entry per ready deployment). After a failure it retries in 5 s, doubling up to 600 s. |
+| Container directory | 30 s | Refresh the read-only container id → name/image map used by the process view. |
 | vLLM architectures | once | Run a one-off container from the vLLM image to list supported architectures. The result is cached in `data/` per image reference. |
 | Deployment monitor | `monitor_poll_s` (3 s), per deployment | Only while starting or loading. |
 | Calibration | 15 s after ready | Record measured memory. |
@@ -361,7 +491,8 @@ SQLite tables (`dgxmm/db.py`):
 |---|---|
 | `users` | username, argon2id hash, role (`admin` / `viewer`), `must_change_pw` |
 | `sessions` | SHA-256 of the session token, user, CSRF token, client IP, expiry |
-| `deployments` | name, engine, model reference, validated config, state, container id, port, priority, alias, reservation and estimate, LiteLLM status, last error and exit code |
+| `deployments` | name, engine, model reference, validated config, state, container id, port, priority, alias (the LiteLLM model name), reservation and estimate, LiteLLM status, last error and exit code |
+| `app_settings` | runtime settings changed in the UI (key, value, updated at): the LiteLLM URLs, enabled flag, master key and the URL it is bound to |
 | `deployment_events` | state transitions with message and optional log tail |
 | `memory_calibration` | estimated vs measured bytes per engine, model and config hash; OOM records |
 | `benchmarks` | one row per concurrency level: TTFT p50/p95, ITL p50, total and per-request tok/s |
@@ -378,8 +509,8 @@ Live metrics (about the last hour at the scrape interval) are kept in memory onl
 `/dgxmm`). The Docker image builds it and serves it from `/app/static`.
 
 - **Pages** (`src/pages/`): Login, Change password, Dashboard, Deployments, Deployment detail, Deploy
-  wizard, Models (on disk), Catalog, Downloads, Planner, Users, Audit log. Catalog, Planner, Deployment
-  detail and Audit are lazy-loaded.
+  wizard, Models (on disk), Catalog, Downloads, Planner, Processes, LiteLLM, Users, Audit log. Catalog,
+  Planner, Processes, LiteLLM, Deployment detail and Audit are lazy-loaded.
 - **Design system** (`src/components/ui/`): shadcn/ui components on Radix primitives, styled with
   Tailwind CSS tokens. There is a light theme and a dark theme. Status is always shown as icon plus
   text, and Inter and JetBrains Mono fonts are self-hosted. App building blocks (shell, sidebar, data
@@ -404,16 +535,25 @@ Live metrics (about the last hour at the scrape interval) are kept in memory onl
 - **Rate limiting**: 5 login attempts per 60 seconds, per client IP and per username.
 - **First login**: users created by bootstrap, by an admin or by a reset must change their password
   before any other API call.
-- **Roles**: `viewer` has read-only access. Viewers can see deployments, models, metrics, the catalog
-  and the planner, and can run memory previews. They cannot see users, container logs, the audit log or the
-  adoptable-container list, and the UI hides the admin pages. `admin` is needed for every change. The
-  last admin cannot be deleted or demoted.
+- **Roles**: `viewer` has read-only access. Viewers can see deployments (with their LiteLLM endpoint
+  and model name), models, metrics, the catalog, the planner and the masked process list, and can run
+  memory previews. They cannot see users, container logs, the audit log, the adoptable-container list,
+  delete previews (they contain host paths), LiteLLM API bases or virtual keys, and the UI hides the
+  admin pages. `admin` is needed for every change. The last admin cannot be deleted or demoted.
 - **Audit**: logins (also failed and rate-limited ones), password changes, deploy, start, stop, remove,
-  sleep, wake, switch and reconfigure (plus their failures), adopt, downloads and cancellations,
-  inventory rescans, benchmarks, user changes, watchdog stops and command-line password resets are
-  written to `audit_log`.
+  sleep, wake, switch and reconfigure (plus their failures), model name changes, adopt, downloads and
+  cancellations, inventory rescans, weight deletions and clean-ups (also refused and failed ones),
+  LiteLLM settings changes, syncs and virtual-key changes, benchmarks, user changes, watchdog stops and
+  command-line password resets are written to `audit_log`. Audit rows never contain the master key or a
+  virtual key.
+- **Secrets**: the LiteLLM master key is write-only (stored in `app_settings` or read from the secret
+  file), bound to its URL, and never returned, logged or audited. A full virtual key appears only in the
+  response that creates it. Process command lines are masked before they reach any client, and process
+  environments are never read.
 - **Container guard**: `docker_ctl.py` refuses to create a container without `dgxmm.managed=true` and
-  to stop or remove one that lacks it. Containers it does not manage are only ever read.
+  to stop or remove one that lacks it. The one exception is the delete helper it creates itself
+  (`dgxmm.helper=true`, see [deleting weights](#deleting-weights)). Containers it does not manage are
+  only ever read.
 - **Engine arguments**: configs are strict schemas, and extra CLI flags must match a per-engine
   allowlist (`engines/argguard.py`). Flags DGXMM controls (`--model`, `--port`, `--host`,
   `--gpu-memory-utilization`, …) cannot be overridden. Model references must be a repo id or a `.gguf`

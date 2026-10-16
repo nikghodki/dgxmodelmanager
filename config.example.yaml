@@ -55,10 +55,13 @@ vllm_cache_mounts:
     target: /root/.triton
 
 min_free_disk_gib: 50         # downloads are refused when the HF cache disk would drop below this
+# helper_image: dgxmm:latest  # image of the short-lived root helper that deletes weights (default: DGXMM's own image)
+# helper_timeout_s: 120       # seconds a delete helper may run before it is killed
 
 # --- LiteLLM (optional) -------------------------------------------------------------------
-# Running deployments are registered as models in LiteLLM (needs store_model_in_db: true).
-# Registration is disabled when the master key file is empty or missing.
+# Each ready deployment is registered once in LiteLLM, under its model name (needs store_model_in_db: true).
+# These are defaults: URLs and the master key saved on the LiteLLM page (Integrations > LiteLLM) win.
+# Registration is off while no master key is available.
 litellm_url: http://litellm-proxy:4000
 # litellm_key_file: /run/secrets/litellm_master_key   # docker secret from secrets/litellm_master_key
 # litellm_public_url: http://<dgx-ip>:4000   # base URL clients use (the UI shows <url>/v1); empty = internal URL.
@@ -83,4 +86,5 @@ litellm_url: http://litellm-proxy:4000
 # static_dir: /app/static     # built frontend
 # host_proc: /host/proc       # host /proc (read-only mount)
 # host_cgroup: /host/sys/fs/cgroup
+# host_passwd: /host/etc/passwd  # host /etc/passwd (read-only mount): user names on the Processes page
 # llmfit_bin: llmfit          # llmfit CLI used for catalog fit scores

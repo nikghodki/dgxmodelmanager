@@ -10,6 +10,7 @@ checkout on the host, as the user that installed it.
 - [Uninstall](#uninstall)
 - [Logs](#logs)
 - [Health](#health)
+- [Freeing disk space](#freeing-disk-space)
 - [Troubleshooting](#troubleshooting)
 - [Security hardening](#security-hardening)
 
@@ -37,7 +38,10 @@ nothing. In order:
    `config.yaml` from `config.example.yaml` if missing. Creates `data/` and `secrets/` (mode 700). Writes
    `secrets/hf_token` and `secrets/litellm_master_key` (mode 600; empty unless `HF_TOKEN` or
    `LITELLM_MASTER_KEY` is set, or the LiteLLM key could be read from a running `litellm-proxy`
-   container). Warns if `litellm-proxy` is not on the DGXMM network. Existing files are always kept.
+   container). Warns if `litellm-proxy` is not on the DGXMM network. With `--with-litellm`, also
+   generates the bundled LiteLLM's secrets and, in a fresh `config.yaml`, points DGXMM at it and sets
+   `litellm_public_url` (see [bundled LiteLLM](configuration.md#bundled-litellm)). Existing files are
+   always kept.
 4. **Host directories.** Creates the HF cache, the models directory, `~/.cache/vllm`,
    `~/.cache/flashinfer` and `~/.triton` if missing.
 5. **Docker.** Creates the Docker network (labelled `dgxmm.created=true`) if it does not exist. With
@@ -79,6 +83,9 @@ added to your `config.yaml`. They take their defaults until you add them.
 - **`config.yaml`**: edit it, then `./install.sh` (or `docker restart dgxmm`, because the file is
   mounted).
 - **Secrets**: edit the file in `secrets/`, then `docker restart dgxmm`.
+- **LiteLLM connection** (URLs, master key, on/off): change it on the LiteLLM page. It applies
+  immediately and wins over `config.yaml` (see
+  [configuration](configuration.md#runtime-settings-and-precedence)).
 
 ## Backup and restore
 
@@ -207,6 +214,43 @@ curl -fsS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8090/dgxmm/     # 20
 
 The container restarts automatically (`restart: unless-stopped`), also after a reboot.
 
+Delete helpers only exist while a deletion runs. This should normally list nothing:
+
+```bash
+docker ps -a --filter label=dgxmm.helper=true
+```
+
+## Freeing disk space
+
+Delete models you no longer need from **Models → On disk** (**Delete…**), and remove interrupted
+downloads with **Clean up** or **Clean up incomplete** (see [usage](usage.md#delete-weights)). Both are
+admin-only and audited.
+
+- **Models in use** cannot be deleted: stop the deployments the dialog names first. A model whose
+  download is running cannot be deleted either: cancel it on the Downloads page.
+- **Stopped or failed deployments** that use a deleted model stay in the list but fail to start with
+  "model not found" until you download the model again, reconfigure them to another model, or remove
+  them.
+- **Root-owned files.** vLLM containers run as root and can leave files in the HF cache that your user
+  cannot delete. DGXMM removes them through a short-lived helper container that runs as root with
+  only the model's parent directory mounted and no network (see
+  [architecture](architecture.md#deleting-weights)). The helper uses DGXMM's own image and is never
+  pulled. If it cannot run (for example `helper_image` names a missing image), DGXMM deletes what it can
+  itself and fails with `delete_failed` and a hint such as:
+
+  ```bash
+  sudo chown -R <uid>:<gid> /home/<user>/.cache/huggingface/hub/models--org--name
+  ```
+
+  The uid and gid are `DGXMM_UID` and `DGXMM_GID` from `.env`. Run it, then delete again.
+- **Shared files.** When two revisions of a repo share a file, deleting one GGUF only removes its link
+  and frees nothing; the dialog says so. Delete the whole repo to free the space.
+- **Clean up** skips models with a partial file written in the last 10 minutes, so a download that is
+  still being written by another tool is not removed under it.
+
+Deleting files outside DGXMM (for example with `rm` or `huggingface-cli delete-cache`) is fine too.
+The next rescan (or **Rescan**) updates the list.
+
 ## Troubleshooting
 
 ### `permission denied` on the Docker socket
@@ -288,18 +332,67 @@ token"):
 
 ### LiteLLM status stays `pending`
 
-`pending` means the last sync failed. DGXMM retries, backing off up to 10 minutes. Look for
-"LiteLLM sync failed" in `./install.sh logs`. Common causes:
+`pending` means the last sync failed. DGXMM retries, backing off up to 10 minutes. The reason is on
+the deployment's LiteLLM tab and in the Deployments table tooltip; the log has "LiteLLM sync failed"
+(`./install.sh logs`). Start with **Test connection** on the LiteLLM page. Common causes:
 
-- **Wrong or missing key**: `secrets/litellm_master_key` must hold LiteLLM's master key. Restart with
-  `docker restart dgxmm` after changing it. An empty file shows `disabled`.
+- **LiteLLM unreachable** ("could not reach LiteLLM at …", "timed out", or "is not a LiteLLM
+  endpoint"): the internal URL (default `http://litellm-proxy:4000`) must resolve from the DGXMM
+  network. Fix it with `docker network connect <DGXMM_NETWORK> litellm-proxy`, or set an internal URL
+  DGXMM can reach. "Not a LiteLLM endpoint" means something else answered on that URL.
+- **Master key rejected** ("LiteLLM rejected the master key"): enter LiteLLM's master key on the
+  LiteLLM page, or put it in `secrets/litellm_master_key`.
 - **LiteLLM cannot store models**: set `store_model_in_db: true` in LiteLLM's `general_settings` (it
   needs its database).
-- **DGXMM cannot reach LiteLLM**: `litellm_url` (default `http://litellm-proxy:4000`) must resolve from
-  the DGXMM network. Fix it with `docker network connect <DGXMM_NETWORK> litellm-proxy`, or point
-  `litellm_url` at an address DGXMM can reach.
 - **LiteLLM cannot reach the engine** (registration works but requests fail): LiteLLM must be on the
   same Docker network, because engines are registered as `http://dgxmm-<name>:<port>/v1`.
+
+### LiteLLM status is `disabled`, or the page says the master key needs re-entering
+
+`disabled` means the integration is turned off on the LiteLLM page, or no master key applies. A master
+key only applies to the URL it belongs to: a key entered on the page to the internal URL in effect
+when it was saved, the `secrets/litellm_master_key` file to the default `litellm_url`. After you change
+the internal URL, the page shows "the master key was entered for a different LiteLLM URL" (or "the
+master key from the secret file is only used with the default LiteLLM URL"). Enter the master key for
+the new URL, or set the URL back. This is deliberate: a stored key is never sent to a server it was not
+entered for.
+
+### Virtual keys: "LiteLLM is running without a database"
+
+LiteLLM keeps virtual keys in its database. Configure `DATABASE_URL` (and `store_model_in_db: true`) for
+your LiteLLM, or use the [bundled LiteLLM](configuration.md#bundled-litellm), which has one. The
+keys sections stay unavailable until LiteLLM reports a connected database.
+
+### "The model name … is already used by deployment …" (`model_name_taken`)
+
+Two deployments cannot share one LiteLLM model name, because LiteLLM would then load-balance between
+two different models. Deploy, start, wake and rename are refused with the name of the deployment that
+holds it. Give one of them a different **Model name (LiteLLM)**: the error offers a suggestion
+(`<served name>-<deployment name>`), and on a deployment's page **Set a model name** opens its LiteLLM
+tab. Stopped deployments without an alias do not hold their served name.
+
+If a deployment shows the LiteLLM status `error`, two ready deployments ended up with the same name
+anyway. The oldest keeps the registration; rename the other on its LiteLLM tab.
+
+### Clients cannot call a served name any more after an upgrade
+
+Older versions registered an aliased deployment under both its served name and its alias. Now each
+deployment is registered once, under its model name, and the first sync after the upgrade removes the
+extra served-name entries. Point those clients at the model name shown on the deployment's API access
+card.
+
+### Processes: masked or numeric values
+
+- **`***` in commands** is intentional: passwords, tokens and keys are masked, and so are values DGXMM
+  cannot parse reliably. Masking is best-effort: it cannot recognise every way a program may take a
+  secret on its command line, so treat the Processes page as visible to every DGXMM user and do not pass
+  secrets as command-line arguments. Use files or environment variables, which DGXMM never reads.
+- **Numeric uids** for host processes mean the host's `/etc/passwd` is not mounted: the mount is in
+  `docker-compose.yaml`, so run `./install.sh` to recreate the container. Processes in containers always
+  show their in-container uid (`uid 1000 (in container)`), because container uids are not host
+  accounts.
+- **Containers shown by id only** appear for a few seconds after DGXMM starts, until the container list
+  is first read.
 
 ### Download fails with "owned by root"
 
@@ -352,7 +445,11 @@ uninstall it first.
   the proxy overwrite the header (`proxy_set_header X-Forwarded-For $remote_addr;` in nginx) rather than
   append to it. The per-username login limit applies either way.
 - **Engine endpoints have no authentication.** Keep `publish_bind: 127.0.0.1` and give other machines
-  access through LiteLLM with its own API keys.
+  access through LiteLLM with virtual keys (one per app or person, limited to the models they need).
+- **Process command lines are visible to every user**, masked. Do not put secrets on command lines of
+  processes on the box (see [Processes](#processes-masked-or-numeric-values)).
+- **The LiteLLM master key** entered on the LiteLLM page is stored in `data/dgxmm.sqlite3`. Protect
+  `data/` like `secrets/`.
 - **Delete `secrets/admin_password`** after you have changed the first password. It is not needed
   afterwards.
 - **Protect backups**: they contain password hashes, session data and your HF and LiteLLM keys.

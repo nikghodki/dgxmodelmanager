@@ -12,6 +12,10 @@ The installer never overwrites `.env`, `config.yaml` or a non-empty secret file.
 apply the change with `./install.sh`. Running it again is safe. It rebuilds and recreates the `dgxmm`
 container. Engine containers keep running.
 
+A few settings can also be changed at runtime in the UI. They are stored in DGXMM's database and win
+over `config.yaml`: currently the [LiteLLM connection](#runtime-settings-and-precedence) (URLs, master
+key, on/off). They apply immediately, without a restart.
+
 - [config.yaml reference](#configyaml-reference)
 - [Environment variable overrides](#environment-variable-overrides)
 - [.env and installer variables](#env-and-installer-variables)
@@ -21,6 +25,7 @@ container. Engine containers keep running.
 - [Networking](#networking)
 - [Reverse proxy](#reverse-proxy)
 - [LiteLLM integration](#litellm-integration)
+- [Bundled LiteLLM](#bundled-litellm)
 - [Hugging Face token](#hugging-face-token)
 - [Tuning the memory budget](#tuning-the-memory-budget)
 
@@ -64,13 +69,16 @@ the container.
 | `hf_cache.local` | path | `/data/hf` | The same directory inside the `dgxmm` container (set by `docker-compose.yaml`). |
 | `gguf_roots` | list of `{host, local}` | `[{host: ~/models, local: /data/gguf/0}]` | Directories scanned for `.gguf` files. See [Model directories](#model-directories). |
 | `min_free_disk_gib` | float | `50` | Downloads are refused when they would leave less than this free on the HF cache disk. |
+| `helper_image` | string or null | `null` | Image of the short-lived helper container that [deletes weights](architecture.md#deleting-weights) as root. `null`: the image of the running `dgxmm` container, else `dgxmm:latest`. It is never pulled; if it is missing, DGXMM deletes in-process. |
+| `helper_timeout_s` | float | `120` | Seconds a delete helper may run before it is killed. |
 
 ### LiteLLM and secrets
 
 | Key | Type | Default | Meaning |
 |---|---|---|---|
-| `litellm_url` | URL | `http://litellm-proxy:4000` | LiteLLM proxy that DGXMM registers models with. |
-| `litellm_key_file` | path | `/run/secrets/litellm_master_key` | LiteLLM master key file. Empty or missing turns registration off. |
+| `litellm_url` | URL | `http://litellm-proxy:4000` | LiteLLM proxy that DGXMM registers models with (the internal URL). The LiteLLM page can override it. |
+| `litellm_key_file` | path | `/run/secrets/litellm_master_key` | LiteLLM master key file. Used only with the default `litellm_url`. Read each time DGXMM talks to LiteLLM. |
+| `litellm_public_url` | URL | `""` | Base URL clients use to reach LiteLLM, for example `https://llm.example.com` (no `/v1`). Shown in the UI as the endpoint `<url>/v1`; empty means the internal URL is shown. Default for the LiteLLM page's **Public endpoint URL**. `./install.sh --with-litellm` sets it on a fresh `config.yaml`. |
 | `hf_token_file` | path | `/run/secrets/hf_token` | Hugging Face token file. Empty or missing means anonymous Hub access. |
 
 ### Web UI and sessions
@@ -93,7 +101,8 @@ the container.
 
 ### Paths inside the container
 
-These are set by the image. You rarely need to change them.
+These are set by the image. You rarely need to change them. `docker-compose.yaml` mounts the host's
+`/proc`, `/sys/fs/cgroup` and `/etc/passwd` read-only at the `host_*` paths below.
 
 | Key | Default | Meaning |
 |---|---|---|
@@ -101,6 +110,7 @@ These are set by the image. You rarely need to change them.
 | `static_dir` | `/app/static` | Built frontend. |
 | `host_proc` | `/host/proc` | Host `/proc` (read-only mount). |
 | `host_cgroup` | `/host/sys/fs/cgroup` | Host cgroup tree (read-only mount). |
+| `host_passwd` | `/host/etc/passwd` | Host `/etc/passwd` (read-only mount), used only to show host user names on the Processes page. No other account file is mounted. Without it, numeric uids are shown. |
 
 ## Environment variable overrides
 
@@ -157,7 +167,7 @@ Variables that only affect one installer run:
 | Variable | Meaning |
 |---|---|
 | `HF_TOKEN` | Written to `secrets/hf_token` when that file is missing or empty. |
-| `LITELLM_URL` | Written as `litellm_url` when `config.yaml` is generated. |
+| `LITELLM_URL` | Written as `litellm_url` when `config.yaml` is generated. With `--with-litellm`, a URL other than the bundled one also means `litellm_public_url` is not set. |
 | `LITELLM_MASTER_KEY` | Written to `secrets/litellm_master_key` when that file is missing or empty. |
 | `DGXMM_PULL_ENGINES=1` | Pull the engine images listed in `config.yaml` before starting. |
 | `DGXMM_HEALTH_TIMEOUT` | Seconds to wait for the container to become healthy (default 300). |
@@ -184,7 +194,11 @@ if the networks differ.
 | `secrets/litellm_db_password` | Bundled LiteLLM only: Postgres password. |
 | `secrets/admin_password` | The first-run `admin` password, saved by the installer. DGXMM never reads it, and it goes stale once you change the password. |
 
-Secrets are read when DGXMM starts. After you change one, restart DGXMM with `docker restart dgxmm`.
+The HF token is read when DGXMM starts: after you change it, restart DGXMM with `docker restart dgxmm`.
+The LiteLLM master key file is read each time DGXMM talks to LiteLLM, so a key written in place (for
+example with `printf … > secrets/litellm_master_key`) applies without a restart; an editor that
+replaces the file needs `docker restart dgxmm`. A master key entered on the LiteLLM page is stored in DGXMM's database (`data/`) instead and
+wins over the file (see [runtime settings](#runtime-settings-and-precedence)).
 
 ## Model directories
 
@@ -305,19 +319,27 @@ Use `handle`, not `handle_path`: the `/dgxmm` prefix must reach DGXMM.
 
 ## LiteLLM integration
 
-DGXMM can register every `ready` deployment with a [LiteLLM](https://docs.litellm.ai/) proxy and remove
-it again when the deployment stops. Each deployment is registered under its served model name and,
-if set, under its alias, with `model: openai/<served name>` and
-`api_base: http://dgxmm-<name>:<port>/v1`.
+DGXMM registers every `ready` deployment with a [LiteLLM](https://docs.litellm.ai/) proxy and removes
+it again when the deployment stops or sleeps. Each deployment is registered **once**, under its
+**model name** (the **Model name (LiteLLM)** set in the deploy wizard or on the deployment's LiteLLM tab,
+else the served name), with `model: openai/<served name>`, `api_base: http://dgxmm-<name>:<port>/v1`
+and `model_info.dgxmm_id` set to the deployment id. Clients therefore use one endpoint,
+`<public URL>/v1`, and pick the deployment with `"model"`. Models in LiteLLM without a `dgxmm_id` are
+never changed.
+
+Model names are unique. DGXMM refuses a deploy, start, wake or rename (`409 model_name_taken`, naming
+the deployment that holds it) when the name is another deployment's model name, or another running
+deployment's served name. Two deployments of the same model therefore need different model names.
 
 Requirements:
 
 1. LiteLLM stores models in its database: `general_settings: { store_model_in_db: true }` with a
-   configured database.
-2. DGXMM has the master key in `secrets/litellm_master_key`. If you install with no key file and a
-   container named `litellm-proxy` is running, the installer reads the key from that container.
-   Otherwise pass `LITELLM_MASTER_KEY=…` or write the file yourself.
-3. DGXMM can reach `litellm_url` (default `http://litellm-proxy:4000`, so a container named
+   configured database. Virtual keys need that database too.
+2. DGXMM has the master key: on the LiteLLM page, or in `secrets/litellm_master_key`. If you install
+   with no key file and a container named `litellm-proxy` is running, the installer reads the key from
+   that container. Otherwise pass `LITELLM_MASTER_KEY=…`, write the file yourself, or enter the key on
+   the LiteLLM page.
+3. DGXMM can reach the internal URL (default `http://litellm-proxy:4000`, so a container named
    `litellm-proxy` on the DGXMM network).
 4. LiteLLM can reach the engines: put it on the same Docker network
    (`docker network connect dgxmm litellm-proxy`), or install DGXMM with `DGXMM_NETWORK=<LiteLLM's
@@ -329,10 +351,43 @@ Example for a fresh install next to an existing LiteLLM on network `ai`:
 DGXMM_NETWORK=ai LITELLM_URL=http://litellm-proxy:4000 ./install.sh
 ```
 
-Each deployment's LiteLLM status is `synced`, `pending` (DGXMM retries; see
-[troubleshooting](operations.md#litellm-status-stays-pending)), `disabled` (no key) or `none` (not
-ready). The **LiteLLM alias** field in the deploy wizard sets a stable name such as `default-chat`.
-Switching models moves the alias to the new deployment, so clients keep working.
+Then open **Integrations > LiteLLM**, set the **Public endpoint URL** your clients use, and press **Test
+connection**.
+
+Each deployment's LiteLLM status is `synced`, `pending` (the last sync failed and DGXMM retries; see
+[troubleshooting](operations.md#litellm-status-stays-pending)), `error` (not registered because another
+deployment holds its model name), `disabled` (integration off or no master key) or `none` (not ready).
+For `pending` and `error`, the deployment's LiteLLM tab and the Deployments table tooltip give the
+exact reason. Switching models moves the model name to the new deployment, so clients keep working.
+
+**Upgrading from an older DGXMM:** older versions registered a deployment twice when it had an alias
+(once under the served name, once under the alias). The first sync after the upgrade removes the
+served-name entry and keeps the alias. Clients that called the served name of an aliased deployment
+must switch to the alias.
+
+### Runtime settings and precedence
+
+The LiteLLM page stores these in DGXMM's database (table `app_settings`). DGXMM reads them each time it
+talks to LiteLLM, so changes apply immediately:
+
+| Setting | Default when not set on the page | Notes |
+|---|---|---|
+| Internal URL | `litellm_url` | Where DGXMM sends its API calls. Setting it back to the `litellm_url` value removes the override. |
+| Public endpoint URL | `litellm_public_url` (empty) | Only shown to users and in snippets; DGXMM never calls it. Clearing it on the page keeps it empty, even when `litellm_public_url` is set. |
+| Master key | the file in `litellm_key_file` | Write-only. Never returned by the API, never logged, never written to the audit log. |
+| Integration enabled | on when a master key is available | Turning it off stops registering; existing registrations stay in LiteLLM. |
+
+Precedence is always: value saved on the page > `config.yaml` (or `DGXMM_*` variable) > built-in
+default.
+
+The master key is bound to a URL, so it can never be sent to a server it was not meant for:
+
+- a key entered on the page is used only with the internal URL that was in effect when it was saved;
+- the key from `secrets/litellm_master_key` is used only with the default `litellm_url`.
+
+If you change the internal URL, no key applies until you enter the master key for the new URL; the
+page says so. Changing the URL back makes the earlier key usable again. Registrations on the previous
+LiteLLM are not removed when you switch to another one.
 
 ## Bundled LiteLLM
 
@@ -354,7 +409,9 @@ generated once and never overwritten. It is never the key of another LiteLLM.
 
 - Fresh install: `config.yaml` is generated with `litellm_url: http://dgxmm-litellm:4000`. If
   `secrets/litellm_master_key` is empty, the installer writes the same key there too, so registration
-  works with nothing to configure.
+  works with nothing to configure. It also writes `litellm_public_url: http://<host IPv4>:<port>` (the
+  first LAN address, or the `DGXMM_BIND` address), so the UI shows the right endpoint. With
+  `DGXMM_BIND=127.0.0.1` it is left out: set the public URL of your reverse proxy on the LiteLLM page.
 - Existing install that uses another LiteLLM: `config.yaml` and `secrets/litellm_master_key` are kept
   and the installer prints a note. To switch DGXMM to the bundled LiteLLM, set `litellm_url` to
   `http://dgxmm-litellm:4000` and the master key from `secrets/litellm_bundled_master_key` on DGXMM's
