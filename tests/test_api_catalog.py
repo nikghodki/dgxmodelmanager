@@ -42,3 +42,22 @@ def test_planner_and_favourites(api_stack):
     v = api_stack.get("/dgxmm/api/planner").json()
     assert next(x for x in v["candidates"] if x["ref"] == "Qwen/Qwen3-Tiny")["favourite"] is True
     assert api_stack.delete("/dgxmm/api/planner/favourites/Qwen/Qwen3-Tiny", headers=h).status_code == 204
+
+
+def test_favourite_gguf_path_url_encoded(api_stack):
+    """M9: the UI sends encodeURIComponent(ref); a GGUF absolute path must round-trip intact."""
+    from dgxmm.db import Favourite
+    h = admin(api_stack)
+    ref = "/data/gguf/Qwen3-8B-Q4_K_M.gguf"
+    from urllib.parse import quote
+    enc = quote(ref, safe="")
+    assert api_stack.put(f"/dgxmm/api/planner/favourites/{enc}", headers=h).status_code == 204
+    with api_stack.ctx.db.session() as s:
+        assert {f.ref for f in s.query(Favourite)} == {ref}
+    # double-encoded (some proxies re-escape %): still the same ref
+    assert api_stack.put(f"/dgxmm/api/planner/favourites/{quote(enc, safe='')}", headers=h).status_code == 204
+    with api_stack.ctx.db.session() as s:
+        assert {f.ref for f in s.query(Favourite)} == {ref}
+    assert api_stack.delete(f"/dgxmm/api/planner/favourites/{enc}", headers=h).status_code == 204
+    with api_stack.ctx.db.session() as s:
+        assert s.query(Favourite).count() == 0

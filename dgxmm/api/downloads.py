@@ -35,6 +35,11 @@ async def start(body: DownloadIn, p: Principal = Depends(require_admin), ctx: Ap
 
 
 @router.post("/{dl_id}/cancel")
-def cancel(dl_id: int, p: Principal = Depends(require_admin), ctx: AppContext = Depends(get_ctx)):
+async def cancel(dl_id: int, p: Principal = Depends(require_admin), ctx: AppContext = Depends(get_ctx)):
+    # async: cancel() publishes on the EventBroker (asyncio queues), which must run on the event loop
+    try:
+        view = ctx.downloads.cancel(dl_id)
+    except DownloadError as e:
+        raise api_error(e.status, e.code, e.message)
     audit(ctx.db, p.user.id, "download_cancelled", str(dl_id))
-    return ctx.downloads.cancel(dl_id)
+    return view

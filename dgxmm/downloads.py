@@ -114,10 +114,26 @@ class DownloadService:
         self._tasks[dl_id] = asyncio.get_running_loop().create_task(self._run(dl_id))
         await asyncio.sleep(0)
 
+    def recover(self) -> int:
+        """At startup: no download task survives a restart, so queued/running rows are stale."""
+        with self.db.session() as s:
+            rows = list(s.scalars(select(Download).where(Download.state.in_(("queued", "running")))))
+            for d in rows:
+                d.state, d.error = "failed", "interrupted by dgxmm restart; start the download again"
+            n = len(rows)
+        if n:
+            log.info("marked %d interrupted download(s) failed", n)
+        return n
+
     def cancel(self, dl_id: int) -> dict:
+        with self.db.session() as s:
+            if s.get(Download, dl_id) is None:
+                raise DownloadError("not_found", f"download {dl_id} not found", 404)
         self._cancel.add(dl_id)
         v = self.view(dl_id)
-        if v["state"] == "queued":
+        task = self._tasks.get(dl_id)
+        live = task is not None and not task.done()
+        if v["state"] == "queued" or (v["state"] == "running" and not live):
             self._update(dl_id, state="cancelled")
         return self.view(dl_id)
 

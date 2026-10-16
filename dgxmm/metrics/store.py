@@ -1,6 +1,7 @@
 """Live samples (ring buffer, ~1 h at 5 s) and 1-minute rollups in SQLite for 30 days (spec §8)."""
 from __future__ import annotations
 
+import math
 import time
 from collections import deque
 from datetime import datetime, timedelta, timezone
@@ -16,6 +17,17 @@ NUMERIC_KEYS = ("running", "waiting", "kv_usage", "prompt_tps", "gen_tps", "ttft
                 "itl_p95", "e2e_p50", "prefix_hit_rate", "spec_accept_rate", "preemptions")
 HOST_KEYS = ("used", "available", "free_for_new", "external", "committed", "gpu_util", "temp_c", "power_w")
 RETENTION = timedelta(days=30)
+
+
+def _finite(v):
+    """NaN/Inf are not valid JSON (FastAPI would answer 500): store them as missing."""
+    if isinstance(v, float) and not math.isfinite(v):
+        return None
+    return v
+
+
+def _clean(sample: dict) -> dict:
+    return {k: _finite(v) for k, v in sample.items()}
 
 
 def _delta(cur: EngineMetrics, prev: EngineMetrics, key: str) -> float | None:
@@ -58,6 +70,7 @@ class MetricsStore:
                 s[out_key] = dn / dd if dn is not None and dd else None
             s["preemptions"] = _delta(m, pm, "preemptions")
         self._prev[dep_id] = (ts, m)
+        s = _clean(s)
         self._ring(dep_id).append(s)
         return s
 
@@ -66,6 +79,7 @@ class MetricsStore:
         s = {"ts": ts, "used": budget.total - budget.available, "available": budget.available,
              "free_for_new": budget.free_for_new, "external": budget.external, "committed": budget.committed,
              "gpu_util": gpu.get("util"), "temp_c": gpu.get("temp_c"), "power_w": gpu.get("power_w")}
+        s = _clean(s)
         self._ring("host").append(s)
         return s
 
