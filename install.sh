@@ -19,13 +19,27 @@ CONFIG_FILE="$REPO_DIR/config.yaml"
 EXAMPLE_CONFIG="$REPO_DIR/config.example.yaml"
 SECRETS_DIR="$REPO_DIR/secrets"
 DATA_DIR="$REPO_DIR/data"
-ENV_KEYS=(DGXMM_UID DGXMM_GID DOCKER_GID DGXMM_PORT DGXMM_BIND DGXMM_HF_CACHE DGXMM_MODELS_DIR DGXMM_NETWORK DGXMM_HOST_HOME DGXMM_TRUSTED_PROXIES)
+ENV_KEYS=(DGXMM_UID DGXMM_GID DOCKER_GID DGXMM_PORT DGXMM_BIND DGXMM_HF_CACHE DGXMM_MODELS_DIR DGXMM_NETWORK DGXMM_HOST_HOME DGXMM_TRUSTED_PROXIES DGXMM_INSTALL_ID)
 # Written to .env only when the bundled LiteLLM is enabled (--with-litellm / DGXMM_WITH_LITELLM=1).
 LITELLM_ENV_KEYS=(DGXMM_WITH_LITELLM DGXMM_LITELLM_PORT COMPOSE_PROFILES)
 LITELLM_SERVICE=dgxmm-litellm
 LITELLM_DB_SERVICE=dgxmm-litellm-db
 LITELLM_INTERNAL_URL=http://dgxmm-litellm:4000
 LITELLM_DB_DIR="$DATA_DIR/litellm-db"
+# Decision model (--with-decider): the pinned snapshot (keep in sync with dgxmm/engines/decision.py) and the
+# admin CLI inside the dgxmm container that builds, downloads and enables it through the running app.
+DECIDER_ENV_KEYS=(DGXMM_WITH_DECIDER)
+DECIDER_REPO_DIR=models--vllm-sr--d3-mini
+# every supported decision model (dgxmm/engines/decision.py DECIDER_MODELS): --purge-decider-model removes these
+DECIDER_REPO_DIRS=(models--vllm-sr--d3-mini models--vllm-sr--d3-nano)
+DECIDER_REVISION=97dd054df4b3e0b3beb6af23ab8c82b7c0052e0e
+DECIDER_DEFAULT_IMAGE=dgxmm-decider:3     # images.decision in config.yaml overrides it
+DECIDER_MIN_MEM_GIB=16                      # MemAvailable needed to start it (it reserves 13 GiB)
+DECIDER_MODEL_GIB=10                        # free disk for the snapshot (~8.5 GiB without assets/)
+DECIDER_IMAGE_GIB=30                        # recommended free Docker disk for a first image build
+DECIDER_MAX_TIMEOUT=10200                   # the CLI's token lifetime (3 h) minus its 10-minute margin
+DECIDER_CLI=(python -m dgxmm.admin decider)
+MEMINFO=${DGXMM_MEMINFO:-/proc/meminfo}
 
 usage() {
   cat <<'EOF'
@@ -43,7 +57,9 @@ Commands:
                containers, if any). Keeps data/ (incl. the LiteLLM database data/litellm-db),
                secrets/, config.yaml and .env, and leaves engine containers running.
                With --purge also removes those files, the engine containers DGXMM manages
-               (label dgxmm.managed=true) and the docker network if install.sh created it.
+               (labels dgxmm.managed=true and this install's dgxmm.install), the docker network if
+               install.sh created it, and the decision model's internal network (decider_network) if
+               this install created it (labels dgxmm.purpose=decider and this install's dgxmm.install).
                Model caches (HF cache, models dir) are never touched.
 
 Options:
@@ -60,8 +76,16 @@ Options:
                        DGXMM deployments (env DGXMM_WITH_LITELLM=1). Remembered in .env.
   --litellm-port PORT  Host port for the bundled LiteLLM (env DGXMM_LITELLM_PORT, default 4000;
                        bound to the same address as the UI)
+  --with-decider       Also set up the local decision model (vllm-sr/d3-mini, ~13 GiB of GPU memory):
+                       checks memory (>= 16 GiB free) and disk, builds its image, downloads and verifies
+                       the pinned model snapshot into the HF cache, enables it through DGXMM and waits
+                       until it is healthy (env DGXMM_WITH_DECIDER=1). Remembered in .env.
   --allow-root         Allow running as root (not recommended).
-  --purge              With uninstall: also delete DGXMM state (see above).
+  --purge              With uninstall: also delete DGXMM state (see above) and the decider image.
+  --purge-decider-model  With uninstall --purge: also delete the snapshots of every supported decision
+                       model (<HF cache>/hub/models--vllm-sr--d3-mini and models--vllm-sr--d3-nano), and
+                       the shared-store blobs (<HF cache>/hub/blobs) that only they use. Other models,
+                       and blobs another model also uses, are never touched.
   -f, --follow         With logs: follow the log.
   -h, --help           Show this help.
 
@@ -89,6 +113,13 @@ Environment (all optional; non-interactive, nothing is prompted):
                        network subnet.
   DGXMM_PULL_ENGINES=1 Pre-pull the vLLM and llama.cpp engine images (large; default off).
   DGXMM_HEALTH_TIMEOUT Seconds to wait for the container to become healthy (default 300).
+  DGXMM_WITH_DECIDER=1 Same as --with-decider. Every install/upgrade then makes sure the decider is
+                       built, downloaded and enabled (each step is skipped when already done). To stop
+                       that, set DGXMM_WITH_DECIDER=0 in .env; disable the decider in the UI
+                       (Integrations > Decision model) or with
+                       docker exec dgxmm python -m dgxmm.admin decider disable
+  DGXMM_DECIDER_TIMEOUT Seconds to wait for the decider to become healthy (default 900; its first
+                       start compiles GPU kernels and takes a few minutes).
   DGXMM_LITELLM_HEALTH_TIMEOUT  Same for the bundled LiteLLM (default 300; a crash loop of
                        DGXMM_LITELLM_MAX_RESTARTS=3 restarts fails sooner).
 
@@ -99,6 +130,7 @@ Examples:
   DGXMM_BIND=127.0.0.1 DGXMM_NETWORK=gateway ./install.sh   # behind an existing reverse proxy
   HF_TOKEN=hf_xxx ./install.sh --port 8091
   ./install.sh --with-litellm                     # fresh box: DGXMM + its own LiteLLM endpoint
+  ./install.sh --with-decider                     # also the local decision model
   ./install.sh status
   ./install.sh uninstall            # keeps your data; add --purge to delete it
 EOF
@@ -165,6 +197,8 @@ PURGE=0
 ALLOW_ROOT=0
 FOLLOW=0
 FLAG_PORT="" FLAG_BIND="" FLAG_NETWORK="" FLAG_HF="" FLAG_MODELS="" FLAG_WITH_LITELLM="" FLAG_LITELLM_PORT=""
+FLAG_WITH_DECIDER=""
+PURGE_MODEL=0
 PASSTHRU=()   # options re-applied when upgrade re-executes the updated installer
 
 parse_args() {
@@ -182,6 +216,8 @@ parse_args() {
       --allow-root) ALLOW_ROOT=1; PASSTHRU+=("$1") ;;
       -f|--follow) FOLLOW=1 ;;
       --with-litellm) FLAG_WITH_LITELLM=1; PASSTHRU+=("$1") ;;
+      --with-decider) FLAG_WITH_DECIDER=1; PASSTHRU+=("$1") ;;
+      --purge-decider-model) PURGE_MODEL=1 ;;
       --port|--bind|--network|--hf-cache|--models-dir|--litellm-port)
         (($# >= 2)) || { printf 'option %s needs a value\n' "$1" >&2; exit 2; }
         case $1 in
@@ -200,6 +236,9 @@ parse_args() {
   done
   if ((PURGE)) && [ "$CMD" != uninstall ]; then
     printf '%s\n' "--purge only applies to uninstall" >&2; exit 2
+  fi
+  if ((PURGE_MODEL)) && { [ "$CMD" != uninstall ] || ((!PURGE)); }; then
+    printf '%s\n' "--purge-decider-model only applies to uninstall --purge" >&2; exit 2
   fi
 }
 
@@ -292,6 +331,20 @@ load_settings() {
   WITH_LITELLM=$(resolve DGXMM_WITH_LITELLM "$FLAG_WITH_LITELLM" 0)
   WITH_LITELLM=$(bool01 "$WITH_LITELLM") || die "DGXMM_WITH_LITELLM must be 1 or 0 (got '$WITH_LITELLM')"
   LITELLM_PORT=$(resolve DGXMM_LITELLM_PORT "$FLAG_LITELLM_PORT" 4000)
+  # DECIDER_EXPLICIT: --with-decider (or DGXMM_WITH_DECIDER=1) was given on THIS run, as opposed to only being
+  # remembered in .env. Only an explicit request may abort on the memory preflight or re-enable a decider that
+  # an admin disabled.
+  DECIDER_EXPLICIT=0
+  if [ -n "$FLAG_WITH_DECIDER" ] || [ "$(bool01 "${DGXMM_WITH_DECIDER:-0}" 2>/dev/null || echo 0)" = 1 ]; then
+    DECIDER_EXPLICIT=1
+  fi
+  WITH_DECIDER=$(resolve DGXMM_WITH_DECIDER "$FLAG_WITH_DECIDER" 0)
+  WITH_DECIDER=$(bool01 "$WITH_DECIDER") || die "DGXMM_WITH_DECIDER must be 1 or 0 (got '$WITH_DECIDER')"
+  # Per-install id (generated once, kept in .env): labels the images and containers this install builds/creates,
+  # so uninstall --purge only removes its own.
+  INSTALL_ID=$(resolve DGXMM_INSTALL_ID "" "$(random_token 12)")
+  [[ $INSTALL_ID =~ ^[A-Za-z0-9]{6,64}$ ]] || die "DGXMM_INSTALL_ID must be 6-64 letters/digits (got '$INSTALL_ID')"
+  DECIDER_TIMEOUT=${DGXMM_DECIDER_TIMEOUT:-900}
   # COMPOSE_PROFILES: the .env value, else "litellm"; a stray shell value is never adopted.
   COMPOSE_PROFILES_VALUE=$(env_file_get COMPOSE_PROFILES || printf litellm)
 
@@ -304,6 +357,15 @@ load_settings() {
     fi
     ((LITELLM_PORT != PORT)) || die "DGXMM_LITELLM_PORT and DGXMM_PORT must differ (both $PORT)"
     ENV_KEYS+=("${LITELLM_ENV_KEYS[@]}")
+  fi
+  if ((WITH_DECIDER)); then
+    if ! [[ $DECIDER_TIMEOUT =~ ^[0-9]+$ ]] || ((DECIDER_TIMEOUT < 1 || DECIDER_TIMEOUT > DECIDER_MAX_TIMEOUT)); then
+      local bad_timeout="DGXMM_DECIDER_TIMEOUT must be a whole number of seconds from 1 to $DECIDER_MAX_TIMEOUT (got '$DECIDER_TIMEOUT')"
+      ((DECIDER_EXPLICIT)) && die "$bad_timeout"
+      warn "$bad_timeout; using 900"
+      DECIDER_TIMEOUT=900
+    fi
+    ENV_KEYS+=("${DECIDER_ENV_KEYS[@]}")
   fi
   if ! [[ ${DGXMM_HEALTH_TIMEOUT:-300} =~ ^[0-9]+$ ]] || ((${DGXMM_HEALTH_TIMEOUT:-300} < 1)); then
     die "DGXMM_HEALTH_TIMEOUT must be a positive whole number of seconds (got '${DGXMM_HEALTH_TIMEOUT}')"
@@ -340,6 +402,8 @@ env_value() {  # env_value KEY -> effective value for .env
     DGXMM_WITH_LITELLM) printf '%s' "$WITH_LITELLM" ;;
     DGXMM_LITELLM_PORT) printf '%s' "$LITELLM_PORT" ;;
     COMPOSE_PROFILES) printf '%s' "$COMPOSE_PROFILES_VALUE" ;;
+    DGXMM_WITH_DECIDER) printf '%s' "$WITH_DECIDER" ;;
+    DGXMM_INSTALL_ID) printf '%s' "$INSTALL_ID" ;;
   esac
 }
 
@@ -440,6 +504,23 @@ check_not_root() {
   fi
 }
 
+check_file_permissions() {
+  # The image build copies the checkout and the app runs as uid 1000 inside the container, which
+  # is neither the host owner nor in the host group, so source files must be others-readable.
+  # A restrictive umask (077) during git pull/merge leaves unreadable files and an opaque failure.
+  local unreadable count
+  unreadable=$(find "$REPO_DIR" \( -name .git -o -name node_modules -o -name .venv \
+      -o -path "$REPO_DIR/data" -o -path "$REPO_DIR/secrets" \) -prune \
+      -o -type f ! -perm -o=r -print 2>/dev/null | head -n 11)
+  [ -z "$unreadable" ] && return 0
+  count=$(printf '%s\n' "$unreadable" | wc -l)
+  printf 'ERROR: files in %s are not readable by the container user:\n' "$REPO_DIR" >&2
+  printf '%s\n' "$unreadable" | head -n 10 | sed 's/^/  /' >&2
+  if [ "$count" -gt 10 ]; then printf '  ...\n' >&2; fi
+  printf 'Fix: chmod -R o+rX %s  (and use umask 022 before git pull)\n' "$REPO_DIR" >&2
+  return 1
+}
+
 preflight() {
   info "Preflight"
   local arch
@@ -449,6 +530,7 @@ preflight() {
     *) warn "arch $arch is untested (supported: aarch64, x86_64)" ;;
   esac
   check_not_root
+  check_file_permissions || die "file permission check failed"
   require_docker
   ok "docker daemon reachable"
   docker compose version --short >/dev/null 2>&1 ||
@@ -485,17 +567,147 @@ preflight() {
       ok "port $LITELLM_PORT free (LiteLLM)"
     fi
   fi
-  local probe=$HF_CACHE avail_kb gib
-  while [ ! -e "$probe" ] && [ "$probe" != / ]; do probe=$(dirname "$probe"); done
-  avail_kb=$(df -Pk "$probe" 2>/dev/null | awk 'NR == 2 { print $4 }')
-  if [[ $avail_kb =~ ^[0-9]+$ ]]; then
-    gib=$((avail_kb / 1048576))
+  local probe gib
+  probe=$(existing_parent "$HF_CACHE")
+  if gib=$(free_gib "$probe"); then
     if ((gib < MIN_FREE_GIB)); then
       warn "only $gib GiB free at $probe; models need a lot of space (>= $MIN_FREE_GIB GiB recommended)"
     else
       ok "disk: $gib GiB free at $probe"
     fi
   fi
+  if ((WITH_DECIDER)); then decider_preflight; fi
+}
+
+# existing_parent PATH: PATH, or its nearest existing ancestor.
+existing_parent() {
+  local p=$1
+  while [ ! -e "$p" ] && [ "$p" != / ]; do p=$(dirname "$p"); done
+  printf '%s' "$p"
+}
+
+# free_gib PATH: whole GiB available on PATH's filesystem (exit 1 when unknown).
+free_gib() {
+  local kb
+  kb=$(df -Pk "$1" 2>/dev/null | awk 'NR == 2 { print $4 }')
+  [[ $kb =~ ^[0-9]+$ ]] || return 1
+  printf '%s' $((kb / 1048576))
+}
+
+# decider_image_tag: images.decision from config.yaml (or the example), else the default tag.
+decider_image_tag() {
+  local cfg=$CONFIG_FILE tag=""
+  [ -f "$cfg" ] || cfg=$EXAMPLE_CONFIG
+  if [ -f "$cfg" ]; then
+    tag=$(awk '/^images:/ { f = 1; next } f && /^[^ #]/ { f = 0 } f && /^[[:space:]]+decision:/ { print $2; exit }' "$cfg")
+    tag=$(strip_quotes "$tag")
+  fi
+  printf '%s' "${tag:-$DECIDER_DEFAULT_IMAGE}"
+}
+
+# decider_snapshot_present: every file of the pinned hash list exists in the snapshot (a cheap stat; the CLI
+# verifies the hashes). Without the hash list (incomplete checkout) the snapshot counts as missing.
+decider_snapshot_present() {
+  local snap=$HF_CACHE/hub/$DECIDER_REPO_DIR/snapshots/$DECIDER_REVISION
+  local pins=$REPO_DIR/deploy/decider/d3-mini-$DECIDER_REVISION.sha256 name n=0
+  [ -f "$pins" ] || return 1
+  while read -r _ name; do
+    [ -n "$name" ] || continue
+    [ -e "$snap/$name" ] || return 1
+    n=$((n + 1))
+  done <"$pins"
+  ((n > 0))
+}
+
+# decider_problem MESSAGE: fatal when the decider was requested on this run; a warning when it is only
+# remembered in .env (it must never abort a DGXMM upgrade).
+decider_problem() {
+  if ((DECIDER_EXPLICIT)); then die "$1"; fi
+  warn "$1"
+}
+
+# decider_preflight: memory, disk and image checks for --with-decider (read-only; also in --dry-run).
+decider_preflight() {
+  info "Preflight (decision model)"
+  if [ -n "$(docker ps -q --filter label=dgxmm.system=true --filter status=running 2>/dev/null)" ]; then
+    ok "the decider is already running (its memory is already reserved)"
+  else
+    local avail_kb gib
+    avail_kb=$(awk '/^MemAvailable:/ { print $2; exit }' "$MEMINFO" 2>/dev/null || true)
+    if ! [[ $avail_kb =~ ^[0-9]+$ ]]; then
+      decider_problem "cannot read MemAvailable from $MEMINFO; DGXMM's memory check decides when the decider is enabled"
+      avail_kb=$((DECIDER_MIN_MEM_GIB * 1048576))  # unknown: no second message below
+    fi
+    gib=$((avail_kb / 1048576))
+    if ((avail_kb < DECIDER_MIN_MEM_GIB * 1048576)); then
+      if ((DECIDER_EXPLICIT)); then
+        die "the decision model needs >= $DECIDER_MIN_MEM_GIB GiB of free memory to start (it reserves 13 GiB); MemAvailable is $gib GiB. Free memory (stop or sleep a deployment), or install without --with-decider and enable it later in the UI (Integrations > Decision model)"
+      fi
+      warn "MemAvailable is $gib GiB, below the $DECIDER_MIN_MEM_GIB GiB the decision model needs; DGXMM is upgraded anyway and its memory check decides when the decider is enabled"
+    else
+      ok "memory: $gib GiB available (the decider reserves 13 GiB; >= $DECIDER_MIN_MEM_GIB GiB required)"
+    fi
+  fi
+  local probe free
+  if decider_snapshot_present; then
+    ok "decider model snapshot present in the HF cache (it is verified after DGXMM starts)"
+  else
+    probe=$(existing_parent "$HF_CACHE")
+    if free=$(free_gib "$probe"); then
+      if ((free >= DECIDER_MODEL_GIB)); then
+        ok "disk: $free GiB free at $probe for the decider model snapshot (~8.5 GiB download)"
+      else
+        decider_problem "not enough disk for the decider model snapshot: $free GiB free at $probe, $DECIDER_MODEL_GIB GiB needed (~8.5 GiB download)"
+      fi
+    fi
+  fi
+  DECIDER_IMAGE=$(decider_image_tag)
+  if docker image inspect "$DECIDER_IMAGE" >/dev/null 2>&1; then
+    ok "decider image $DECIDER_IMAGE present"
+  else
+    local root
+    root=$(docker info --format '{{.DockerRootDir}}' 2>/dev/null || true)
+    probe=$(existing_parent "${root:-/}")
+    if free=$(free_gib "$probe") && ((free < DECIDER_IMAGE_GIB)); then
+      warn "only $free GiB free at $probe for building the decider image $DECIDER_IMAGE (its pinned vLLM base is ~21 GB; >= $DECIDER_IMAGE_GIB GiB recommended unless that base image is already present)"
+    else
+      ok "decider image $DECIDER_IMAGE will be built after DGXMM starts"
+    fi
+  fi
+}
+
+# decider_setup: build the image, download + verify the snapshot, enable and wait (all idempotent, through the
+# admin CLI inside the running dgxmm container; no secret is printed or passed on the command line).
+decider_setup() {
+  printf '\n'
+  info "Decision model (--with-decider; DGXMM_WITH_DECIDER=1 in .env)"
+  local tty=() rc=0 running="DGXMM itself is running"
+  if [ -t 1 ] && ((!DRY_RUN)); then tty=(-t); fi
+  if ((!DECIDER_EXPLICIT)); then
+    # Only remembered in .env: respect an admin who switched the decider off (UI or CLI).
+    if ((DRY_RUN)); then
+      note "[dry-run] would skip the steps below if an admin disabled the decider (docker exec $CONTAINER ${DECIDER_CLI[*]} admin-disabled)"
+    elif docker exec "$CONTAINER" "${DECIDER_CLI[@]}" admin-disabled >/dev/null 2>&1; then
+      note "skipped: an admin disabled the decision model. Run ./install.sh --with-decider to enable it again, or set DGXMM_WITH_DECIDER=0 in .env"
+      return 0
+    fi
+  fi
+  if ! run docker exec "${tty[@]}" "$CONTAINER" "${DECIDER_CLI[@]}" build; then
+    decider_problem "building the decider image failed (see above). $running; fix the cause and re-run ./install.sh"
+    return 0
+  fi
+  if ! run docker exec "${tty[@]}" "$CONTAINER" "${DECIDER_CLI[@]}" download; then
+    decider_problem "downloading the decider model failed (see above). $running; re-run ./install.sh to resume the download"
+    return 0
+  fi
+  run docker exec "${tty[@]}" "$CONTAINER" "${DECIDER_CLI[@]}" enable --wait --timeout "$DECIDER_TIMEOUT" || rc=$?
+  case $rc in
+    0) ;;
+    3) decider_problem "the decision model does not fit in free memory (see above). $running; free memory or pick a plan in the UI (Integrations > Decision model), then re-run ./install.sh"; return 0 ;;
+    5) decider_problem "the decision model is not healthy after ${DECIDER_TIMEOUT}s; it keeps starting in the background. $running. Check it with ./install.sh status (or: docker exec $CONTAINER ${DECIDER_CLI[*]} status)"; return 0 ;;
+    *) decider_problem "enabling the decision model failed (exit $rc, see above). $running; see ./install.sh logs, then re-run ./install.sh"; return 0 ;;
+  esac
+  run docker exec "$CONTAINER" "${DECIDER_CLI[@]}" status || true
 }
 
 # --- install steps -----------------------------------------------------------------------------------
@@ -1010,6 +1222,7 @@ cmd_install() {
       print_litellm_endpoint
     fi
     proxy_hint
+    if ((WITH_DECIDER)); then decider_setup; fi
     return 0
   fi
 
@@ -1039,6 +1252,7 @@ cmd_install() {
     info "LiteLLM is running. Single OpenAI-compatible endpoint for all DGXMM models:"
     print_litellm_endpoint
   fi
+  if ((WITH_DECIDER)); then decider_setup; fi
 }
 
 cmd_upgrade() {
@@ -1108,6 +1322,24 @@ cmd_status() {
   else
     note "none running"
   fi
+  info "Decision model"
+  local with_decider
+  with_decider=$(bool01 "$(env_file_get DGXMM_WITH_DECIDER || echo 0)") || with_decider=0
+  if [ "$state" = running ]; then
+    local dout drc=0
+    dout=$(docker exec "$CONTAINER" "${DECIDER_CLI[@]}" status --check 2>&1) || drc=$?
+    while IFS= read -r line; do note "$line"; done <<<"$dout"
+    if [ "$with_decider" = 1 ] && ((drc != 0)); then rc=1; fi
+  else
+    local dline
+    dline=$(docker ps -a --filter label=dgxmm.system=true --format '{{.Names}}  {{.Status}}' 2>/dev/null || true)
+    if [ -n "$dline" ]; then
+      while IFS= read -r line; do note "$line"; done <<<"$dline"
+    else
+      note "no decider container"
+    fi
+    note "(DGXMM is not running: no details)"
+  fi
   PORT=$(env_file_get DGXMM_PORT || echo 8090)
   BIND=$(env_file_get DGXMM_BIND || echo 0.0.0.0)
   info "URLs"
@@ -1131,10 +1363,102 @@ cmd_logs() {
   fi
 }
 
+# remove_decider: stop and remove this install's decider container (label dgxmm.install). Its deployment row and
+# decider.enabled stay in the database, so a reinstall brings it back. A decider container without this install's
+# label (created before install labels, or by another install) is reported, never removed.
+remove_decider() {
+  local id ids=() all=() others=()
+  id=$(env_file_get DGXMM_INSTALL_ID || true)
+  if [ -n "$id" ]; then
+    mapfile -t ids < <(docker ps -aq --filter label=dgxmm.system=true --filter "label=dgxmm.install=$id" 2>/dev/null | grep . || true)
+  fi
+  mapfile -t all < <(docker ps -aq --filter label=dgxmm.system=true 2>/dev/null | grep . || true)
+  local a i mine
+  for a in "${all[@]}"; do
+    mine=0
+    for i in "${ids[@]}"; do [ "$a" = "$i" ] && mine=1; done
+    ((mine)) || others+=("$a")
+  done
+  if ((${#ids[@]})); then
+    info "Removing the decision model (decider) container"
+    run_q docker rm -f "${ids[@]}"
+  fi
+  if ((${#others[@]})); then
+    note "kept decider container(s) ${others[*]}: not labelled for this install (created before install labels?); remove by hand with docker rm -f ${others[*]}"
+  fi
+}
+
+# decider_network from config.yaml (default dgxmm-decider; an explicit empty value means none)
+decider_network_name() {
+  local line
+  line=$(grep -E '^decider_network:' "$CONFIG_FILE" 2>/dev/null | tail -1 || true)
+  if [ -z "$line" ]; then echo dgxmm-decider; return 0; fi
+  line=${line#decider_network:}
+  line=${line%%#*}
+  line=$(printf '%s' "$line" | tr -d " \t\"'")
+  printf '%s\n' "$line"
+}
+
+# decider_exclusive_blobs HUB DIR...: the shared content-store files (HUB/blobs/<xx>/<hash>, huggingface_hub >= 2
+# and DGXMM's own downloads) that the repo directories DIR... link to and that no other repo directory under HUB
+# links to; one resolved path per line. Read-only.
+decider_exclusive_blobs() {
+  local hub=$1 store d l t skip x
+  shift
+  store=$(realpath -e -- "$hub/blobs" 2>/dev/null) || return 0
+  local -A own_blobs=() other_links=()
+  shopt -s globstar nullglob dotglob
+  for d in "$@"; do
+    [ -d "$hub/$d" ] || continue
+    for l in "$hub/$d"/**; do
+      [ -L "$l" ] || continue
+      t=$(readlink -e -- "$l") || continue
+      if [[ $t == "$store"/* ]] && [ -f "$t" ]; then own_blobs[$t]=1; fi
+    done
+  done
+  if ((${#own_blobs[@]})); then
+    for d in "$hub"/*--*; do
+      [ -d "$d" ] && [ ! -L "$d" ] || continue
+      skip=0
+      for x in "$@"; do [ "$d" = "$hub/$x" ] && skip=1; done
+      ((skip)) && continue
+      for l in "$d"/**; do
+        [ -L "$l" ] || continue
+        t=$(readlink -e -- "$l") || continue
+        other_links[$t]=1
+      done
+    done
+  fi
+  shopt -u globstar nullglob dotglob
+  for t in "${!own_blobs[@]}"; do
+    [ -n "${other_links[$t]+x}" ] || printf '%s\n' "$t"
+  done | sort
+}
+
+# purge_decider_models HF: remove every supported decision model's repo directory and the shared-store blobs only
+# they use (computed before anything is removed).
+purge_decider_models() {
+  local hub=$1/hub d removed=0 blobs=() b
+  mapfile -t blobs < <(decider_exclusive_blobs "$hub" "${DECIDER_REPO_DIRS[@]}")
+  for d in "${DECIDER_REPO_DIRS[@]}"; do
+    [ -e "$hub/$d" ] || continue
+    if run rm -rf -- "$hub/$d"; then
+      removed=$((removed + 1))
+    else
+      warn "could not remove $hub/$d (files written by a container as root?); remove it by hand: sudo rm -rf $hub/$d"
+    fi
+  done
+  for b in "${blobs[@]}"; do
+    run rm -f -- "$b" || warn "could not remove $b; remove it by hand"
+  done
+  note "removed $removed decision model snapshot(s) and ${#blobs[@]} shared blob(s) only they used; other model caches were not touched"
+}
+
 cmd_uninstall() {
   check_not_root
   require_docker
   check_ownership
+  remove_decider
   info "Removing the DGXMM container and image"
   if [ -n "$OWN_STATE" ]; then
     if [ "$OWN_STATE" = running ]; then run_q docker stop -t 30 "$CONTAINER"; fi
@@ -1152,8 +1476,12 @@ cmd_uninstall() {
     run_q docker stop -t 30 "${lids[@]}"
     run_q docker rm "${lids[@]}"
   fi
-  local network
+  local network hf decider_tag install_id decider_net d
+  install_id=$(env_file_get DGXMM_INSTALL_ID || true)
   network=$(env_file_get DGXMM_NETWORK || echo dgxmm)
+  hf=$(expand_tilde "$(env_file_get DGXMM_HF_CACHE || printf '%s' "$HOME/.cache/huggingface")")
+  decider_tag=$(decider_image_tag)
+  decider_net=$(decider_network_name)
   if ((!PURGE)); then
     local n
     n=$(docker ps -q --filter label=dgxmm.managed=true | grep -c . || true)
@@ -1166,19 +1494,70 @@ cmd_uninstall() {
     return 0
   fi
   info "Purging DGXMM state"
-  local ids=()
-  mapfile -t ids < <(docker ps -aq --filter label=dgxmm.managed=true)
+  # Only this install's engine containers (label dgxmm.install); others (another install, or created before
+  # install labels) are reported and kept.
+  local ids=() all=() kept=() a i mine
+  if [ -n "$install_id" ]; then
+    mapfile -t ids < <(docker ps -aq --filter label=dgxmm.managed=true --filter "label=dgxmm.install=$install_id" 2>/dev/null | grep . || true)
+  fi
+  mapfile -t all < <(docker ps -aq --filter label=dgxmm.managed=true 2>/dev/null | grep . || true)
+  for a in "${all[@]}"; do
+    mine=0
+    for i in "${ids[@]}"; do [ "$a" = "$i" ] && mine=1; done
+    ((mine)) || kept+=("$a")
+  done
   if ((${#ids[@]})); then
     run_q docker rm -f "${ids[@]}"
+  fi
+  if ((${#kept[@]})); then
+    note "kept engine container(s) ${kept[*]}: not labelled for this install (created before install labels, or by another install); remove by hand with docker rm -f ${kept[*]}"
   fi
   if [ "$(docker network inspect --format '{{index .Labels "dgxmm.created"}}' "$network" 2>/dev/null || true)" = true ]; then
     run_q docker network rm "$network" || warn "could not remove network $network (still in use?)"
   fi
+  # The decider's internal network: DGXMM creates it on the first decider start with the labels
+  # dgxmm.purpose=decider and dgxmm.install=<this install's id>. Only that one is removed; a same-named network
+  # from another install, or from before install labels, is reported and kept.
+  if [ -n "$decider_net" ] &&
+     [ "$(docker network inspect --format '{{index .Labels "dgxmm.purpose"}}' "$decider_net" 2>/dev/null || true)" = decider ]; then
+    if [ -n "$install_id" ] &&
+       [ "$(docker network inspect --format '{{index .Labels "dgxmm.install"}}' "$decider_net" 2>/dev/null || true)" = "$install_id" ]; then
+      run_q docker network rm "$decider_net" || warn "could not remove network $decider_net (still in use?)"
+    else
+      note "kept network $decider_net: not labelled for this install (created before install labels, or by another install); remove by hand with docker network rm $decider_net"
+    fi
+  fi
   if [ -d "$LITELLM_DB_DIR" ]; then
     run rm -rf "$LITELLM_DB_DIR" || die "could not remove data/litellm-db (files owned by another user?); remove it by hand"
   fi
+  # Only images this install built (labels dgxmm.built + dgxmm.install), removed tag by tag without --force: an
+  # image a container still uses, or that another tag outside this list shares, is kept with a warning.
+  local ref ref_id refs=()
+  if [ -n "$install_id" ]; then
+    mapfile -t refs < <(docker images --filter label=dgxmm.built=true --filter "label=dgxmm.install=$install_id" \
+                          --format '{{.Repository}}:{{.Tag}} {{.ID}}' 2>/dev/null | sort -u | grep . || true)
+  fi
+  for ref in "${refs[@]}"; do
+    ref_id=${ref##* }
+    ref=${ref% *}
+    [ "$ref" = "<none>:<none>" ] && ref=$ref_id
+    run_q docker image rm "$ref" || warn "could not remove image $ref (in use, or tagged elsewhere?)"
+  done
+  if docker image inspect "$decider_tag" >/dev/null 2>&1 &&
+     [ "$(docker image inspect --format '{{index .Config.Labels "dgxmm.install"}}' "$decider_tag" 2>/dev/null || true)" != "${install_id:-none}" ]; then
+    note "kept image $decider_tag: not built by this install (remove it by hand with docker image rm $decider_tag)"
+  fi
   run rm -rf "$DATA_DIR" "$SECRETS_DIR" "$CONFIG_FILE" "$ENV_FILE"
-  note "model caches were not touched"
+  if ((PURGE_MODEL)); then
+    purge_decider_models "$hf"
+  else
+    for d in "${DECIDER_REPO_DIRS[@]}"; do
+      if [ -e "$hf/hub/$d" ]; then
+        note "kept the decision model snapshot $hf/hub/$d (--purge-decider-model removes it)"
+      fi
+    done
+    note "model caches were not touched"
+  fi
   if ((DRY_RUN)); then info "Dry run complete: nothing was changed."; fi
   return 0
 }

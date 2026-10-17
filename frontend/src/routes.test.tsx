@@ -44,6 +44,23 @@ describe("routes", () => {
     expect(screen.getByTestId("where")).toHaveTextContent("/change-password");
   });
 
+  it("serves the admin Decision model page at /decision-model (lazy)", async () => {
+    vi.mocked(apiModule.api).mockImplementation((url: string) => {
+      if (url === "/auth/me") return Promise.resolve({ csrf_token: "t", user: { id: 1, username: "admin", role: "admin", must_change_pw: false } });
+      return new Promise(() => undefined);
+    });
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={qc}>
+        <MemoryRouter initialEntries={["/decision-model"]} future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
+          <AuthProvider><AppRoutes /><Where /></AuthProvider>
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+    await waitFor(() => expect(vi.mocked(apiModule.api).mock.calls.some(([u]) => u === "/decider/status")).toBe(true));
+    expect(screen.getByTestId("where")).toHaveTextContent("/decision-model");
+  });
+
   it("serves the admin LiteLLM page at /litellm", async () => {
     vi.mocked(apiModule.api).mockImplementation((url: string) => {
       if (url === "/auth/me") return Promise.resolve({ csrf_token: "t", user: { id: 1, username: "admin", role: "admin", must_change_pw: false } });

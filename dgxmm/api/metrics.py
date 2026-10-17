@@ -54,11 +54,22 @@ def host_metrics(window: str = Query("live"), p: Principal = Depends(current_pri
 
 
 @router.get("/deployments/{dep_id}/advice")
-def advice(dep_id: int, p: Principal = Depends(current_principal), ctx: AppContext = Depends(get_ctx)):
+async def advice(dep_id: int, p: Principal = Depends(current_principal), ctx: AppContext = Depends(get_ctx)):
+    """The advisor's rules produce the list; a cached workload label (if any) orders it by `relevance`. Never waits
+    on the decision model: a cache miss schedules one background classification and returns the advisor's order."""
+    from dgxmm.decider.features import ensure_features
+    from dgxmm.decider.workload import rank
     try:
-        return ctx.advisor.advise(dep_id)
+        items = await asyncio.to_thread(ctx.advisor.advise, dep_id)
     except DeployError as e:
         raise deploy_error(e)
+    ensure_features(ctx)
+    try:
+        wl = ctx.workload.peek(dep_id)
+    except Exception:
+        log.exception("workload lookup failed for deployment %s", dep_id)
+        wl = None
+    return rank(items, wl)
 
 
 @router.post("/deployments/{dep_id}/benchmark", status_code=202)

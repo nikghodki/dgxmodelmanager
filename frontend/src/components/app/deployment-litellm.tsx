@@ -38,8 +38,23 @@ function Warn({ children }: { children: React.ReactNode }) {
   return <p className="flex items-start gap-2 text-xs text-status-warning"><AlertTriangle aria-hidden className="mt-0.5 h-3.5 w-3.5 shrink-0" /><span>{children}</span></p>;
 }
 
+export const SYSTEM_NOT_IN_LITELLM = "System deployments aren't registered in LiteLLM";
+
+/** A system deployment (the decision model) is only called by DGXMM itself: no endpoint, snippets or keys to offer. */
+function SystemLiteLLMCard({ className }: { className?: string }) {
+  return (
+    <Card data-card className={`min-w-0 shadow-card ${className ?? ""}`}>
+      <CardHeader className="pb-2">
+        <CardTitle className="text-sm"><h2>API access</h2></CardTitle>
+        <CardDescription className="text-xs">{SYSTEM_NOT_IN_LITELLM}. Only DGXMM calls the decision model, on its internal network.</CardDescription>
+      </CardHeader>
+    </Card>
+  );
+}
+
 /** Overview card: the one way to call this deployment (LiteLLM endpoint + model), with the raw engine URLs tucked away. */
 export function ApiAccessCard({ d, info, loading, error }: { d: Deployment; info?: DeploymentLiteLLM; loading: boolean; error: unknown }) {
+  if (d.system) return <SystemLiteLLMCard className="lg:col-span-3" />;
   const model = modelNameOf(d, info);
   const endpoint = info?.endpoint ?? "";
   return (
@@ -154,10 +169,16 @@ function ModelNameForm({ d, info, suggested, onSaved }: { d: Deployment; info?: 
   );
 }
 
-/** The deployment's LiteLLM tab. Admins can rename the model, re-sync and manage keys; viewers only read. */
-export function LiteLLMTab({ d, info, loading, error, admin, suggested, onRenamed }: {
+type LiteLLMTabProps = {
   d: Deployment; info?: DeploymentLiteLLM; loading: boolean; error: unknown; admin: boolean; suggested?: string | null; onRenamed?: () => void;
-}) {
+};
+
+/** The deployment's LiteLLM tab. Admins can rename the model, re-sync and manage keys; viewers only read. */
+export function LiteLLMTab(props: LiteLLMTabProps) {
+  return props.d.system ? <SystemLiteLLMCard /> : <LiteLLMPanel {...props} />;
+}
+
+function LiteLLMPanel({ d, info, loading, error, admin, suggested, onRenamed }: LiteLLMTabProps) {
   const [syncResult, setSyncResult] = useState<LiteLLMSyncResult | null>(null);
   const model = modelNameOf(d, info);
   const deps = useQuery({ queryKey: ["deployments"], queryFn: () => api<Deployment[]>("/deployments"), enabled: admin });

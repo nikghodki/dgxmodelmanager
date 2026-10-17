@@ -1,0 +1,35 @@
+{
+ "ref": "sentence-transformers/all-MiniLM-L6-v2",
+ "architecture": "BertModel",
+ "model_type": "bert",
+ "config": {
+  "architectures": [
+   "BertModel"
+  ],
+  "model_type": "bert",
+  "num_hidden_layers": 6,
+  "hidden_size": 384,
+  "vocab_size": 30522,
+  "max_position_embeddings": 512
+ },
+ "files": [
+  ".gitattributes",
+  "1_Pooling/config.json",
+  "README.md",
+  "config.json",
+  "config_sentence_transformers.json",
+  "data_config.json",
+  "modules.json",
+  "openvino/openvino_model.xml",
+  "openvino/openvino_model_qint8_quantized.xml",
+  "rust_model.ot",
+  "sentence_bert_config.json",
+  "special_tokens_map.json",
+  "tokenizer.json",
+  "tokenizer_config.json",
+  "train_script.py",
+  "vocab.txt"
+ ],
+ "weight_files": 14,
+ "template": null
+}

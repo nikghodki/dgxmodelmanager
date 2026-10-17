@@ -1,0 +1,26 @@
+{
+ "ref": "facebook/wav2vec2-base-960h",
+ "architecture": "Wav2Vec2ForCTC",
+ "model_type": "wav2vec2",
+ "config": {
+  "architectures": [
+   "Wav2Vec2ForCTC"
+  ],
+  "model_type": "wav2vec2",
+  "num_hidden_layers": 12,
+  "hidden_size": 768,
+  "vocab_size": 32
+ },
+ "files": [
+  ".gitattributes",
+  "README.md",
+  "config.json",
+  "feature_extractor_config.json",
+  "preprocessor_config.json",
+  "special_tokens_map.json",
+  "tokenizer_config.json",
+  "vocab.json"
+ ],
+ "weight_files": 3,
+ "template": null
+}

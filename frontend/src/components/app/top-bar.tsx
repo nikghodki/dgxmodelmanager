@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import {
   DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { DeciderChip } from "./decider-chip";
 import { MemoryChip } from "./memory-chip";
 import { titleFor } from "./nav";
 import { ThemeToggle } from "./theme";
@@ -31,6 +32,7 @@ export function TopBar({ onOpenPalette }: { onOpenPalette: () => void }) {
         <span className="flex items-center gap-2"><Search className="h-3.5 w-3.5" /><span className="hidden md:inline">Search or run…</span></span>
         <kbd className="hidden rounded border bg-muted px-1.5 font-mono text-[10px] md:inline">{isMac ? "⌘" : "Ctrl"} K</kbd>
       </Button>
+      <DeciderChip />
       <MemoryChip />
       <ThemeToggle />
       <DropdownMenu>

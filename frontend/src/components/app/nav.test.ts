@@ -7,7 +7,8 @@ describe("nav", () => {
     expect(visibleGroups(true).map((g) => g.label)).toEqual(["Operate", "Models", "Integrations", "Admin"]);
     expect(visibleGroups(false).flatMap((g) => g.items.map((i) => i.to))).not.toContain("/users");
     expect(visibleGroups(false).flatMap((g) => g.items.map((i) => i.to))).not.toContain("/litellm");
-    expect(visibleGroups(true).find((g) => g.label === "Integrations")!.items.map((i) => i.to)).toEqual(["/litellm"]);
+    expect(visibleGroups(true).find((g) => g.label === "Integrations")!.items.map((i) => i.to)).toEqual(["/litellm", "/decision-model"]);
+    expect(visibleGroups(false).flatMap((g) => g.items.map((i) => i.to))).not.toContain("/decision-model");
   });
   it("lists Processes under Operate for everyone", () => {
     const operate = visibleGroups(false).find((g) => g.label === "Operate")!;
@@ -21,6 +22,7 @@ describe("nav", () => {
     ["/catalog", { section: "Catalog" }],
     ["/models", { section: "On disk" }],
     ["/litellm", { section: "LiteLLM" }],
+    ["/decision-model", { section: "Decision model" }],
     ["/processes", { section: "Processes" }],
     ["/change-password", { section: "Account", item: "Change password" }],
     ["/nope", { section: "DGXMM" }],

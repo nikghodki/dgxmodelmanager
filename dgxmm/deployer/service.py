@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import hashlib
 import json
 import logging
@@ -17,17 +18,29 @@ from sqlalchemy import select
 
 from dgxmm.config import Settings
 from dgxmm.db import Database, Deployment, DeploymentEvent
+from dgxmm.deployer.logtail import SCAN_LINES, oom_evidence, stored_tail
+from dgxmm.deployer.gate import GateTimeout, GateWithdrawn, StartupGate
 from dgxmm.deployer.states import ACTIVE_STATES, assert_transition
-from dgxmm.engines.base import LaunchContext, container_name
+from dgxmm.docker_ctl import SecretDeliveryFailed
+from dgxmm.engines.base import LaunchContext, SpecError, container_name
+from dgxmm.engines.decision import is_system_engine
 from dgxmm.events import EventBroker
 from dgxmm.inventory.artifact import REPO_RE, ModelArtifact
+from dgxmm.inventory.kinds import classify_kind
 from dgxmm.memory.estimate import MemoryEstimate, vllm_gpu_util
+from dgxmm.memory.redact import redact_log
 from dgxmm.planner.fit import FitResult, check_fit
 from dgxmm.planner.plans import ActiveDep, PlanAction, base_model_name, build_plans
 
 log = logging.getLogger(__name__)
 NAME_PATTERN = r"^[a-z0-9][a-z0-9-]{0,40}$"
 ALIAS_PATTERN = r"^[A-Za-z0-9._:/-]{1,64}$"  # LiteLLM model name
+
+
+# docker's error when the host port is bound by a process outside docker ("failed to bind host port ...: address
+# already in use") or by a container it knows ("port is already allocated").
+_PORT_CONFLICT = re.compile(r"address already in use|port is already allocated", re.I)
+PORT_ATTEMPTS = 4
 
 
 class DeployRequest(BaseModel):
@@ -67,6 +80,8 @@ def config_hash(cfg: dict) -> str:
 
 
 StateHook = Callable[[int, str, str], Awaitable[None]]
+STARTUP_STATES = ("starting", "loading")  # states that hold a start-up slot (deployer/gate.py)
+GIB_F = float(1024**3)
 
 
 class Deployer:
@@ -78,6 +93,7 @@ class Deployer:
         self._locks: dict[int, asyncio.Lock] = {}
         self._monitors: dict[int, asyncio.Task] = {}
         self.state_hooks: list[StateHook] = []
+        self.removal_hooks: list[Callable[[int], None]] = []  # fn(dep_id) after a deployment row is deleted
         self.calibration = None  # set in Task 32
         self.delete_guard: Callable[[str], bool] | None = None  # WeightsDeleter.is_being_deleted
         # LiteLLMSync.error_for: why a deployment is not (correctly) registered in LiteLLM, as of the last sync
@@ -85,11 +101,41 @@ class Deployer:
         # dep_id -> model refs while a container is being (re)launched; until it reaches "starting" the DB row may
         # still be planned/stopped/failed, so the weights deleter treats these as blocking.
         self.launching: dict[int, tuple[str, ...]] = {}
+        # decision model (dgxmm/decider): returns the Decider (ctx.decider) at call time; None = rules only
+        self.decider_getter: Callable[[], Any] | None = None
+        self.metrics = None  # MetricsStore: traffic facts for the plan safety filter
+        self.rotating: set[int] = set()  # decider deployments whose key is being rotated (dgxmm.decider.rotation)
+        # at most settings.max_concurrent_startups engines starting/loading at once (deployer/gate.py)
+        self.gate = StartupGate(lambda: self.settings.max_concurrent_startups)
+        self._queued: dict[int, asyncio.Task] = {}  # dep_id -> task waiting for its start-up slot
+        self._waking: dict[int, asyncio.Task] = {}  # dep_id -> wake-up waiting for its start-up slot
 
     def _check_not_deleting(self, *refs: str | None) -> None:
         for ref in refs:
             if ref and self.delete_guard is not None and self.delete_guard(ref):
                 raise DeployError("model_being_deleted", f"{ref} is being deleted from disk", 409)
+
+    def _require_single_system(self, engine_name: str) -> None:
+        """Only one deployment of a system engine (the decision model) may exist at a time."""
+        with self.db.session() as s:
+            other = s.scalar(select(Deployment).where(Deployment.engine == engine_name))
+            if other is not None:
+                raise DeployError("decider_exists", f"deployment {other.name} already runs the {engine_name} engine",
+                                  409, holder={"id": other.id, "name": other.name, "state": other.state})
+
+    def _refuse_system(self, dep_id: int, what: str) -> None:
+        dep = self._get(dep_id)
+        if dep is not None and dep.system:
+            raise DeployError("system_deployment", f"{dep.name} is a system deployment and is never {what} by a plan",
+                              409)
+
+    @staticmethod
+    def _refuse_system_change(dep: Deployment, what: str) -> None:
+        """System deployments (the decision model) change only through their own page: never switched to another
+        model or reconfigured by the generic actions."""
+        if dep.system:
+            raise DeployError("system_deployment", f"{dep.name} is a system deployment and cannot be {what}; change "
+                                                   "the decision model on the Decision model page", 409)
 
     # ---------- helpers ----------
     def _lock(self, dep_id: int) -> asyncio.Lock:
@@ -105,8 +151,13 @@ class Deployer:
             raise DeployError("not_found", f"deployment {dep_id} not found", 404)
         return dep
 
-    def base_url(self, name: str, port: int) -> str:
-        host = self.settings.engine_base_host or container_name(name)
+    def _publishes(self, engine: str | None) -> bool:
+        return getattr(self.engines.get(engine), "publishes_port", True) if engine else True
+
+    def base_url(self, name: str, port: int, engine: str | None = None) -> str:
+        """engine_base_host (if set) for engines with a published port; the container name otherwise (the decider
+        has no published port and is reachable only on its docker network)."""
+        host = (self.settings.engine_base_host if self._publishes(engine) else None) or container_name(name)
         return f"http://{host}:{port}"
 
     def _ref_allowed(self, ref: str) -> bool:
@@ -130,8 +181,11 @@ class Deployer:
             for k, v in fields.items():
                 setattr(dep, k, v)
             s.add(DeploymentEvent(deployment_id=dep_id, from_state=frm, to_state=to, message=message, log_tail=log_tail))
+        if to not in STARTUP_STATES and self.gate.holders.get(dep_id) not in (None, "wake"):
+            self.gate.release(dep_id)  # the start-up is over (ready / failed / stopping ...): next in queue may go
         view = self.view(dep_id)
         self.events.publish("deployment", view)
+        self._publish_waiters(exclude=dep_id)
         for hook in self.state_hooks:
             asyncio.get_running_loop().create_task(self._run_hook(hook, dep_id, frm, to))
         return view
@@ -143,14 +197,26 @@ class Deployer:
         except Exception:
             log.exception("state hook failed for deployment %s", dep_id)
 
-    def _allocate_port(self, exclude_dep: int | None = None) -> int:
+    def _next_port(self, dep_id: int, tried: set[int]) -> int | None:
+        try:
+            return self._allocate_port(exclude_dep=dep_id, skip=tried)
+        except DeployError:
+            return None
+
+    def _used_ports(self, exclude_dep: int | None = None) -> set[int]:
+        """Ports held by other active/planned deployments and by unmanaged containers (blocking: docker call)."""
         with self.db.session() as s:
             used = {d.port for d in s.scalars(select(Deployment)) if d.port and d.state in ACTIVE_STATES | {"planned"}
                     and d.id != exclude_dep}
         try:
             used |= {p for c in self.docker.list_all() for p in c.host_ports if not c.managed}
         except Exception:
-            log.warning("could not list containers for port allocation", exc_info=True)
+            log.warning("could not list containers for the port check", exc_info=True)
+        return used
+
+    def _allocate_port(self, exclude_dep: int | None = None, skip: set[int] | frozenset = frozenset(),
+                       used: set[int] | None = None) -> int:
+        used = (self._used_ports(exclude_dep) if used is None else set(used)) | set(skip)
         lo, hi = self.settings.port_range
         for port in range(lo, hi + 1):
             if port not in used:
@@ -158,7 +224,10 @@ class Deployer:
         raise DeployError("no_ports", "port pool exhausted", 503)
 
     # ---------- planning ----------
-    def prepare(self, engine_name: str, model_ref: str, raw_cfg: dict) -> Prepared:
+    def prepare(self, engine_name: str, model_ref: str, raw_cfg: dict, existing_ref: str | None = None) -> Prepared:
+        """`existing_ref`: the model an existing deployment already runs. Such a deployment stays servable when the
+        inventory's kind rules later reclassify its model (e.g. a *ForCausalLM decision checkpoint is now kind
+        `decision`): for it the engine is asked with the architecture-only kind DGXMM used before."""
         engine = self.engines.get(engine_name)
         if engine is None:
             raise DeployError("unknown_engine", f"engine {engine_name!r} is not available", 422)
@@ -174,7 +243,9 @@ class Deployer:
             raise DeployError("model_not_found", f"{model_ref} is not downloaded", 404)
         if not artifact.complete:
             raise DeployError("model_incomplete", "; ".join(artifact.problems) or "incomplete download", 409)
-        if not engine.supports(artifact):
+        if not engine.supports(artifact) and not (
+                existing_ref == model_ref and artifact.kind != "llm"
+                and engine.supports(dataclasses.replace(artifact, kind=classify_kind(artifact.architecture)))):
             raise DeployError("engine_unsupported", f"{engine_name} cannot serve {artifact.format} model {model_ref}", 422)
         draft = None
         if dref := engine.draft_ref(cfg):
@@ -186,7 +257,7 @@ class Deployer:
             est = engine.estimate(artifact, cfg, draft, self.settings)
         except ValueError as e:
             raise DeployError("cannot_estimate", str(e), 422)
-        if self.calibration is not None:
+        if self.calibration is not None and not getattr(engine, "fixed_estimate", False):
             est = self.calibration.adjust(engine.name, artifact.ref, config_hash(cfg.model_dump(mode="json")), est)
         return Prepared(engine, artifact, cfg, draft, est)
 
@@ -217,7 +288,11 @@ class Deployer:
                        - est.get("runtime", 0), 0)
         return actual if dep.state == "sleeping" else max(dep.reserved_bytes, actual)
 
-    async def preview(self, engine: str, model_ref: str, raw_cfg: dict, replacing: int | None = None) -> dict:
+    async def preview(self, engine: str, model_ref: str, raw_cfg: dict, replacing: int | None = None,
+                      priority: int | None = None, consult=None) -> dict:
+        """`priority`: the request's priority (plan safety: never evict a higher-priority deployment). None = the
+        replaced deployment's own priority (switch / reconfigure), else 0. `consult()`: may the decision model be
+        asked to rank the plans (the caller's rate limit; None = yes)."""
         prep = self.prepare(engine, model_ref, raw_cfg)
         budget = await self.budget.refresh()
         fit = check_fit(prep.estimate, budget, extra_free=self._replacing_credit(replacing))
@@ -228,19 +303,81 @@ class Deployer:
             out["gpu_memory_utilization"] = vllm_gpu_util(prep.estimate.total, budget.total)
         if hasattr(prep.engine, "pool_tokens"):
             out["kv_pool_tokens"] = prep.engine.pool_tokens(prep.cfg)
-        out["plans"] = [] if fit.fits else self.plans_for(prep, fit, replacing)
+        if priority is None:
+            old = self._get(replacing) if replacing is not None else None
+            priority = old.priority if old is not None else 0
+        if fit.fits:
+            out["plans"] = []
+            return out
+        out["notes"] = self.system_memory_notes(engine, replacing)
+        facts = await self.plan_facts(replacing)
+        plans = self.plans_for(prep, fit, replacing, facts=facts)
+        out["plans"] = await self.recommend_plans(plans, prep, fit, raw_cfg, replacing, priority,
+                                                  facts=facts, consult=consult) if plans else plans
         return out
+
+    def system_memory_notes(self, engine: str, replacing: int | None = None) -> list[str]:
+        """A request that does not fit, while a system deployment (the decision model) holds memory: say how to free
+        it. Never a plan action: plans leave system deployments alone (an admin turns the decider off explicitly)."""
+        if is_system_engine(self.engines.get(engine)):
+            return []
+        out = []
+        for v in self.list_views():
+            if v["system"] and v["id"] != replacing and v["reserved_bytes"] and v["state"] in ACTIVE_STATES \
+                    and v["state"] != "stopping":
+                gib = f"{v['reserved_bytes'] / GIB_F:.1f}".removesuffix(".0")
+                out.append(f"The decision model holds {gib} GiB — disable it on the Decision model page to free it")
+        return out
+
+    async def plan_facts(self, exclude: int | None = None) -> dict | None:
+        """Traffic / dependency facts of the active deployments (dgxmm/decider/plans.py); None if unavailable.
+        Used both to rank the stop/sleep plans and by the plan safety filter."""
+        from dgxmm.decider.plans import facts_for
+        try:
+            return await asyncio.to_thread(lambda: facts_for(self.list_views(), self.metrics, exclude=exclude,
+                                                             db=self.db))
+        except Exception:
+            log.exception("could not read plan facts; plans are ranked by priority and size only")
+            return None
+
+    async def recommend_plans(self, plans: list[dict], prep: Prepared, fit: FitResult, raw_cfg: dict,
+                              replacing: int | None = None, priority: int = 0, facts: dict | None = None,
+                              consult=None) -> list[dict]:
+        """Safety-filter the plans and mark the recommended one (dgxmm/decider/plans.py). Fails open."""
+        from dgxmm.decider.plans import facts_for, recommend
+        from dgxmm.decider.protocol import NullDecider
+        try:
+            decider = (self.decider_getter() if self.decider_getter else None) or NullDecider()
+            model = getattr(prep.engine, "config_model", None)
+            defaults = {k: f.default for k, f in model.model_fields.items()} if model is not None else {}
+            deps = facts if facts is not None else await asyncio.to_thread(
+                lambda: facts_for(self.list_views(), self.metrics, exclude=replacing, db=self.db))
+            return await recommend(plans, deps=deps, request_priority=priority,
+                                   decider=decider, shortfall=max(fit.required - fit.free_for_new, 0),
+                                   model_ref=prep.artifact.ref, engine=prep.engine.name,
+                                   cfg=prep.cfg.model_dump(mode="json"), raw_cfg=raw_cfg or {}, defaults=defaults,
+                                   context_key=getattr(prep.engine, "context_key", ""),
+                                   seqs_key=getattr(prep.engine, "seqs_key", ""), consult=consult)
+        except Exception:
+            log.exception("plan recommendation failed; returning plans unannotated")
+            return plans
 
     # ---------- lifecycle ----------
     async def deploy(self, req: DeployRequest, user_id: int | None) -> dict:
         prep = self.prepare(req.engine, req.model_ref, req.config)
+        system = is_system_engine(prep.engine)
         with self.db.session() as s:
             if s.scalar(select(Deployment).where(Deployment.name == req.name)):
                 raise DeployError("name_in_use", f"a deployment named {req.name} already exists", 409)
-        model_name = req.alias or prep.engine.served_name(prep.cfg, req.model_ref)
+        # System deployments are never registered in LiteLLM, so they neither hold nor need a model name.
+        model_name = None if system else req.alias or prep.engine.served_name(prep.cfg, req.model_ref)
         self.require_model_name(model_name, None)
+        if system:
+            self._require_single_system(req.engine)
         async with self.mem_lock:
             self.require_model_name(model_name, None)  # again under the lock: concurrent deploys
+            if system:
+                self._require_single_system(req.engine)
             budget = await self.budget.refresh()
             fit = check_fit(prep.estimate, budget)
             if not fit.fits:
@@ -250,19 +387,140 @@ class Deployer:
                 dep = Deployment(name=req.name, engine=req.engine, model_ref=req.model_ref,
                                  config=prep.cfg.model_dump(mode="json"), state="planned", port=port,
                                  priority=req.priority, alias=req.alias, reserved_bytes=prep.estimate.total,
-                                 estimate=prep.estimate.as_dict(), created_by=user_id)
+                                 estimate=prep.estimate.as_dict(), created_by=user_id, system=system or None)
                 s.add(dep)
                 s.flush()
                 dep_id = dep.id
-            await self._launch(dep_id, req.name, port, prep, budget.total)
-        self._spawn_monitor(dep_id)
+            launched = await self._launch_or_queue(dep_id, req.name, port, prep, budget.total)
+        if launched:
+            self._spawn_monitor(dep_id)
         return self.view(dep_id)
+
+    # ---------- start-up gate ----------
+    async def _launch_or_queue(self, dep_id: int, name: str, port: int, prep: Prepared, mem_total: int) -> bool:
+        """Launch now if a start-up slot is free (True), else put the deployment in state "queued" and launch it
+        from a background task when its turn comes (False). Called under mem_lock after the fit check."""
+        if self.gate.try_acquire(dep_id, "launch", name):
+            await self._launch(dep_id, name, port, prep, mem_total)
+            return True
+        self.gate.enqueue(dep_id, "launch", name)
+        info = self.gate.info(dep_id) or {}
+        self._transition(dep_id, "queued", message=f"queued: {info.get('reason', 'waiting for a start-up slot')}",
+                         last_error=None, exit_code=None, oom_killed=None)
+        self._spawn_queued(dep_id)
+        return False
+
+    def _spawn_queued(self, dep_id: int) -> None:
+        old = self._queued.get(dep_id)
+        if old and not old.done():
+            return
+        task = asyncio.get_running_loop().create_task(self._run_queued(dep_id))
+        task.add_done_callback(lambda t: self._queued_done(dep_id, t))
+        self._queued[dep_id] = task
+
+    def _queued_done(self, dep_id: int, task: asyncio.Task) -> None:
+        if self._queued.get(dep_id) is task:
+            self._queued.pop(dep_id, None)
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            log.exception("queued start of deployment %s died with uncaught exception", dep_id)
+
+    def resume_queued(self, dep_id: int) -> None:
+        """After a dgxmm restart: put a deployment found in state "queued" back in the start-up queue."""
+        dep = self._get(dep_id)
+        if dep is not None:
+            self.gate.enqueue(dep_id, "launch", dep.name)
+        self._spawn_queued(dep_id)
+
+    def _fail_queued(self, dep_id: int, reason: str) -> None:
+        dep = self._get(dep_id)
+        if dep is not None and dep.state == "queued":
+            self._transition(dep_id, "failed", message=reason, last_error=reason)
+
+    async def _run_queued(self, dep_id: int) -> None:
+        dep = self._get(dep_id)
+        if dep is None or dep.state != "queued":
+            self.gate.withdraw(dep_id)
+            return
+        timeout = self.settings.startup_queue_timeout_s
+        try:
+            await self.gate.acquire(dep_id, timeout, "launch", dep.name)
+        except GateTimeout:
+            self._fail_queued(dep_id, f"timed out after {timeout:g}s waiting for a start-up slot "
+                                      f"(still starting: {', '.join(self.gate.blocking()) or 'none'})")
+            return
+        except GateWithdrawn:
+            return  # stopped or removed while it waited
+        launched = False
+        try:
+            launched = await self._launch_queued(dep_id)
+        except Exception as e:  # anything after the slot was granted: never leave a stuck queued row
+            log.exception("queued start of deployment %s failed", dep_id)
+            msg = e.message if isinstance(e, DeployError) else f"{type(e).__name__}: {e}"
+            try:
+                self._fail_queued(dep_id, f"cannot start: {msg}")
+            except Exception:
+                log.exception("could not mark queued deployment %s failed", dep_id)
+        finally:
+            if not launched:
+                self.gate.release(dep_id)
+        if launched:
+            self._spawn_monitor(dep_id)
+
+    async def _launch_queued(self, dep_id: int) -> bool:
+        """Launch a queued deployment that holds a start-up slot; False if it was stopped/failed instead."""
+        async with self._lock(dep_id):
+            dep = self._get(dep_id)
+            if dep is None or dep.state != "queued":
+                return False  # stopped / removed while it waited
+            try:
+                prep = self.prepare(dep.engine, dep.model_ref, dep.config)
+            except DeployError as e:
+                self._fail_queued(dep_id, f"cannot start: {e.message}")
+                return False
+            async with self.mem_lock:
+                budget = await self.budget.refresh()
+                # the queued row's reservation is already counted as committed; credit it back
+                fit = check_fit(prep.estimate, budget, extra_free=max(dep.reserved_bytes, 0))
+                if not fit.fits:
+                    self._fail_queued(dep_id, f"not enough memory at launch time: needs "
+                                              f"{fit.required / GIB_F:.1f} GiB but only "
+                                              f"{fit.free_for_new / GIB_F:.1f} GiB is free")
+                    return False
+                port = await self._free_port(dep_id, dep.port)
+                with self.db.session() as s:
+                    row = s.get(Deployment, dep_id)
+                    row.port, row.reserved_bytes, row.estimate = port, prep.estimate.total, prep.estimate.as_dict()
+                await self._launch(dep_id, dep.name, port, prep, budget.total)  # errors: see _run_queued
+                return True
+
+    async def _free_port(self, dep_id: int, current: int | None) -> int:
+        """``current`` unless another deployment or an unmanaged container uses it now, else a new port."""
+        used = await asyncio.to_thread(self._used_ports, dep_id)
+        return current if current and current not in used else self._allocate_port(exclude_dep=dep_id, used=used)
+
+    def _publish_waiters(self, exclude: int | None = None) -> None:
+        """Queue positions / reasons changed: push the waiting deployments' views (SSE) so the UI stays current."""
+        for w in list(self.gate.waiters):
+            if w.dep_id == exclude:
+                continue
+            try:
+                self.events.publish("deployment", self.view(w.dep_id))
+            except DeployError:
+                pass
+
+    def startup_queue(self, dep_id: int) -> dict | None:
+        return self.gate.info(dep_id)
 
     async def _launch(self, dep_id: int, name: str, port: int, prep: Prepared, mem_total: int) -> None:
         refs = tuple(r for r in (prep.artifact.ref, prep.draft.ref if prep.draft else None) if r)
         # Publish "launching" BEFORE consulting the guard; the deleter publishes its markers before re-planning.
         # Either it sees us launching (refuses) or we see its markers (we refuse).
         self.launching[dep_id] = refs
+        started = False
         try:
             try:
                 self._check_not_deleting(*refs)
@@ -274,18 +532,56 @@ class Deployer:
                         if row is not None:
                             s.delete(row)
                 raise  # restart/reconfigure: row keeps its stopped/failed state
-            launch = LaunchContext(dep_id, name, port, prep.estimate.total, mem_total)
-            spec = prep.engine.container_spec(prep.artifact, prep.cfg, prep.draft, launch, self.settings)
-            try:
-                await asyncio.to_thread(self.docker.remove_by_name, spec.name)
-                cid = await asyncio.to_thread(self.docker.run, spec)
-            except Exception as e:
-                self._transition(dep_id, "failed", message=f"docker error: {e}", last_error=f"docker error: {e}")
-                raise DeployError("docker_error", f"could not start container: {e}", 502)
+            tried: set[int] = set()
+            while True:
+                launch = LaunchContext(dep_id, name, port, prep.estimate.total, mem_total)
+                try:
+                    spec = prep.engine.container_spec(prep.artifact, prep.cfg, prep.draft, launch, self.settings)
+                except ValueError as e:  # SpecError (a typed reason) or a config the engine cannot express
+                    code = e.code if isinstance(e, SpecError) else "invalid_container_spec"
+                    self._transition(dep_id, "failed", message=str(e), last_error=str(e))
+                    raise DeployError(code, str(e), 422)
+                if self.settings.install_id:
+                    spec.labels = {**spec.labels, "dgxmm.install": self.settings.install_id}
+                try:
+                    await asyncio.to_thread(self.docker.remove_by_name, spec.name)
+                    cid = await asyncio.to_thread(self.docker.run, spec)
+                    break
+                except SecretDeliveryFailed as e:
+                    if e.exit_code is None:
+                        self._transition(dep_id, "failed", message=f"docker error: {e}", last_error=f"docker error: {e}")
+                        raise DeployError("docker_error", f"could not start container: {e}", 502)
+                    # the container ran and exited (e.g. the decider's snapshot integrity check): a real failure with
+                    # its own exit code and log, so diagnosis and the user see why
+                    tail = await asyncio.to_thread(stored_tail, e.log_tail) if e.log_tail else e.log_tail
+                    self._transition(dep_id, "failed", message=str(e), log_tail=tail, last_error=str(e),
+                                     exit_code=e.exit_code)
+                    raise DeployError("container_exited", str(e), 502)
+                except Exception as e:
+                    tried.add(port)
+                    # A HOST process (invisible from this container) holds the port: docker fails at start.
+                    # Take the next free port a few times before giving up.
+                    nxt = self._next_port(dep_id, tried) if _PORT_CONFLICT.search(str(e)) and \
+                        len(tried) < PORT_ATTEMPTS else None
+                    if nxt is None:
+                        try:  # docker creates the container before starting it: don't leave it behind
+                            await asyncio.to_thread(self.docker.remove_by_name, spec.name)
+                        except Exception:
+                            log.warning("could not remove container %s after a failed start", spec.name,
+                                        exc_info=True)
+                        self._transition(dep_id, "failed", message=f"docker error: {e}", last_error=f"docker error: {e}")
+                        raise DeployError("docker_error", f"could not start container: {e}", 502)
+                    log.warning("port %s of deployment %s is held by another process; trying %s", port, dep_id, nxt)
+                    port = nxt
+                    with self.db.session() as s:
+                        s.get(Deployment, dep_id).port = port
             self._transition(dep_id, "starting", message=f"container {cid[:12]} created", container_id=cid,
-                             last_error=None, exit_code=None)
+                             last_error=None, exit_code=None, oom_killed=None)
+            started = True
         finally:
             self.launching.pop(dep_id, None)
+            if not started and self.gate.holders.get(dep_id) == "launch":
+                self.gate.release(dep_id)
 
     def _spawn_monitor(self, dep_id: int) -> None:
         old = self._monitors.get(dep_id)
@@ -296,6 +592,10 @@ class Deployer:
         self._monitors[dep_id] = task
 
     def _monitor_done(self, dep_id: int, task: asyncio.Task) -> None:
+        if self.gate.holders.get(dep_id) not in (None, "wake") and not task.cancelled():
+            dep = self._get(dep_id)
+            if dep is None or dep.state not in STARTUP_STATES:
+                self.gate.release(dep_id)  # never leak a slot if the monitor ended without a transition
         try:
             task.result()
         except asyncio.CancelledError:
@@ -320,7 +620,7 @@ class Deployer:
                     self._transition(dep_id, "failed", message="container disappeared", last_error="container disappeared")
                     return
                 if info.status in ("exited", "dead"):
-                    await self._fail_exited(dep, info.exit_code)
+                    await self._fail_exited(dep, info.exit_code, info.oom_killed)
                     return
                 if dep.state == "starting" and info.status == "running":
                     self._transition(dep_id, "loading", message="container running; loading model")
@@ -349,25 +649,41 @@ class Deployer:
         engine = self.engines[dep.engine]
         cfg = engine.validate_config(dep.config)
         try:
-            return await engine.health(self.http, self.base_url(dep.name, dep.port), engine.served_name(cfg, dep.model_ref))
+            return await engine.health(self.http, self.base_url(dep.name, dep.port, dep.engine),
+                                       engine.served_name(cfg, dep.model_ref))
         except (httpx.HTTPError, OSError):
             return False
 
-    async def _fail_exited(self, dep: Deployment, exit_code: int | None) -> None:
+    def _stored_logs(self, container_id: str) -> str:
+        """The container's condensed, redacted log tail (worker thread: regexes over untrusted text)."""
+        return stored_tail(self.docker.logs(container_id, SCAN_LINES))
+
+    async def _fail_exited(self, dep: Deployment, exit_code: int | None, oom_killed: bool = False) -> None:
+        """A container that exited on its own. It counts as out of memory only with evidence: Docker's OOMKilled, or
+        the kernel OOM killer's line in its log. Exit 137 alone is a SIGKILL (docker kill, a stop timeout…): it is
+        labelled as such and never recorded for calibration."""
         try:
-            logs = await asyncio.to_thread(self.docker.logs, dep.container_id, 200)
+            logs = await asyncio.to_thread(self._stored_logs, dep.container_id)
         except Exception:
             log.exception("failed to capture logs for deployment %s", dep.id)
             logs = ""
-        hint = " (likely out of memory)" if exit_code == 137 else ""
+        kernel = not oom_killed and bool(logs) and await asyncio.to_thread(oom_evidence, logs)
+        oom = bool(oom_killed or kernel)
+        if oom:
+            hint = (" (out of memory: Docker reports the container was OOM-killed)" if oom_killed
+                    else " (out of memory: the kernel OOM killer killed a process)")
+        elif exit_code == 137:
+            hint = " (killed by SIGKILL, e.g. docker kill or a stop timeout; Docker reports no out-of-memory kill)"
+        else:
+            hint = ""
         msg = f"container exited with code {exit_code}{hint}"
         try:
             await asyncio.to_thread(self.docker.stop_and_remove, dep.container_id)
         except Exception:
             log.exception("failed to cleanup container for deployment %s", dep.id)
         self._transition(dep.id, "failed", message=msg, log_tail=logs, last_error=msg, exit_code=exit_code,
-                         container_id=None)
-        if exit_code == 137 and self.calibration is not None:
+                         oom_killed=oom, container_id=None)
+        if oom and self.calibration is not None:
             self.calibration.record_oom(dep.engine, dep.model_ref, config_hash(dep.config), dep.reserved_bytes)
 
     LIVE_STATES = ("ready", "sleeping", "unknown")
@@ -393,7 +709,7 @@ class Deployer:
                                          last_error="container disappeared", container_id=None)
                         failed.append(dep_id)
                     elif info.status in ("exited", "dead"):
-                        await self._fail_exited(dep, info.exit_code)
+                        await self._fail_exited(dep, info.exit_code, info.oom_killed)
                         failed.append(dep_id)
             except Exception:
                 log.warning("liveness check failed for deployment %s", dep_id, exc_info=True)
@@ -401,7 +717,7 @@ class Deployer:
 
     async def _abort(self, dep: Deployment, reason: str) -> None:
         try:
-            logs = await asyncio.to_thread(self.docker.logs, dep.container_id, 200)
+            logs = await asyncio.to_thread(self._stored_logs, dep.container_id)
         except Exception:
             log.exception("failed to capture logs for deployment %s", dep.id)
             logs = ""
@@ -417,6 +733,8 @@ class Deployer:
             dep = self._require(dep_id)
             if dep.state in ("ready", "failed", "stopped", "sleeping"):
                 return dep.state
+            if dep.state == "queued":  # time in the start-up queue does not count (the queue has its own timeout)
+                deadline = self.clock() + timeout
             if self.clock() > deadline:
                 return dep.state
             await asyncio.sleep(0.02)
@@ -429,8 +747,16 @@ class Deployer:
             mon = self._monitors.pop(dep_id, None)
             if mon and not mon.done():
                 mon.cancel()
+            if dep.state == "queued":
+                q = self._queued.pop(dep_id, None)
+                if q and not q.done():
+                    q.cancel()
+                self.gate.withdraw(dep_id)
+                return self._transition(dep_id, "stopped", message=f"cancelled while queued ({reason})",
+                                        container_id=None)
             if dep.state in ("planned", "failed"):
                 await asyncio.to_thread(self.docker.stop_and_remove, dep.container_id)
+                await self._remove_leftover(dep.name, dep_id)
                 return self._transition(dep_id, "stopped", message=f"cleaned up ({reason})", container_id=None)
             if dep.state != "stopping":
                 self._transition(dep_id, "stopping", message=f"stop requested ({reason})")
@@ -442,37 +768,31 @@ class Deployer:
             return self._transition(dep_id, "stopped", message="container removed", container_id=None)
 
     async def restart(self, dep_id: int, user_id: int | None = None, config_override: dict | None = None,
-                      model_ref: str | None = None) -> dict:
+                      model_ref: str | None = None, allow_rotating: bool = False) -> dict:
+        if dep_id in self.rotating and not allow_rotating:
+            raise DeployError("rotation_in_progress", "the decider's API key is being rotated; it restarts by itself", 409)
         async with self._lock(dep_id):
             dep = self._require(dep_id)
             if dep.state not in ("stopped", "failed"):
                 raise DeployError("not_stopped", f"deployment is {dep.state}; stop it first", 409)
             ref = model_ref or dep.model_ref
-            prep = self.prepare(dep.engine, ref, config_override if config_override is not None else dep.config)
+            prep = self.prepare(dep.engine, ref, config_override if config_override is not None else dep.config,
+                                existing_ref=dep.model_ref)
             async with self.mem_lock:
-                self.require_model_name(dep.alias or prep.engine.served_name(prep.cfg, ref), dep_id)
+                if not dep.system:
+                    self.require_model_name(dep.alias or prep.engine.served_name(prep.cfg, ref), dep_id)
                 budget = await self.budget.refresh()
                 fit = check_fit(prep.estimate, budget)
                 if not fit.fits:
                     raise InsufficientMemory(fit)
-                # Check all used ports (active/planned DB rows + unmanaged containers)
-                with self.db.session() as s:
-                    db_used = {d.port for d in s.scalars(select(Deployment))
-                               if d.port and d.state in ACTIVE_STATES | {"planned"} and d.id != dep_id}
-                try:
-                    containers = await asyncio.to_thread(self.docker.list_all)
-                    unmanaged_used = {p for c in containers for p in c.host_ports if not c.managed}
-                except Exception:
-                    log.warning("could not list containers for restart port check", exc_info=True)
-                    unmanaged_used = set()
-                used_ports = db_used | unmanaged_used
-                port = dep.port if dep.port and dep.port not in used_ports else self._allocate_port(exclude_dep=dep_id)
+                port = await self._free_port(dep_id, dep.port)  # active/planned rows + unmanaged containers
                 with self.db.session() as s:
                     row = s.get(Deployment, dep_id)
                     row.model_ref, row.config, row.port = ref, prep.cfg.model_dump(mode="json"), port
                     row.reserved_bytes, row.estimate = prep.estimate.total, prep.estimate.as_dict()
-                await self._launch(dep_id, dep.name, port, prep, budget.total)
-        self._spawn_monitor(dep_id)
+                launched = await self._launch_or_queue(dep_id, dep.name, port, prep, budget.total)
+        if launched:
+            self._spawn_monitor(dep_id)
         return self.view(dep_id)
 
     async def remove(self, dep_id: int) -> None:
@@ -481,14 +801,35 @@ class Deployer:
             if dep.state not in ("stopped", "failed"):
                 raise DeployError("not_stopped", "stop the deployment before removing it", 409)
             await asyncio.to_thread(self.docker.stop_and_remove, dep.container_id)
+            await self._remove_leftover(dep.name, dep_id)
             with self.db.session() as s:
                 s.delete(s.get(Deployment, dep_id))
+            self.gate.forget(dep_id)
+            if self.metrics is not None:
+                try:
+                    await asyncio.to_thread(self.metrics.forget, dep_id)
+                except Exception:
+                    log.exception("failed to drop metrics of removed deployment %s", dep_id)
+            for hook in self.removal_hooks:
+                try:
+                    hook(dep_id)
+                except Exception:
+                    log.exception("removal hook failed for deployment %s", dep_id)
         self.events.publish("deployment_removed", {"id": dep_id})
 
+    async def _remove_leftover(self, name: str, dep_id: int) -> None:
+        """A container that never started (state "created") has no container_id in the DB: remove it by name, but
+        only if its labels say it belongs to this deployment."""
+        fn = getattr(self.docker, "remove_leftover", None)
+        if fn is not None:
+            await asyncio.to_thread(fn, container_name(name), dep_id)
+
     async def aclose(self) -> None:
-        for t in self._monitors.values():
+        for t in [*self._monitors.values(), *self._queued.values(), *self._waking.values()]:
             t.cancel()
         self._monitors.clear()
+        self._queued.clear()
+        self._waking.clear()
 
     # ---------- views ----------
     def usage_rows(self) -> list[tuple[int, str, str, int, str | None]]:
@@ -516,10 +857,13 @@ class Deployer:
             "actual_bytes": self._actual(d.id), "estimate": d.estimate, "config": d.config,
             "litellm_status": d.litellm_status, "last_error": d.last_error, "exit_code": d.exit_code,
             "container_id": d.container_id, "served_name": served, "adopted_from": d.adopted_from,
+            "system": bool(d.system),
+            "startup_queue": self.gate.info(d.id),  # why it waits for a start-up slot (state queued / waking)
             "model_name": d.alias or served,  # what clients pass as "model" to the single LiteLLM endpoint
             "litellm_error": self.litellm_error(d.id, d.state) if self.litellm_error is not None else None,
             "endpoint": f"http://{container_name(d.name)}:{d.port}/v1" if d.port else None,
-            "host_endpoint": f"http://{self.settings.publish_bind}:{d.port}/v1" if d.port and self.settings.publish_bind else None,
+            "host_endpoint": f"http://{self.settings.publish_bind}:{d.port}/v1"
+                             if d.port and self.settings.publish_bind and self._publishes(d.engine) else None,
             "sleep_capable": bool(engine and engine.supports_sleep and d.config.get("enable_sleep_mode")),
             "created_at": d.created_at.isoformat() if d.created_at else None,
             "updated_at": d.updated_at.isoformat() if d.updated_at else None,
@@ -535,26 +879,38 @@ class Deployer:
                 rows = s.scalars(select(DeploymentEvent).where(DeploymentEvent.deployment_id == dep_id)
                                  .order_by(DeploymentEvent.id.desc()).limit(50))
                 out["events"] = [{"ts": e.ts.isoformat(), "from": e.from_state, "to": e.to_state,
-                                  "message": e.message, "log_tail": e.log_tail} for e in rows]
+                                  "message": e.message,
+                                  # rows from older versions were stored unredacted
+                                  "log_tail": redact_log(e.log_tail) if e.log_tail else e.log_tail} for e in rows]
         return out
 
     def list_views(self) -> list[dict]:
         with self.db.session() as s:
             return [self._view(d) for d in s.scalars(select(Deployment).order_by(Deployment.name))]
 
-    def active_deps(self, exclude: int | None = None) -> list[ActiveDep]:
+    def active_deps(self, exclude: int | None = None, facts: dict | None = None) -> list[ActiveDep]:
+        """Stop/sleep candidates. ``facts`` (plan_facts) adds the ranking hints: idle minutes and whether stopping
+        it would disrupt something (the safety filter would reject it)."""
         out = []
         for v in self.list_views():
-            if v["id"] == exclude or v["state"] not in ("ready", "sleeping", "unknown", "loading", "starting"):
-                continue
+            if v["id"] == exclude or v["system"] or v["state"] not in ("ready", "sleeping", "unknown", "loading", "starting"):
+                continue  # system deployments are never stop/sleep candidates
             est = v["estimate"] or {}
             sleep_frees = max(v["reserved_bytes"] - est.get("weights", 0) - est.get("draft_weights", 0)
                               - est.get("runtime", 0), 0)
+            f = (facts or {}).get(v["id"])
+            idle, disruptive = None, v["state"] in ("starting", "loading", "unknown")
+            if f is not None:
+                idle = f.last_traffic_min if f.last_traffic_min is not None else (
+                    f.ready_for_min if f.traffic_known else None)
+                disruptive = bool(f.active_reason() or f.unknown_reason() or f.dependents)
             out.append(ActiveDep(v["id"], v["name"], v["state"], v["priority"], v["reserved_bytes"],
-                                 v["actual_bytes"] or 0, v["sleep_capable"] and v["state"] == "ready", sleep_frees))
+                                 v["actual_bytes"] or 0, v["sleep_capable"] and v["state"] == "ready", sleep_frees,
+                                 idle_min=idle, disruptive=disruptive))
         return out
 
-    def plans_for(self, prep: Prepared, fit: FitResult, replacing: int | None = None) -> list[dict]:
+    def plans_for(self, prep: Prepared, fit: FitResult, replacing: int | None = None,
+                  facts: dict | None = None) -> list[dict]:
         cfg = prep.cfg.model_dump(mode="json")
         name = prep.engine.name
 
@@ -576,7 +932,8 @@ class Deployer:
                     and base_model_name(a.ref) == base and a.weights_bytes < prep.artifact.weights_bytes]
         plans = build_plans(fit=fit, cfg=cfg, context_key=prep.engine.context_key, seqs_key=prep.engine.seqs_key,
                             kv_patches=prep.engine.kv_patch_options(prep.cfg), estimate_with=est_with,
-                            active=self.active_deps(exclude=replacing), variants=variants, estimate_ref=est_ref)
+                            active=self.active_deps(exclude=replacing, facts=facts), variants=variants,
+                            estimate_ref=est_ref)
         return [p.as_dict() for p in plans]
 
     def _stored_estimate(self, dep: Deployment) -> MemoryEstimate:
@@ -600,30 +957,86 @@ class Deployer:
             return self._transition(dep_id, "sleeping", message="sleeping (level 1: KV freed, weights offloaded)")
 
     async def wake(self, dep_id: int, user_id: int | None = None) -> dict:
-        async with self._lock(dep_id):
-            dep = self._require(dep_id)
-            if dep.state != "sleeping":
-                raise DeployError("not_sleeping", f"deployment is {dep.state}", 409)
-            engine = self.engines[dep.engine]
-            async with self.mem_lock:
-                self.require_model_name(self._model_name(dep), dep_id)
-                budget = await self.budget.refresh()
-                actual = next((u.actual for u in budget.deployments if u.deployment_id == dep_id), 0)
-                need = max(dep.reserved_bytes - actual, 0)
-                if need > budget.free_for_new:
-                    raise InsufficientMemory(FitResult(False, need, budget.free_for_new, budget.free_for_new - need,
-                                                       self._stored_estimate(dep), budget))
-                try:
-                    await engine.wake(self.http, self.base_url(dep.name, dep.port))
-                except httpx.HTTPError as e:
-                    raise DeployError("engine_error", f"wake failed: {e}", 502)
-                return self._transition(dep_id, "ready", message="woken up")
+        """Wake a sleeping deployment. Waking re-allocates the KV cache, so it waits for the start-up slot (never
+        while another engine profiles memory at start-up). The caller waits at most ``wake_sync_wait_s``; if the slot
+        is still taken then, the wake-up continues in the background (up to ``wake_queue_timeout_s``) and the view
+        is returned with ``startup_queue`` set (the API answers 202), like a queued deploy."""
+        dep = self._require(dep_id)
+        if dep.state != "sleeping":
+            raise DeployError("not_sleeping", f"deployment is {dep.state}", 409)
+        old = self._waking.get(dep_id)
+        task = old if old is not None and not old.done() else asyncio.get_running_loop().create_task(
+            self._wake_when_free(dep_id, dep.name))
+        if task is not old:
+            self._waking[dep_id] = task
+            task.add_done_callback(lambda t: self._wake_done(dep_id, t))
+        try:
+            return await asyncio.wait_for(asyncio.shield(task), self.settings.wake_sync_wait_s)
+        except asyncio.TimeoutError:
+            return self.view(dep_id)  # still waiting for its turn: startup_queue says why
+
+    def _wake_done(self, dep_id: int, task: asyncio.Task) -> None:
+        if self._waking.get(dep_id) is task:
+            self._waking.pop(dep_id, None)
+        if task.cancelled():
+            return
+        e = task.exception()
+        if e is None:
+            return
+        # nobody may be waiting any more (background wake-up): keep the reason on the deployment
+        msg = e.message if isinstance(e, DeployError) else f"{type(e).__name__}: {e}"
+        try:
+            with self.db.session() as s:
+                row = s.get(Deployment, dep_id)
+                if row is not None and row.state == "sleeping":
+                    row.last_error = f"wake failed: {msg}"
+            if self._get(dep_id) is not None:
+                self.events.publish("deployment", self.view(dep_id))
+        except Exception:
+            log.exception("could not record the failed wake of deployment %s", dep_id)
+
+    async def _wake_when_free(self, dep_id: int, name: str) -> dict:
+        timeout = self.settings.wake_queue_timeout_s
+        try:
+            await self.gate.acquire(dep_id, timeout, "wake", name)
+        except GateTimeout:
+            busy = ", ".join(self.gate.blocking()) or "another deployment"
+            raise DeployError("startup_busy", f"{busy} is still starting; waited {timeout:g}s to wake {name}. "
+                                              "Try again when it is ready", 409)
+        except GateWithdrawn:
+            dep = self._get(dep_id)
+            if dep is None:
+                raise DeployError("not_found", f"deployment {dep_id} was removed", 404)
+            raise DeployError("not_sleeping", f"deployment is {dep.state}", 409)
+        try:
+            async with self._lock(dep_id):
+                dep = self._require(dep_id)
+                if dep.state != "sleeping":
+                    raise DeployError("not_sleeping", f"deployment is {dep.state}", 409)
+                engine = self.engines[dep.engine]
+                async with self.mem_lock:
+                    self.require_model_name(self._model_name(dep), dep_id)
+                    budget = await self.budget.refresh()
+                    actual = next((u.actual for u in budget.deployments if u.deployment_id == dep_id), 0)
+                    need = max(dep.reserved_bytes - actual, 0)
+                    if need > budget.free_for_new:
+                        raise InsufficientMemory(FitResult(False, need, budget.free_for_new,
+                                                           budget.free_for_new - need, self._stored_estimate(dep),
+                                                           budget))
+                    try:
+                        await engine.wake(self.http, self.base_url(dep.name, dep.port))
+                    except httpx.HTTPError as e:
+                        raise DeployError("engine_error", f"wake failed: {e}", 502)
+                    return self._transition(dep_id, "ready", message="woken up", last_error=None)
+        finally:
+            self.gate.release(dep_id)
 
     async def apply_actions(self, actions, user_id: int | None = None) -> list[tuple[str, int]]:
         applied: list[tuple[str, int]] = []
         try:
             for raw in actions:
                 a = raw if isinstance(raw, PlanAction) else PlanAction.model_validate(raw)
+                self._refuse_system(a.deployment_id, "slept" if a.type == "sleep" else "stopped")
                 if a.type == "sleep":
                     await self.sleep(a.deployment_id, user_id)
                 else:
@@ -669,6 +1082,8 @@ class Deployer:
         Removing a deployment deletes its row, which frees its alias."""
         with self.db.session() as s:
             for d in s.scalars(select(Deployment).where(Deployment.id != (dep_id or -1)).order_by(Deployment.id)):
+                if d.system:
+                    continue  # never registered in LiteLLM
                 if d.alias == model_name or (d.state in self.NAME_HOLDING_STATES and self._model_name(d) == model_name):
                     return d
         return None
@@ -713,6 +1128,7 @@ class Deployer:
 
     async def switch(self, old_id: int, req: DeployRequest, actions, user_id: int | None) -> dict:
         old = self._require(old_id)
+        self._refuse_system_change(old, "switched")
         acts = [a if isinstance(a, PlanAction) else PlanAction.model_validate(a) for a in actions]
 
         # Check memory fit before touching anything; auto-escalate sleep→stop if needed
@@ -794,10 +1210,11 @@ class Deployer:
     async def reconfigure(self, dep_id: int, new_config: dict, model_ref: str | None = None, actions=(),
                           user_id: int | None = None) -> dict:
         dep = self._require(dep_id)
+        self._refuse_system_change(dep, "reconfigured")
         old_cfg, old_ref = dict(dep.config), dep.model_ref
         old_reserved, old_estimate, old_port = dep.reserved_bytes, dict(dep.estimate), dep.port
         was_active = dep.state in ("ready", "sleeping", "unknown", "starting", "loading")
-        prep = self.prepare(dep.engine, model_ref or old_ref, new_config)
+        prep = self.prepare(dep.engine, model_ref or old_ref, new_config, existing_ref=old_ref)
         if not actions:
             budget = await self.budget.refresh()
             fit = check_fit(prep.estimate, budget, extra_free=self._replacing_credit(dep_id))

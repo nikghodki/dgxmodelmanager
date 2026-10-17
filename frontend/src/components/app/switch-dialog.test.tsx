@@ -16,14 +16,38 @@ const shortPreview = { estimate: est, fit: { fits: false, free_for_new: 5e8, hea
 const dep = { id: 1, name: "test", engine: "vllm", model_ref: "foo/bar", config: { max_model_len: 4096 }, state: "ready", priority: 0 } as any;
 const inventory = [{ ref: "foo/bar", complete: true, kind: "llm", engines: ["vllm"], quant: "Q4", weights_bytes: 1e9, problems: [] }];
 
-function renderDialog(mode: "switch" | "reconfigure" = "reconfigure") {
+function renderDialog(mode: "switch" | "reconfigure" = "reconfigure", initialPatch?: Record<string, any>) {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
-  return render(<QueryClientProvider client={qc}><SwitchDialog mode={mode} deployment={dep} onClose={vi.fn()} /></QueryClientProvider>);
+  return render(<QueryClientProvider client={qc}><SwitchDialog mode={mode} deployment={dep} initialPatch={initialPatch} patchSource="the diagnosis" onClose={vi.fn()} /></QueryClientProvider>);
 }
 
 afterEach(() => { vi.mocked(apiModule.api).mockReset(); });
 
 describe("SwitchDialog", () => {
+  it("warns explicitly when a prefilled patch enables trust_remote_code", async () => {
+    vi.mocked(apiModule.api).mockImplementation((url: string) => {
+      if (url === "/inventory") return Promise.resolve(inventory);
+      if (url === "/deployments/preview") return Promise.resolve(fitsPreview);
+      return Promise.reject(new Error(`unexpected ${url}`));
+    });
+    renderDialog("reconfigure", { trust_remote_code: true });
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent(/Security-sensitive change: this enables trust_remote_code/);
+    expect(alert).toHaveTextContent(/only if you trust this repository/);
+    expect(screen.getByText(/trust_remote_code: default → true/)).toBeInTheDocument();
+  });
+
+  it("shows no security warning for other prefilled patches", async () => {
+    vi.mocked(apiModule.api).mockImplementation((url: string) => {
+      if (url === "/inventory") return Promise.resolve(inventory);
+      if (url === "/deployments/preview") return Promise.resolve(fitsPreview);
+      return Promise.reject(new Error(`unexpected ${url}`));
+    });
+    renderDialog("reconfigure", { max_model_len: 2048 });
+    await screen.findByText(/max_model_len: 4096 → 2048/);
+    expect(screen.queryByText(/Security-sensitive change/)).not.toBeInTheDocument();
+  });
+
   it("re-plans after an insufficient_memory 409 without looping, and a chosen plan sticks", async () => {
     const errors = vi.spyOn(console, "error");
     let previewCalls = 0;
@@ -134,5 +158,91 @@ describe("SwitchDialog", () => {
         expect((call[1] as any).body.actions).toEqual([]);
       }
     });
+  });
+});
+
+describe("SwitchDialog — parser suggestions", () => {
+  const sug = { value: "qwen3_coder", source: "model", confidence: 0.95, auto_apply: true, alternatives: [] };
+  const inv2 = [...inventory, { ...inventory[0], ref: "foo/new" }];
+  function mock() {
+    vi.mocked(apiModule.api).mockImplementation((url: string) => {
+      if (url === "/inventory") return Promise.resolve(inv2);
+      if (url === "/deployments/preview") return Promise.resolve(fitsPreview);
+      if (url === "/decider/suggest-config") return Promise.resolve({ tool_call_parser: sug, reasoning_parser: null });
+      return new Promise(() => undefined);
+    });
+  }
+  const renderWith = (d: any, initialPatch?: Record<string, any>) => {
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    return render(<QueryClientProvider client={qc}><SwitchDialog mode="reconfigure" deployment={d} initialPatch={initialPatch} onClose={vi.fn()} /></QueryClientProvider>);
+  };
+  const sugCalls = () => vi.mocked(apiModule.api).mock.calls.filter(([u]) => u === "/decider/suggest-config");
+
+  it("does not ask while the model is unchanged", async () => {
+    mock();
+    renderWith(dep);
+    await waitFor(() => expect(screen.getByText("Fits")).toBeInTheDocument());
+    expect(sugCalls()).toHaveLength(0);
+  });
+
+  it("suggests for the new model and auto-fills an empty parser", async () => {
+    mock();
+    renderWith(dep, { model_ref: "foo/new" });
+    expect(await screen.findByText("Suggested: qwen3_coder · 95% · AI")).toBeInTheDocument();
+    expect(sugCalls()[0][1]).toEqual({ method: "POST", body: { model_ref: "foo/new", engine: "vllm" } });
+    expect(screen.getByLabelText("Tool-call parser")).toHaveValue("qwen3_coder");
+  });
+
+  it("keeps the configured parser and offers Apply instead", async () => {
+    mock();
+    renderWith({ ...dep, config: { max_model_len: 4096, tool_call_parser: "hermes" } }, { model_ref: "foo/new" });
+    expect(await screen.findByText("Suggested: qwen3_coder · 95% · AI")).toBeInTheDocument();
+    expect(screen.getByLabelText("Tool-call parser")).toHaveValue("hermes");
+    await userEvent.click(screen.getByRole("button", { name: /Apply suggested Tool-call parser: qwen3_coder/ }));
+    expect(screen.getByLabelText("Tool-call parser")).toHaveValue("qwen3_coder");
+  });
+});
+
+describe("SwitchDialog — initial patch (Apply fix / Apply advice)", () => {
+  it("shows every patched field even if advanced, summarises the changes, and removes keys patched to null", async () => {
+    const bodies: any[] = [];
+    vi.mocked(apiModule.api).mockImplementation((url: string, opts?: any) => {
+      if (url === "/inventory") return Promise.resolve(inventory);
+      if (url === "/deployments/preview") return Promise.resolve(fitsPreview);
+      if (url === "/deployments/1/reconfigure") { bodies.push(opts.body); return Promise.resolve({}); }
+      return new Promise(() => undefined);
+    });
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    render(<QueryClientProvider client={qc}><SwitchDialog mode="reconfigure" patchSource="the diagnosis"
+      deployment={{ ...dep, config: { max_model_len: 4096, tool_call_parser: "hermes" } }}
+      initialPatch={{ trust_remote_code: true, tool_call_parser: null }} onClose={vi.fn()} /></QueryClientProvider>);
+    // advanced settings are hidden, but the patched fields are shown
+    expect(screen.getByRole("button", { name: "Show advanced settings" })).toBeInTheDocument();
+    expect(screen.getByRole("switch", { name: "Trust remote code" })).toBeChecked();
+    expect(screen.getByLabelText("Tool-call parser")).toHaveValue("");
+    expect(screen.queryByLabelText("Served model name")).toBeNull();
+    const summary = screen.getByRole("list", { name: "Changes from the diagnosis" });
+    expect(summary).toHaveTextContent("trust_remote_code: default → true");
+    expect(summary).toHaveTextContent("tool_call_parser: hermes → removed");
+    await waitFor(() => expect(screen.getByText("Fits")).toBeInTheDocument());
+    await userEvent.click(screen.getByRole("button", { name: "Apply and restart" }));
+    await waitFor(() => expect(bodies).toHaveLength(1));
+    expect(bodies[0].config).toEqual({ max_model_len: 4096, trust_remote_code: true });
+    expect("tool_call_parser" in bodies[0].config).toBe(false);
+  });
+});
+
+describe("SwitchDialog preview priority", () => {
+  it("sends the deployment's priority with the preview", async () => {
+    const previews: any[] = [];
+    vi.mocked(apiModule.api).mockImplementation((url: string, opts?: any) => {
+      if (url === "/inventory") return Promise.resolve(inventory);
+      if (url === "/deployments/preview") { previews.push(opts.body); return Promise.resolve(fitsPreview); }
+      return Promise.reject(new Error(`unexpected ${url}`));
+    });
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    render(<QueryClientProvider client={qc}><SwitchDialog mode="reconfigure" deployment={{ ...dep, priority: 35 }} onClose={vi.fn()} /></QueryClientProvider>);
+    await waitFor(() => expect(previews.length).toBeGreaterThan(0));
+    expect(previews[0]).toMatchObject({ replacing: 1, priority: 35 });
   });
 });

@@ -10,7 +10,9 @@ DGXMM's decisions or to change the code. Each section names the source files it 
 - [Deployment state machine](#deployment-state-machine)
 - [Switch and reconfigure with rollback](#switch-and-reconfigure-with-rollback)
 - [Watchdog](#watchdog)
+- [Decision model (decider)](#decision-model-decider)
 - [LiteLLM integration](#litellm-integration)
+- [Downloads](#downloads)
 - [Deleting weights](#deleting-weights)
 - [Process view](#process-view)
 - [Startup and background loops](#startup-and-background-loops)
@@ -22,7 +24,8 @@ DGXMM's decisions or to change the code. Each section names the source files it 
 ## Components
 
 DGXMM is a single container (`dgxmm`). It holds a FastAPI backend, the built React single-page app
-and a SQLite database. Everything else it uses is an existing service or a container it starts.
+and a SQLite database. Everything else it uses is an existing service or a container it starts,
+including the optional decision model (`dgxmm-decider`) on its own internal network.
 
 ```mermaid
 flowchart LR
@@ -31,7 +34,9 @@ flowchart LR
     api["FastAPI<br/>REST + SSE"]
     db[("SQLite<br/>data/dgxmm.sqlite3")]
     llmfit["llmfit CLI"]
+    sock["admin unix socket<br/>data/run/admin.sock"]
   end
+  cli["admin CLI<br/>docker exec dgxmm python -m dgxmm.admin"]
   subgraph host["Host"]
     docker["Docker Engine<br/>/var/run/docker.sock"]
     probes["/proc, cgroup v2,<br/>/etc/passwd, NVML"]
@@ -42,6 +47,9 @@ flowchart LR
     vllm["vLLM engine<br/>dgxmm-NAME"]
     llama["llama.cpp engine<br/>dgxmm-NAME"]
     litellm["LiteLLM proxy<br/>(external or bundled)"]
+  end
+  subgraph dnet["internal network dgxmm-decider (no egress, no published port)"]
+    decider["decision model<br/>dgxmm-decider (optional)"]
   end
   clients["Clients<br/>(OpenAI SDK, curl)"]
   hub["Hugging Face Hub"]
@@ -66,15 +74,22 @@ flowchart LR
   litellm -- "OpenAI API" --> vllm
   litellm -- "OpenAI API" --> llama
   api -- "search, download" --> hub
+  docker --> decider
+  api -- "key file via docker exec,<br/>/health, /v1/systemone (bearer key)" --> decider
+  decider -- "mount (read-only, its snapshot only)" --> disk
+  cli --> sock
+  sock --> api
 ```
 
 - **Browser.** The UI is served from `/dgxmm/` by the same process. A server-sent event (SSE) stream
   pushes memory, deployment, download, metric and alert updates.
 - **FastAPI.** Uvicorn listens on port 8090 in the container (`dgxmm/__main__.py`). All routes live
   under the base path `/dgxmm` (`dgxmm/app.py`), and `/` redirects there.
-- **SQLite.** One file, `data/dgxmm.sqlite3`, in WAL mode. The schema is created on start
-  (`Base.metadata.create_all`), so new tables appear automatically. There is no migration framework.
-  It also holds the runtime settings (`app_settings`) that the UI can change.
+- **SQLite.** One file, `data/dgxmm.sqlite3`, in WAL mode. On start, new tables are created
+  (`Base.metadata.create_all`), missing nullable columns and non-unique indexes are added, and then the
+  versioned migrations in `dgxmm/migrations.py` run once each, in a transaction, recorded in
+  `schema_version` (see [operations](operations.md#upgrading-an-existing-install)). It also holds the
+  runtime settings (`app_settings`) that the UI can change.
 - **Docker API.** DGXMM starts engine containers through the mounted Docker socket. Engines join the
   configured Docker network, where DGXMM reaches them as `http://dgxmm-<name>:<port>`. Their ports are
   also published on the host at `publish_bind` (default `127.0.0.1`).
@@ -91,28 +106,40 @@ flowchart LR
 - **Hugging Face Hub.** Catalog search, model details and downloads (with the optional HF token).
 - **llmfit.** A Python CLI bundled in the image. It adds fit levels, scores and expected tok/s to
   catalog results. It never decides whether a deploy may proceed.
+- **Decision model** (optional). A small classifier served from a locally built, hardened image on an
+  internal network. DGXMM asks it typed questions with a fixed set of answers and uses its answer only
+  above a confidence threshold, after its own rules (see [decision model](#decision-model-decider)).
+- **Admin unix socket.** A second listener on `data/run/admin.sock` (mode 0600 in a 0700 directory) for
+  the admin CLI (`docker exec dgxmm python -m dgxmm.admin decider …`). Short-lived CLI tokens are only
+  accepted there, never on the TCP port.
 
 ## Backend module map
 
 | Module | Responsibility |
 |---|---|
 | `__main__.py` | Entry point: loads settings and runs Uvicorn on `0.0.0.0:8090` with proxy headers enabled. |
-| `admin.py` | Admin command line (`python -m dgxmm.admin reset-password` / `list-users`). |
+| `admin.py` | Admin command line (`python -m dgxmm.admin`): `reset-password`, `list-users`, `reset-calibration`, `decider …`, `rotate-decider-key`. |
+| `admin_listener.py` | The admin unix socket next to the TCP listener (`DualServer`), without proxy-header handling. |
+| `proxy_headers.py` | Applies `X-Forwarded-For` / `-Proto` only from `trusted_proxies`, and never from the decider's network. |
+| `lifecycle.py` | Shutdown signal shared by the SSE streams and background loops, so `docker stop` ends cleanly. |
+| `migrations.py` | Versioned, run-once schema migrations (`schema_version`) and automatic non-unique indexes. |
 | `app.py` | FastAPI factory: lifespan (startup tasks, background loops), routers, root redirect, SPA fallback. |
 | `config.py` | `Settings` model: optional YAML file, then `DGXMM_<KEY>` environment overrides. |
 | `context.py` | Wires every service into an `AppContext` and defines the startup and background tasks. |
-| `db.py` | SQLAlchemy models and the SQLite engine (WAL, foreign keys, busy timeout). |
+| `db.py` | SQLAlchemy models and the SQLite engine (WAL, foreign keys, busy timeout), plus `add_missing_columns`. |
 | `events.py` | In-process publish/subscribe used by the SSE stream (slow clients drop their oldest events). |
 | `audit.py` | Writes audit log rows. |
 | `auth/` | `bootstrap` (first admin), `passwords` (argon2id), `sessions`, `ratelimit`, `deps` (auth, CSRF, roles). |
 | `settings_store.py` | Runtime settings in the `app_settings` table, with a cache and typed accessors (LiteLLM URLs, master key and its URL binding, enabled). |
-| `api/` | HTTP routers: auth, users, host (incl. processes), inventory (incl. delete and clean-up), engines, deployments, integrations (LiteLLM), stream, audit, containers, catalog, downloads, planner, metrics. |
+| `api/` | HTTP routers: auth, users, host (incl. processes), inventory (incl. delete and clean-up), engines, deployments, integrations (LiteLLM), stream, audit, containers, catalog, downloads, planner, metrics, decider (status, settings, enable/disable, image, decisions, key rotation) and decider features (diagnosis, workload, suggest-config). `ratelimit.py` holds the per-user API rate limits. |
 | `deployer/service.py` | Deployment lifecycle: prepare, preview, deploy, monitor, stop, restart, sleep/wake, switch, reconfigure. |
 | `deployer/states.py` | Deployment states and allowed transitions. |
 | `deployer/reconcile.py` | After a restart: brings the database in line with the containers that actually exist. |
 | `deployer/adopt.py` | Copies the settings of an unmanaged vLLM container into a new, stopped deployment. |
+| `deployer/gate.py` | The start-up gate: at most `max_concurrent_startups` engines starting or loading, the others `queued` (FIFO). |
+| `deployer/logtail.py` | The log tail stored with a failure: line cap, error lines from the cut part, redaction, OOM evidence. |
 | `docker_ctl.py` | The only module that calls Docker. Every write requires the `dgxmm.managed=true` label, except the delete helpers it creates itself (`dgxmm.helper=true`). Also holds the read-only, cached container directory (id → name, image, deployment). |
-| `engines/` | Engine plug-ins (`vllm`, `llamacpp`): config schema, container spec, health check, metrics parsing, sleep. `argguard` holds the extra-flag allowlist and `prom` parses Prometheus metrics. |
+| `engines/` | Engine plug-ins (`vllm`, `llamacpp`, `decision`): config schema, container spec, health check, metrics parsing, sleep. `decision.py` holds the supported decision models (pinned revisions, fixed reservations) and the hardened decider container spec. `argguard` holds the extra-flag allowlist and `prom` parses Prometheus metrics. |
 | `memory/estimate.py`, `kv.py` | Memory estimates per engine (weights, KV cache, state, activations, runtime). |
 | `memory/budget.py` | The host memory budget and `free_for_new`. |
 | `memory/hostmem.py` | Reads `/proc/meminfo`, container cgroups, processes (with container, user and command) and NVML. |
@@ -126,6 +153,7 @@ flowchart LR
 | `metrics/` | Engine `/metrics` scraper and storage (live ring buffer plus 1-minute rollups). |
 | `advisor/` | Tuning rules (`rules`) and the built-in load test (`benchmark`). |
 | `watchdog.py` | Memory alerts and optional automatic protection. |
+| `decider/` | The decision model: `service.py` (the `Decider`: settings, thresholds, decision log), `client.py` (`SystemOneClient`: back-pressure, circuit breaker, answer validation), `supervisor.py` (probes and restarts), `image.py` (in-app image build), `snapshot.py` (verified snapshot download), `secret.py` / `rotation.py` (bearer key), `upgrade.py` (detects a decider from an older build), `retention.py`, `cli.py` (`admin decider …`), and one module per feature: `diagnosis.py`, `config_suggest.py`, `plans.py`, `kind.py`, `workload.py`. |
 | `litellm.py` | LiteLLM client (URL and key resolved per call, errors scrubbed of keys, cached status) and the sync that keeps LiteLLM's model list in line with ready deployments. |
 
 ## Deploying a model, step by step
@@ -184,9 +212,25 @@ Details (`dgxmm/deployer/service.py`):
   already in the cache.
 - **Readiness**: the monitor marks the deployment `loading` once the container runs, and `ready` once
   `/health` returns 200 and a one-token completion succeeds. It fails the deployment if the container
-  exits (exit 137 is reported as "likely out of memory" and recorded for calibration), if
+  exits (it is reported as out of memory, and recorded for calibration, only with evidence: Docker's
+  `OOMKilled`, or the kernel OOM killer's own line in the log; a plain exit 137 is reported as a SIGKILL,
+  e.g. `docker kill` or a stop timeout, and never recorded), if
   `MemAvailable` falls below the safety margin during startup, or after `startup_timeout_s` (900 s).
   On failure the container is removed and its last 200 log lines are kept in the event history.
+- **Start-up gate** (`deployer/gate.py`): at most `max_concurrent_startups` (default 1) engines are
+  `starting`/`loading` at once. vLLM sizes its KV cache from a memory profile taken while it starts and
+  asserts that free memory did not change meanwhile; on unified memory another engine starting, waking
+  or stopping changes it ("Error in memory profiling", "No available memory for the cache blocks").
+  A deploy/start that finds the slot taken passes the fit check, keeps its reservation and port, and
+  waits in state `queued` (FIFO) with a reason (`startup_queue` in the deployment view: position, what it
+  waits for). When its turn comes the fit is checked again (memory outside DGXMM may have grown);
+  it fails with a clear message if it no longer fits or after `startup_queue_timeout_s` (1800 s).
+  Stopping a queued deployment cancels it. A wake-up (which re-allocates the KV cache) waits for the
+  slot too: the request waits up to `wake_sync_wait_s` (50 s), then answers 202 (`startup_queue` set) while the
+  wake-up continues in the background, up to `wake_queue_timeout_s` (300 s). Time spent queued
+  does not count against switch/reconfigure waits. After a DGXMM restart, deployments still starting
+  hold their slots and queued ones re-enter the queue. Stops and sleeps are never delayed (freeing
+  memory must stay immediate), so a stop during another engine's start-up can still disturb it.
 - **LiteLLM**: a state hook wakes the sync loop whenever a deployment enters or leaves `ready`.
 
 ## Memory model
@@ -239,7 +283,8 @@ estimate (`memory/calibration.py`). Later estimates for the same model are corre
 - **Same model and exact same configuration:** `max(measured × 1.05, formula)`. Confidence: `measured`.
 - **Same model, other configuration:** the formula is scaled by the mean measured/estimated ratio of
   the last 5 measurements, clamped to 1.0–1.5. Confidence: `calibrated`.
-- **Out-of-memory kill (exit 137):** the next estimate for that configuration gets +10 %. It never drops
+- **Out-of-memory kill** (Docker's `OOMKilled`, or the kernel OOM killer's line in the log; not a bare
+  exit 137): the next estimate for that configuration gets +10 %. It never drops
   back below 1.1 × the size that was killed.
 
 Calibration only raises estimates. It never lowers one below the formula.
@@ -252,12 +297,18 @@ Calibration only raises estimates. It never lowers one below the formula.
 2. a shorter context: the largest of context/2, /4, … (at least 4096) that fits;
 3. fewer concurrent sequences / slots;
 4. a smaller quantization of the same base model that is already on disk;
-5. putting lower-priority, sleep-capable vLLM deployments to sleep (frees roughly KV cache and
-   activations);
-6. stopping deployments, lowest priority first (and largest first within a priority).
+5. putting ready, sleep-capable vLLM deployments to sleep (frees roughly KV cache and activations);
+6. stopping deployments.
+
+For 5 and 6 every deployment that frees enough on its own gets its own plan (ids `sleep:<id>`,
+`stop:<id>`), then the minimal combinations of up to three deployments (`stop:3+5`; no member can be
+dropped), drawn from the eight best-ranked candidates; at most three sleep and four stop plans. The
+ranking is least disruptive first: not busy, lower priority, then the longest idle (asleep counts as
+idle). When no set within those bounds frees enough, one greedy plan in rank order is offered instead.
 
 Sleep and stop plans run their actions first, then deploy. If the deploy still fails, those actions are
-undone.
+undone. Before the plans are returned, the [plan recommendation](#decision-model-decider) marks unsafe
+plans and may recommend one.
 
 ## Deployment state machine
 
@@ -270,6 +321,10 @@ stateDiagram-v2
   [*] --> stopped: adopt settings
   [*] --> unknown: orphan container found at startup
   planned --> starting: container created
+  planned --> queued: another engine is starting
+  queued --> starting: its turn (fit checked again)
+  queued --> failed: queue timeout / no longer fits
+  queued --> stopped: cancelled
   planned --> failed
   planned --> stopped
   starting --> loading: container running
@@ -288,8 +343,10 @@ stateDiagram-v2
   stopping --> stopped
   stopping --> failed
   stopped --> starting: start
+  stopped --> queued: start while another engine is starting
   stopped --> failed
   failed --> starting: start
+  failed --> queued: start while another engine is starting
   failed --> stopped
   failed --> failed
   unknown --> ready
@@ -337,6 +394,100 @@ Level changes are logged and sent to the UI as an alert banner. If `auto_protect
 `critical`, the watchdog stops the lowest-priority `ready`, `sleeping` or `unknown` deployment (the
 largest reservation goes first within the same priority). It acts at most once every 60 seconds and
 audits the stop as `watchdog_stop`. With the default `auto_protect: false` it only warns.
+
+System deployments are never stopped, except the decision model: it is advisory and fails open, so it is
+sacrificed before any user deployment. It is the first victim of `auto_protect`, and, whatever `auto_protect`
+says, the watchdog stops it when its measured memory exceeds its reservation by more than
+`decider_overuse_margin_gib` in two samples in a row (its GPU memory is not capped by its cgroup). The stop is a
+deployment event and a `watchdog_stop` audit entry; `/api/decider/status` shows it as the supervisor's
+`last_action: watchdog_stopped` with the reason, and the supervisor restarts it after its backoff, never while
+memory is under pressure.
+
+## Decision model (decider)
+
+The decision model is optional and advisory. Its code is in `dgxmm/decider/` and
+`dgxmm/engines/decision.py`, its image in `deploy/decider/`. The threat model, with every control and
+what was measured, is in [security.md](security.md#decision-model-decider); accuracy and capacity are in
+[decider-evaluation.md](decider-evaluation.md).
+
+**Deployment.** The decider is a deployment of the `decision` engine named `decider`, created by
+`POST /api/decider/enable` through the normal deploy path (fit check, plans, start-up gate) with a fixed
+model (`decider.model`: d3-mini or d3-nano) and a fixed, measured reservation (13 or 9 GiB, never
+calibrated). Its row has `system = true`: plans never stop or sleep it, LiteLLM sync skips it, the UI
+shows a **System** badge, and the watchdog stops it before any user deployment (see
+[watchdog](#watchdog)). Disabling stops it; `{"remove": true}` also deletes the row.
+
+**Container** (`DecisionEngine.container_spec`, `DockerController.run`). Built locally as
+`images.decision` (`dgxmm-decider:3`) from a digest-pinned vLLM base with hash-pinned wheels, by
+`dgxmm/decider/image.py` (the **Build image** button, progress on the admin-only SSE topic `decider`)
+or `admin decider build`. It runs as `decider_user` (10001), with a read-only root filesystem, every
+capability dropped, `no-new-privileges`, private IPC, `decider_pids_limit`, a cgroup memory limit
+(`decider_memory_limit_gib`), `/tmp` as a `decider_tmp_gib` tmpfs and `restart: no`. The only mounts
+are the selected model's repo directory of the HF cache, read-only, plus one read-only bind per
+shared-store blob that its snapshot links to. At start the launcher copies the pinned files into a
+private directory on its tmpfs, checks each copy against the image's hash list and refuses to start
+(exit 3) on a mismatch; exit 2 means the snapshot is missing, exit 4 that no key arrived.
+
+**Network.** The decider joins only `decider_network` (`dgxmm-decider`), an internal Docker network
+that DGXMM creates on the first start and then attaches its own container to (again at every DGXMM
+start, so an upgraded container rejoins). It publishes no port. DGXMM reaches it as
+`http://dgxmm-decider:<port>`. The network's subnets are read at start and every 30 s, and forwarding
+headers from them are always ignored (`proxy_headers.py`).
+
+**Key.** A bearer key is generated once in `data/secrets/decider_api_key` (mode 600). Right after the
+container starts, DGXMM writes it through `docker exec` stdin into a 0400 file on the container's
+tmpfs (`/run/dgxmm-decider/api_key`); the launcher reads and deletes it and hands it to the server, so
+it is never in the environment, the command line or `docker inspect`. If the write fails the
+container is removed at once. Rotation (`dgxmm/decider/rotation.py`, `POST /api/decider/rotate-key`
+or the CLI through a request file the app watches) stops the decider, writes a new key with an atomic
+rename and starts it again.
+
+**Asking a question** (`Decider.decide`, `SystemOneClient`). A feature sends a fixed question, a set of
+options (at most 128) and a *state*: facts DGXMM assembled, with untrusted text (log lines, chat
+template, model name, `config.json`) quoted in labelled blocks, length-capped and redacted. The client:
+
+1. answers at once with *no answer* when the feature is switched off, the decider is not `ready`, or the
+   circuit breaker is open (3 failures in a row open it for 60 s; a good supervisor probe closes it);
+2. queues behind at most `decider_max_in_flight` (2) questions at the server, interactive ones (plan,
+   parser) ahead of background ones (diagnosis, kind, workload), and gives up (*busy*, answered by
+   rules, not counted as a failure) after `decider_queue_timeout_s` (1 s; background: half the deadline)
+   or when the remaining deadline is shorter than the measured service time;
+3. posts to `/v1/systemone` with the bearer key, reads at most 64 KiB of the reply, and validates it:
+   finite probabilities in [0, 1] for offered options only, summing to about 1, and the choice is the
+   most probable option. Anything else is a `bad_reply` failure;
+4. returns the choice with its confidence. The feature uses it only at or above its threshold
+   (`decider.feature.<f>.threshold`); below it the decision is logged as abstained.
+
+Each question, answered or not, is a `decisions` row with the input's SHA-256 (never the state text),
+probabilities, latency and model revision; answers are cached in memory by feature, input hash and
+model revision (256 entries).
+
+**Rules first.** Each feature runs its own deterministic rules before it asks anything, in worker
+threads and with bounded regexes over capped input:
+
+| Feature | Rules | Model asked | Effect |
+|---|---|---|---|
+| Diagnosis (`diagnosis.py`) | 14 causes from log patterns, Docker's OOM flag and the decider's own exit codes, on a failed deployment's stored log tail | when no rule matched (10 s, background) | a `diagnoses` row (cause, fix hint, validated patch, redacted excerpt), SSE `diagnosis` |
+| Parser (`config_suggest.py`) | chat-template evidence (strong) and model-family names (weak) | when no rule matched (4 s per question) | wizard suggestion; auto-fill only for strong rules or model ≥ threshold |
+| Plan (`plans.py`) | safety filter: `unsafe_reason` per plan; exactly one safe plan is recommended by rules | two or more safe plans (2 s, cached 2 min) | `recommended`, `recommendation` on the plan |
+| Kind (`kind.py`) | scanner rules (`inventory/kinds.py`) | models no rule recognises, once per snapshot (background loop) | `artifact_kinds` cache, `kind_source` / `kind_confidence` |
+| Workload (`workload.py`) | idle and saturated-batch patterns from the last hour of rollups (≥ 30 minutes needed) | otherwise (2 s, cached 15 min) | advice `relevance` and `workload_fit` |
+
+Rules decisions are logged too (source `rules`). Nothing the decider answers runs anything: diagnoses
+and suggestions only prefill dialogs, plans are still chosen and applied by the admin.
+
+**Supervisor** (`supervisor.py`). Every `decider_probe_interval_s` (30 s) while enabled it probes a ready
+decider (`/health` plus one question). `decider_hang_probes` (3) failures in a row while the container
+runs, or a failed deployment, lead to a restart through the normal deployer path, with backoff
+(`decider_restart_backoff_s` doubling to `decider_restart_backoff_max_s`, reset after `decider_stable_s`),
+at most `decider_max_restarts_per_hour` attempts (failed ones included), never under memory pressure, never during a key rotation and
+never after an admin stopped it. A watchdog stop counts as a failure. After a model switch it rolls back
+to the previous model if the new one fails to start. Status, breaker, load and supervisor state are in
+`GET /api/decider/status`.
+
+**Retention** (`retention.py`). Once a minute, with the metrics rollups, `decisions` rows older than
+`decider_retention_days` (30) or beyond the newest `decider_max_rows` (50 000) are deleted, and
+`diagnoses` keep the latest 20 per deployment (they are also deleted with their deployment).
 
 ## LiteLLM integration
 
@@ -392,6 +543,28 @@ between), then saves. It is best effort (15 s bound): the response carries `dere
 `deregister_error` and a `warning` naming the old URL when some may remain; the audit entry records the
 count and error. The settings are saved either way.
 
+
+## Downloads
+
+`downloads.py` fetches the selected files one at a time. Each file is fetched by `hf_hub_download` in a
+child process (`python -I -B`, progress bars off; the HF token is passed in its environment, never on its
+command line). Cancel kills the child's process group, which aborts the HTTP stream at once, then removes
+the repo's `blobs/*.incomplete` partial files (only one download per repo runs at a time) and rescans the
+inventory. When the download starts it writes `.dgxmm-download.json` in the repo dir with the revision and
+the file list, and removes it only once every file is on disk. The inventory reports a snapshot of that
+revision that lacks a listed file as incomplete ("download not finished"), so a cancelled or failed
+download is never offered as a complete model; incomplete cleanup offers it instead. A marker for another
+revision, or an unreadable one, is ignored.
+
+A supported decision model (d3-mini, d3-nano) never takes that path, whether it is started from the Decision
+model page or `POST /api/downloads`: `DownloadService.start_pinned` runs `decider/snapshot.py` (the installer's
+and the CLI's downloader) in a daemon worker thread. It fetches only the pinned revision's files named by the
+checked-in hash list and the verified manifest, hashes each while streaming and links it only when it matches,
+resumes a partial file with HTTP Range on the next attempt, and never sends the HF token. A snapshot that is
+already complete is only verified. Progress (the planned files and their sizes, then the bytes on disk) goes to
+the same Download row and `download` events; Cancel stops the worker before its next chunk. Another revision is
+refused (`pinned_revision`).
+
 ## Deleting weights
 
 `inventory/weights.py` plans and performs deletions; the API (`DELETE /api/inventory?ref=`, with
@@ -402,11 +575,27 @@ maps to the file and all its split shards. When a GGUF inside the HF cache is a 
 blob it points to is deleted too, unless another snapshot link still uses that blob (then only the link
 goes, and 0 bytes are reported).
 
+**Shared blob store (huggingface_hub >= 2).** A repo blob may itself be a symlink into the cache-wide
+store `<hub>/blobs/<xx>/<hash>`, which holds each distinct file once for all repos (with a
+`<hash>.refs` manifest and a `<hash>.lock`). The plan collects the store entries that the deleted links
+resolve to and then, read-only and before anything is removed, scans every symlink in the cache (all
+`models--`, `datasets--` and `spaces--` repos) and in the GGUF roots outside it. Entries another link
+still resolves to are kept; if part of the tree cannot be read, no store entry is removed. Only
+well-formed entries count (a regular file `<xx>/<64 hex>` whose real path stays inside the store), and
+the store directory itself is a protected root. Freed bytes count every real file once: repo files
+that are not links, plus the exclusive store entries (0 for an entry with another hard link). Store
+entries are removed after the repo's own files, one at a time under the entry's `.lock` (the lock
+huggingface_hub holds while it links an entry into a repo and records the link in the manifest). Under
+the lock the manifest is re-read, so an entry that a concurrent download has just reused is kept, and
+the result says so. A `.lock` held for over 10 s also keeps the entry. Removing an entry also removes
+its manifest; root-owned entries go through the helper while the lock is held. Incomplete-download
+cleanup uses the same plan.
+
 **Safety rules**, enforced on the server:
 
 - **Containment.** Refs containing `..` are refused. Both the link location and the fully resolved path
   must lie inside the HF hub or a configured GGUF root, so symlinks cannot escape. A target that is, or
-  contains, a configured root (hub, `hf_cache.local`, `.locks`, a GGUF root) is refused (`400
+  contains, a configured root (hub, `hf_cache.local`, `.locks`, the shared store `blobs`, a GGUF root) is refused (`400
   unsafe_path`). Symlink loops and other path errors are refused the same way.
 - **In use.** Every deployment's model and draft model are mapped to paths. A non-terminal deployment
   whose paths lie in a target blocks the delete (`409 model_in_use`, listing the deployments). Stopped
@@ -483,6 +672,10 @@ At startup, before the first request is served (`context.py`):
    Because DGXMM adopts every container labelled `dgxmm.managed=true`, only one DGXMM instance may run
    per Docker host.
 
+Before these, the database is upgraded (tables, columns, indexes, versioned migrations). DGXMM also
+rejoins the decider's network if it exists, reads that network's subnets, and, after reconciling, logs a
+warning when a running decider was started by an older build.
+
 Background loops:
 
 | Loop | Interval | Does |
@@ -495,6 +688,11 @@ Background loops:
 | vLLM architectures | once | Run a one-off container from the vLLM image to list supported architectures. The result is cached in `data/` per image reference. |
 | Deployment monitor | `monitor_poll_s` (3 s), per deployment | Only while starting or loading. |
 | Calibration | 15 s after ready | Record measured memory. |
+| Decider supervisor | `decider_probe_interval_s` (30 s) | Probe the ready decider, restart it after a crash or hang (see [decision model](#decision-model-decider)). |
+| Model kinds | 60 s | Ask the decision model about models no rule recognises (once per snapshot). |
+| Decider retention | with the metrics rollups (60 s) | Prune `decisions` and `diagnoses`. |
+| Decider network subnets | 30 s | Re-read the decider network's subnets, whose forwarding headers are ignored. |
+| Key rotation requests | continuous | Pick up `rotate-decider-key` requests from the admin CLI. |
 
 ## Data model
 
@@ -503,12 +701,18 @@ SQLite tables (`dgxmm/db.py`):
 | Table | Contents |
 |---|---|
 | `users` | username, argon2id hash, role (`admin` / `viewer`), `must_change_pw` |
+| `cli_tokens` | SHA-256 of a short-lived admin CLI token, user, scope, expiry (deleted when the command ends) |
 | `sessions` | SHA-256 of the session token, user, CSRF token, client IP, expiry |
-| `deployments` | name, engine, model reference, validated config, state, container id, port, priority, alias (the LiteLLM model name), reservation and estimate, LiteLLM status, last error and exit code |
-| `app_settings` | runtime settings changed in the UI (key, value, updated at): the LiteLLM URLs, enabled flag, master key and the URL it is bound to |
+| `deployments` | name, engine, model reference, validated config, state, container id, port, priority, alias (the LiteLLM model name), reservation and estimate, LiteLLM status, last error, exit code, whether the last exit was an OOM kill (`oom_killed`), `system` (the decision model) |
+| `app_settings` | runtime settings changed in the UI (key, value, updated at): the LiteLLM URLs, enabled flag, master key and the URL it is bound to; the decision model's `decider.*` settings |
+| `decisions` | one row per decision-model question: feature, subject, source (`rules` / `model` / `none`), choice, confidence, probabilities, latency, model and revision, SHA-256 of the input, error code, feedback (30 days / 50 000 rows) |
+| `diagnoses` | per failure event: cause, source, confidence, summary, fix hint, patch, redacted log excerpt (latest 20 per deployment; unique per deployment and event) |
+| `artifact_kinds` | model-derived kinds per artifact and snapshot time, with source and confidence |
+| `schema_version` | applied migrations |
 | `deployment_events` | state transitions with message and optional log tail |
 | `memory_calibration` | estimated vs measured bytes per engine, model and config hash; OOM records |
 | `benchmarks` | one row per concurrency level: TTFT p50/p95, ITL p50, total and per-request tok/s |
+| `benchmark_runs` | one row per benchmark run: levels, status, the level that failed and its error |
 | `metric_rollups` | 1-minute aggregates per deployment and for the host (30-day retention) |
 | `downloads` | repo, revision, files, progress, state, error |
 | `favourites` | model references starred in the Planner |
@@ -527,8 +731,8 @@ these routes, so this is also the API for scripts.
 |---|---|---|
 | Auth | `POST /auth/login`, `POST /auth/logout`, `GET /auth/me`, `POST /auth/change-password` | login: none; others: user |
 | Host | `GET /host` (budget, GPU, disk), `GET /host/processes?scope=all\|external\|managed&limit=50` | user |
-| Deployments | `GET /deployments`, `GET /deployments/{id}`, `GET /deployments/{id}/litellm`, `POST /deployments/preview` | user |
-| | `POST /deployments`, `PATCH /deployments/{id}` (`{"alias": …, "rewrite_keys": true}`), `POST /deployments/{id}/start\|stop\|sleep\|wake\|switch\|reconfigure`, `DELETE /deployments/{id}`, `GET /deployments/{id}/logs` | admin |
+| Deployments | `GET /deployments`, `GET /deployments/{id}`, `GET /deployments/{id}/litellm` | user |
+| | `POST /deployments/preview`, `POST /deployments`, `PATCH /deployments/{id}` (`{"alias": …, "rewrite_keys": true}`), `POST /deployments/{id}/start\|stop\|sleep\|wake\|switch\|reconfigure`, `DELETE /deployments/{id}`, `GET /deployments/{id}/logs` | admin |
 | Metrics and advice | `GET /deployments/{id}/metrics`, `GET /host/metrics`, `GET /deployments/{id}/advice`, `GET /deployments/{id}/benchmarks` | user |
 | | `POST /deployments/{id}/benchmark` | admin |
 | Inventory | `GET /inventory` | user |
@@ -539,14 +743,24 @@ these routes, so this is also the API for scripts.
 | | `PUT /planner/favourites/{ref}`, `DELETE /planner/favourites/{ref}` | admin |
 | LiteLLM | `GET /integrations/litellm` (`?probe=false` answers at once with the cached status), `GET /integrations/litellm/status`, `GET /integrations/litellm/models` (API bases only for admins) | user |
 | | `PUT /integrations/litellm`, `POST /integrations/litellm/test`, `POST /integrations/litellm/sync`, `GET\|POST /integrations/litellm/keys`, `PATCH\|DELETE /integrations/litellm/keys/{token}` | admin |
+| Decision model | `GET /decider/status`, `GET /decider/image`, `GET /deployments/{id}/diagnosis`, `GET /deployments/{id}/workload` | user |
+| | `PUT /decider/settings`, `POST /decider/enable` (`{"actions": […]}`), `POST /decider/disable` (`{"remove": true}`), `POST /decider/models/download`, `POST /decider/image/build`, `POST /decider/rotate-key`, `GET /decider/decisions?feature=&limit=`, `POST /decider/decisions/{id}/feedback`, `POST /decider/suggest-config` | admin |
 | Engines | `GET /engines` | user |
 | Containers | `GET /containers/adoptable`, `POST /containers/{container}/adopt` | admin |
 | Users and audit | `GET\|POST /users`, `PATCH\|DELETE /users/{id}`, `GET /audit` | admin |
 | Events | `GET /stream` (server-sent events) | user |
 
 Errors are JSON, `{"detail": {"code": …, "message": …}}`, with a stable `code` (for example
-`model_name_taken`, `model_in_use`, `insufficient_memory`, `litellm_no_db`) and sometimes extra fields
-such as the deployment that holds a model name.
+`model_name_taken`, `model_in_use`, `insufficient_memory`, `litellm_no_db`, `image_missing`,
+`rate_limited`) and sometimes extra fields such as the deployment that holds a model name. Some
+routes are rate-limited and decider request bodies are capped (see
+[API limits](configuration.md#api-limits)).
+
+Responses that changed for the decision model: plan options carry `recommended`, `recommendation`
+(`source`, `confidence`, `reason`) and `unsafe_reason`; inventory artifacts `kind_source` and
+`kind_confidence`; advice items `relevance` and `workload_fit`; deployment views `system` and
+`startup_queue` (position and reason while queued). `POST /deployments/{id}/wake` answers `202` when
+the wake-up continues in the background.
 
 ## Frontend
 
@@ -554,8 +768,9 @@ such as the deployment that holds a model name.
 `/dgxmm`). The Docker image builds it and serves it from `/app/static`.
 
 - **Pages** (`src/pages/`): Login, Change password, Dashboard, Deployments, Deployment detail, Deploy
-  wizard, Models (on disk), Catalog, Downloads, Planner, Processes, LiteLLM, Users, Audit log. Catalog,
-  Planner, Processes, LiteLLM, Deployment detail and Audit are lazy-loaded.
+  wizard, Models (on disk), Catalog, Downloads, Planner, Processes, LiteLLM, Decision model, Users, Audit
+  log. Deploy wizard, Catalog, Planner, Processes, LiteLLM, Decision model, Deployment detail and Audit
+  are lazy-loaded.
 - **Design system** (`src/components/ui/`): shadcn/ui components on Radix primitives, styled with
   Tailwind CSS tokens. There is a light theme and a dark theme. Status is always shown as icon plus
   text, and Inter and JetBrains Mono fonts are self-hosted. App building blocks (shell, sidebar, data
@@ -563,10 +778,14 @@ such as the deployment that holds a model name.
 - **Data**: TanStack Query for every API call (`src/api.ts` adds the CSRF header). `src/stream.ts`
   opens one `EventSource` on `/dgxmm/api/stream`: `budget` events update the host data in place,
   `metrics` events are appended to the live chart series, and `deployment`, `download` and `inventory`
-  events refresh the matching queries.
+  events refresh the matching queries; `diagnosis` refreshes a deployment's diagnosis and the
+  admin-only `decider` topic carries image build progress.
 - **Charts**: Recharts with a fixed palette that has light and dark variants.
 
 ## Security model
+
+The threat model (assets, trust boundaries, the decision model's container, network, key and supply chain,
+residual risks) is in [security.md](security.md).
 
 - **Authentication** (`auth/`): username and password with argon2id hashes. New passwords need at
   least 12 characters. For unknown users, login still verifies a dummy hash, so response timing does not reveal which usernames exist. Failed and rate-limited
@@ -577,12 +796,18 @@ such as the deployment that holds a model name.
   (`secure_cookies: auto`). Changing a password signs out the user's other sessions. An admin reset
   signs out all of them.
 - **CSRF**: every non-GET request must send the session's token in `X-CSRF-Token`.
-- **Rate limiting**: 5 login attempts per 60 seconds, per client IP and per username.
+- **Admin CLI tokens**: `python -m dgxmm.admin decider status|enable|disable` creates a short-lived admin
+  token in `cli_tokens` (hashed), uses it over the admin unix socket only and deletes it afterwards. It
+  is refused on the TCP port and on requests with forwarding headers, accepted only on the decider
+  routes and the inventory refresh, and audited with `"via": "cli"`.
+- **Rate limiting**: 5 login attempts per 60 seconds, per client IP and per username; per-user limits on
+  the decision-model routes (see [API limits](configuration.md#api-limits)).
 - **First login**: users created by bootstrap, by an admin or by a reset must change their password
   before any other API call.
 - **Roles**: `viewer` has read-only access. Viewers can see deployments (with their LiteLLM endpoint
-  and model name), models, metrics, the catalog, the planner and the masked process list, and can run
-  memory previews. They cannot see users, container logs, the audit log, the adoptable-container list,
+  and model name), models, metrics, the catalog, the planner and the masked process list. They cannot
+  run deployment previews (`POST /deployments/preview`, which may ask the decision model), see users, the
+  live container logs, the audit log, the adoptable-container list,
   delete previews (they contain host paths), LiteLLM API bases or virtual keys, and the UI hides the
   admin pages. `admin` is needed for every change. The last admin cannot be deleted or demoted.
 - **Audit**: logins (also failed and rate-limited ones), password changes, deploy, start, stop, remove,

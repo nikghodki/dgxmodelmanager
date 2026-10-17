@@ -1,0 +1,47 @@
+{
+ "ref": "moonshotai/Kimi-K2-Instruct",
+ "architecture": "DeepseekV3ForCausalLM",
+ "model_type": "kimi_k2",
+ "config": {
+  "architectures": [
+   "DeepseekV3ForCausalLM"
+  ],
+  "model_type": "kimi_k2",
+  "num_hidden_layers": 61,
+  "hidden_size": 7168,
+  "vocab_size": 163840,
+  "num_nextn_predict_layers": 0,
+  "max_position_embeddings": 131072,
+  "auto_map": {
+   "AutoConfig": "configuration_deepseek.DeepseekV3Config",
+   "AutoModel": "modeling_deepseek.DeepseekV3Model",
+   "AutoModelForCausalLM": "modeling_deepseek.DeepseekV3ForCausalLM"
+  }
+ },
+ "files": [
+  ".eval_results/apex-swe.yaml",
+  ".eval_results/swe_bench_pro.yaml",
+  ".eval_results/terminal_bench.yaml",
+  ".gitattributes",
+  "LICENSE",
+  "README.md",
+  "THIRD_PARTY_NOTICES.md",
+  "chat_template.jinja",
+  "config.json",
+  "configuration_deepseek.py",
+  "docs/deploy_guidance.md",
+  "docs/tool_call_guidance.md",
+  "figures/Base-Evaluation.png",
+  "figures/banner.png",
+  "figures/kimi-logo.png",
+  "generation_config.json",
+  "kimi-logo.png",
+  "model.safetensors.index.json",
+  "modeling_deepseek.py",
+  "tiktoken.model",
+  "tokenization_kimi.py",
+  "tokenizer_config.json"
+ ],
+ "weight_files": 61,
+ "template": "{% macro render_content(msg) -%}\n    {%- set c = msg.get('content') -%}\n    {%- if c is string -%}\n      {{ c }}\n    {%- elif c is not none -%}\n      {% for content in c -%}\n        {% if content['type'] == 'image' or 'image' in content or 'image_url' in content -%}\n          <|media_start|>image<|media_content|><|media_pad|><|media_end|>\n        {% else -%}\n          {{ content['text'] }}\n        {%- endif -%}\n      {%- endfor -%}\n    {%- endif -%}\n{%- endmacro %}\n\n\n{%- if tools -%}\n  <|im_system|>tool_declare<|im_middle|>{{ tools | tojson(separators=(',', ':')) }}<|im_end|>\n{%- endif -%}\n{% for message in messages %}\n  {%- if loop.first and messages[0]['role'] != 'system' -%}\n  <|im_system|>system<|im_middle|>You are Kimi, an AI assistant created by Moonshot AI.<|im_end|>\n  {% endif %}\n  \n  {%- set role_name =  message.get('name') or  message['role'] -%}\n  {%- if message['role'] == 'user' -%}\n    <|im_user|>{{role_name}}<|im_middle|>\n  {%- elif message['role'] == 'assistant' -%}\n    <|im_assistant|>{{role_name}}<|im_middle|>\n  {%- else -%}\n    <|im_system|>{{role_name}}<|im_middle|>\n  {%- endif -%}\n\n  {%- if message['role'] == 'assistant' and message.get('tool_calls') -%}\n    {{render_content(message)}}<|tool_calls_section_begin|>\n    {%- for tool_call in message['tool_calls'] -%}\n      {%- set formatted_id = tool_call['id'] -%}\n      <|tool_call_begin|>{{ formatted_id }}<|tool_call_argument_begin|>{% if tool_call['function']['arguments'] is string %}{{ tool_call['function']['arguments'] }}{% else %}{{ tool_call['function']['arguments'] | tojson }}{% endif %}<|tool_call_end|>\n    {%- endfor -%}\n    <|tool_calls_section_end|>\n  {%- elif message['role'] == 'tool' -%}\n    {%- set tool_call_id = message.tool_call_id -%}\n    ## Return of {{ tool_call_id }}\n{{render_content(message)}}\n  {%- elif message['content'] is not none -%}\n    {{render_content(message)}}\n  {%- endif -%}\n  <|im_end|>\n{%- endfor -%}\n{%- if add_generation_prompt -%}\n  <|im_assistant|>assistant<|im_middle|>\n{%- endif -%}"
+}

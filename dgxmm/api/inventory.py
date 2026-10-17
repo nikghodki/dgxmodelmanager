@@ -45,7 +45,7 @@ def list_inventory(p: Principal = Depends(current_principal), ctx: AppContext = 
 @router.post("/refresh")
 async def refresh(p: Principal = Depends(require_admin), ctx: AppContext = Depends(get_ctx)):
     items = await asyncio.to_thread(ctx.inventory.refresh)
-    audit(ctx.db, p.user.id, "inventory_refreshed", "", {"count": len(items)})
+    audit(ctx.db, p.user.id, "inventory_refreshed", "", {"count": len(items), **p.audit_extra()})
     return [_with_support(ctx, a) for a in ctx.inventory.list()]
 
 

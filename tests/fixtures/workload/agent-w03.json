@@ -1,0 +1,48 @@
+{
+ "name": "agent-w03",
+ "label": "agent_tool_use",
+ "window_minutes": 10,
+ "summary": {
+  "minutes": 10,
+  "idle_fraction": 0.0,
+  "mean_running": 2.0083,
+  "peak_running": 5.25,
+  "mean_waiting": 0.9333,
+  "peak_waiting": 16.0,
+  "queued_fraction": 0.1,
+  "prompt_tps": 394.5285,
+  "gen_tps": 90.4258,
+  "prompt_gen_ratio": 4.36,
+  "prefix_hit_rate": 0.9144,
+  "spec_accept_rate": null,
+  "kv_usage_mean": 0.0268,
+  "kv_usage_peak": 0.032520866631149024,
+  "ttft_p50": 0.8159,
+  "e2e_p50": 6.4911,
+  "running_min": 1.5,
+  "running_max": 5.25,
+  "running_cv": 0.54,
+  "requests_per_min": 27.2,
+  "prompt_tokens_per_request": 871,
+  "output_tokens_per_request": 200
+ },
+ "engine": "vllm",
+ "model_ref": "Qwen/Qwen3-0.6B",
+ "config": {
+  "max_model_len": 16384,
+  "max_num_seqs": 8,
+  "max_num_batched_tokens": 4096,
+  "kv_tokens": 16384,
+  "tool_call_parser": "hermes",
+  "reasoning_parser": "qwen3",
+  "enable_prefix_caching": true
+ },
+ "traffic": {
+  "ok": 347,
+  "err": 0,
+  "tool_calls": 28,
+  "prompt_tokens": 480229,
+  "completion_tokens": 83966
+ },
+ "source": "real minute rollups of a DGXMM test deployment on the DGX Spark, traffic from scripts/decider_eval/traffic.py"
+}

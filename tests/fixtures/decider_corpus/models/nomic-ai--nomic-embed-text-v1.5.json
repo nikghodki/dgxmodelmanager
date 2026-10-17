@@ -1,0 +1,39 @@
+{
+ "ref": "nomic-ai/nomic-embed-text-v1.5",
+ "architecture": "NomicBertModel",
+ "model_type": "nomic_bert",
+ "config": {
+  "architectures": [
+   "NomicBertModel"
+  ],
+  "model_type": "nomic_bert",
+  "num_hidden_layers": 12,
+  "hidden_size": 768,
+  "vocab_size": 30528,
+  "max_position_embeddings": 2048,
+  "auto_map": {
+   "AutoConfig": "nomic-ai/nomic-bert-2048--configuration_hf_nomic_bert.NomicBertConfig",
+   "AutoModel": "nomic-ai/nomic-bert-2048--modeling_hf_nomic_bert.NomicBertModel",
+   "AutoModelForMaskedLM": "nomic-ai/nomic-bert-2048--modeling_hf_nomic_bert.NomicBertForPreTraining",
+   "AutoModelForSequenceClassification": "nomic-ai/nomic-bert-2048--modeling_hf_nomic_bert.NomicBertForSequenceClassification",
+   "AutoModelForMultipleChoice": "nomic-ai/nomic-bert-2048--modeling_hf_nomic_bert.NomicBertForMultipleChoice",
+   "AutoModelForQuestionAnswering": "nomic-ai/nomic-bert-2048--modeling_hf_nomic_bert.NomicBertForQuestionAnswering",
+   "AutoModelForTokenClassification": "nomic-ai/nomic-bert-2048--modeling_hf_nomic_bert.NomicBertForTokenClassification"
+  }
+ },
+ "files": [
+  ".gitattributes",
+  "1_Pooling/config.json",
+  "README.md",
+  "config.json",
+  "config_sentence_transformers.json",
+  "modules.json",
+  "sentence_bert_config.json",
+  "special_tokens_map.json",
+  "tokenizer.json",
+  "tokenizer_config.json",
+  "vocab.txt"
+ ],
+ "weight_files": 9,
+ "template": null
+}

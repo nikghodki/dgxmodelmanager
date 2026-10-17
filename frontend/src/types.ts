@@ -25,9 +25,11 @@ export interface Alert { level: "ok" | "warning" | "critical"; message?: string;
 export interface HostInfo { budget: Budget; external_top: ProcMem[]; gpu: Record<string, number | null>; alert: Alert; disk: { total: number; free: number } | null }
 export interface Artifact {
   ref: string; source: "hf" | "gguf"; revision: string | null; format: string; weights_bytes: number; size_bytes: number;
-  complete: boolean; kind: "llm" | "draft" | "other"; architecture: string | null; quant: string | null; problems: string[];
+  complete: boolean; kind: "llm" | "draft" | "embedding" | "reranker" | "vision-llm" | "speech" | "decision" | "other"; architecture: string | null; quant: string | null; problems: string[];
   max_context: number | null; is_moe: boolean | null; num_layers: number | null; confident: boolean | null;
   has_mtp: boolean; engines: string[];
+  /** Who classified `kind`: rules, or the decision model when no rule recognised the model. */
+  kind_source?: "rules" | "model"; kind_confidence?: number | null;
 }
 export interface DeploymentRef { id: number; name: string; state: string }
 /** GET /inventory/delete-preview — what deleting a model would remove (host paths). */
@@ -53,10 +55,17 @@ export interface Estimate {
 }
 export interface Fit { fits: boolean; required: number; free_for_new: number; headroom: number; estimate: Estimate }
 export interface PlanAction { type: "sleep" | "stop" | "patch"; deployment_id?: number | null; patch?: Record<string, unknown> | null }
-export interface PlanOption { id: string; title: string; detail: string; new_required: number; frees: number; fits: boolean; actions: PlanAction[]; patch: Record<string, unknown> | null; model_ref?: string | null }
+export interface PlanOption { id: string; title: string; detail: string; new_required: number; frees: number; fits: boolean; actions: PlanAction[]; patch: Record<string, unknown> | null; model_ref?: string | null;
+  /** The decision model's (or the rules') pick among the safe plans. */
+  recommended?: boolean; recommendation?: PlanRecommendation | null;
+  /** Set when the safety filter excludes this plan from recommendation (still selectable as before). */
+  unsafe_reason?: string | null;
+}
 export interface Preview {
   estimate: Estimate; fit: Fit; budget: Budget; served_name: string; config: Record<string, unknown>;
   gpu_memory_utilization?: number; kv_pool_tokens?: number | null; plans?: PlanOption[]; llmfit?: Record<string, any> | null;
+  /** When it does not fit: hints that are not plans (e.g. the decision model's memory, freed only by disabling it). */
+  notes?: string[];
 }
 export interface DeploymentEvent { ts: string; from: string; to: string; message: string; log_tail: string | null }
 export interface Deployment {
@@ -69,6 +78,14 @@ export interface Deployment {
   model_name?: string | null;
   /** Why this ready deployment is not (correctly) registered in LiteLLM, as of the last sync. */
   litellm_error?: ApiProblem | null;
+  /** A system deployment (the decision model): never a plan candidate, not registered in LiteLLM; the watchdog stops it
+   * before any user deployment under memory pressure. */
+  system?: boolean;
+  /** Set while it waits for a start-up slot (state "queued", or a wake-up waiting): at most N engines start at once. */
+  startup_queue?: StartupQueue | null;
+}
+export interface StartupQueue {
+  position: number | null; waiting_for: string[]; reason: string; kind: "launch" | "wake"; since: number; limit: number;
 }
 export interface EngineInfo { name: string; supports_sleep: boolean; defaults: Record<string, any>; image: string | null }
 
@@ -109,3 +126,68 @@ export interface DeploymentLiteLLM {
   deployment_id: number; model_name: string; endpoint: string; registered: boolean | null; status: string; enabled: boolean;
   error: ApiProblem | null; keys: LiteLLMKey[]; keys_visible: boolean; keys_error: ApiProblem | null;
 }
+
+// ---- Decision model (decider) ----
+/** Who made a decision: deterministic rules, the decision model, or nobody (abstained / unavailable). */
+export type DecisionSource = "rules" | "model" | "none";
+export interface DeciderFeatureSettings { enabled: boolean; threshold: number }
+export interface DeciderImageStatus { present: boolean; building: boolean; error: string | null }
+/** GET /decider/status (viewer). */
+/** POST /decider/rotate-key (the key itself is never returned). */
+export interface DeciderKeyRotation {
+  rotated: boolean;
+  restarted: boolean;
+  deployment_id: number | null;
+  state: string | null;
+  error: string | null;
+}
+
+export interface DeciderStatus {
+  enabled: boolean; healthy: boolean; deployment_id: number | null; state: string | null; model: string; revision: string | null;
+  p50_ms: number | null; decisions_24h: number; accepted_rate: number | null;
+  features: Record<string, DeciderFeatureSettings>; image: DeciderImageStatus;
+  /** The running decider container predates the current image / hardening (rebuild + restart). */
+  upgrade?: { needed: boolean; reasons: string[] };
+  /** The model the next enable runs (`model` is the one answering now). */
+  configured_model?: string; restart_required?: boolean; models?: DeciderModelInfo[];
+  breaker?: { open: boolean; failures: number; retry_in_s: number } | null;
+  /** Client-side back-pressure: requests at the decider, waiting, and answered by rules because it was busy. */
+  load?: { max_in_flight: number; in_flight: number; queued: number; shed: number; service_ms: number };
+  supervisor?: DeciderSupervisorStatus | null;
+}
+export interface DeciderModelInfo {
+  repo: string; revision: string; served_name: string; params: string; reservation_bytes: number; default: boolean; downloaded: boolean;
+}
+export interface DeciderSupervisorStatus {
+  last_action: string | null; last_reason: string | null; probe: { ok: boolean; latency_ms: number | null; at: number } | null;
+  failed_probes: number; restarts_last_hour: number; max_restarts_per_hour: number; backoff_s: number; gave_up: boolean;
+  /** Set when the supervisor stopped a hung decider and has not managed to start it again yet. */
+  pending_restart?: string | null;
+  next_attempt_in_s: number | null;
+}
+/** PUT /decider/settings body. */
+export interface DeciderSettingsPatch { features?: Record<string, Partial<DeciderFeatureSettings>>; model?: string }
+/** GET /decider/decisions rows (no raw log text). */
+export interface DecisionRow {
+  id: number; created_at: string; feature: string; subject: string; source: DecisionSource; choice: string | null;
+  confidence: number | null; latency_ms: number | null; feedback: "accepted" | "rejected" | null;
+}
+/** SSE `decider` topic while the image builds. */
+export interface DeciderBuildProgress { phase: string; message: string }
+/** GET /deployments/{id}/diagnosis. */
+export interface Diagnosis {
+  cause: string | null; label: string; source: DecisionSource; confidence: number | null; summary: string; fix_hint: string;
+  patch: Record<string, unknown> | null; decision_id: number | null; created_at: string; log_excerpt: string | null;
+  /** The admin's 👍/👎 on its decision, so the card shows it after a reload. */
+  feedback?: "accepted" | "rejected" | null;
+}
+export interface DiagnosisResponse { diagnosis: Diagnosis | null }
+/** POST /decider/suggest-config: one suggestion per parser field. `value: null` means "no parser". */
+export interface Suggestion {
+  value: string | null; source: DecisionSource; confidence: number | null; auto_apply: boolean; alternatives: { value: string | null; p: number }[];
+  decision_id?: number | null; reason?: string | null;
+}
+export interface ConfigSuggestions { tool_call_parser: Suggestion | null; reasoning_parser: Suggestion | null }
+export interface PlanRecommendation { source: DecisionSource; confidence: number | null; reason: string; decision_id?: number | null }
+/** GET /deployments/{id}/workload. */
+export interface Workload { label: string | null; source: DecisionSource; confidence: number | null; summary?: Record<string, unknown> | string | null; reason?: string | null; decision_id?: number | null }

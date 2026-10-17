@@ -1,0 +1,31 @@
+{
+ "ref": "openai/whisper-large-v3-turbo",
+ "architecture": "WhisperForConditionalGeneration",
+ "model_type": "whisper",
+ "config": {
+  "architectures": [
+   "WhisperForConditionalGeneration"
+  ],
+  "model_type": "whisper",
+  "num_hidden_layers": 32,
+  "vocab_size": 51866,
+  "num_mel_bins": 128,
+  "encoder_layers": 32,
+  "decoder_layers": 4,
+  "is_encoder_decoder": true
+ },
+ "files": [
+  "added_tokens.json",
+  "config.json",
+  "generation_config.json",
+  "merges.txt",
+  "normalizer.json",
+  "preprocessor_config.json",
+  "special_tokens_map.json",
+  "tokenizer.json",
+  "tokenizer_config.json",
+  "vocab.json"
+ ],
+ "weight_files": 1,
+ "template": null
+}

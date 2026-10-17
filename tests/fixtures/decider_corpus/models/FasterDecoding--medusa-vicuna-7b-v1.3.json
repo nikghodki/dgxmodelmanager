@@ -1,0 +1,15 @@
+{
+ "ref": "FasterDecoding/medusa-vicuna-7b-v1.3",
+ "architecture": null,
+ "model_type": null,
+ "config": {
+  "medusa_num_heads": 2
+ },
+ "files": [
+  ".gitattributes",
+  "README.md",
+  "config.json"
+ ],
+ "weight_files": 1,
+ "template": null
+}

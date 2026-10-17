@@ -33,3 +33,12 @@ asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 testpaths = ["tests"]
 timeout = 60
+
+# CI (.github/workflows/pylint.yml) runs `pylint --errors-only dgxmm`: real errors only, no style checks (the code
+# follows the conventions in CONTRIBUTING.md). Disabled: inference false positives on attributes that start as None
+# and are wired later (delete_guard, removal_hooks) and on pydantic's model_fields.
+[tool.pylint.main]
+py-version = "3.12"
+
+[tool.pylint."messages control"]
+disable = ["not-callable", "not-an-iterable", "unsupported-membership-test"]

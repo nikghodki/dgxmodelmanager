@@ -23,6 +23,7 @@ async def test_loading_deployment_is_resumed_not_failed(stack):
 
 
 async def test_missing_and_exited_containers_fail(stack):
+    stack.settings.max_concurrent_startups = 0  # two containers at once (the start-up gate is tested elsewhere)
     a, b = await deploy(stack, "a"), await deploy(stack, "b")
     await stack.deployer.aclose()
     stack.sdk._containers.pop(a["container_id"])

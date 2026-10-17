@@ -26,4 +26,4 @@ export function fmtRelative(iso: string, now: number = Date.now()): string {
 /** HF repo ids are shown whole; absolute GGUF paths are shortened to the file name. */
 export const shortRef = (ref: string) => (ref.startsWith("/") ? ref.split("/").pop()! : ref);
 /** Display name of an inference engine. */
-export const engineLabel = (engine: string) => (engine === "llamacpp" ? "llama.cpp" : "vLLM");
+export const engineLabel = (engine: string) => (engine === "llamacpp" ? "llama.cpp" : engine === "decision" ? "Decision model" : "vLLM");

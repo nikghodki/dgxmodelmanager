@@ -15,6 +15,15 @@ SERVED_NAME_RE = r"^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$"
 MANAGED_LABEL = "dgxmm.managed"
 
 
+class SpecError(ValueError):
+    """The container cannot be built from what is on disk (e.g. a mount source in the wrong place): the deployment
+    fails with this code and message instead of an internal error."""
+
+    def __init__(self, code: str, message: str):
+        super().__init__(message)
+        self.code, self.message = code, message
+
+
 @dataclass
 class ContainerSpec:
     name: str
@@ -29,6 +38,18 @@ class ContainerSpec:
     gpus: bool = True
     ipc_host: bool = True
     entrypoint: list[str] | None = None
+    # Hardening (used by the decision engine; the defaults keep the vLLM / llama.cpp containers unchanged)
+    user: str | None = None                   # "uid:gid"; None = the image's user
+    read_only: bool = False                   # read-only root filesystem
+    tmpfs: dict[str, str] = field(default_factory=dict)  # path -> mount options
+    cap_drop: list[str] = field(default_factory=list)
+    security_opt: list[str] = field(default_factory=list)
+    pids_limit: int | None = None
+    mem_limit: int | None = None              # bytes; swap is disabled for the container when set
+    internal_network: bool = False            # `network` must be an internal network that DGXMM itself joins
+    # Files written into the running container right after it starts (path -> content), through `docker exec`
+    # stdin into a tmpfs: never in the environment, the command line or `docker inspect`. Not part of repr().
+    secret_files: dict[str, bytes] = field(default_factory=dict, repr=False)
 
 
 @dataclass

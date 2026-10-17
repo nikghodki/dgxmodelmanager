@@ -64,6 +64,23 @@ const row = async (name: string) => (await screen.findByText(name)).closest("tr"
 describe("Models", () => {
   beforeEach(() => { vi.mocked(apiModule.api).mockReset(); });
 
+  it("marks model-classified kinds with an AI marker and a confidence tooltip", async () => {
+    vi.mocked(auth.useIsAdmin).mockReturnValue(false);
+    mockApi((p) => (p === "/inventory" ? [
+      art("org/embed", true, { kind: "embedding", kind_source: "model", kind_confidence: 0.87 }),
+      art("org/plain", true, { kind: "llm", kind_source: "rules", kind_confidence: null }),
+    ] : undefined));
+    renderModels();
+    const r = await row("org/embed");
+    expect(within(r).getByText("Embedding")).toBeInTheDocument();
+    const marker = within(r).getByLabelText("Classified by the decision model (87%)");
+    expect(marker).toHaveTextContent("AI");
+    await userEvent.hover(marker);
+    expect((await screen.findAllByText("Classified by the decision model (87%)")).length).toBeGreaterThan(0);
+    const plain = await row("org/plain");
+    expect(within(plain).queryByText("AI")).toBeNull();
+  });
+
   it("shows a single, consistent status label per model", async () => {
     vi.mocked(auth.useIsAdmin).mockReturnValue(false);
     mockApi();

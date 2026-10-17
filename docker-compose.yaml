@@ -19,6 +19,7 @@ services:
       DGXMM_CONFIG: /app/config.yaml
       DGXMM_HOST_HOME: "${DGXMM_HOST_HOME:?set DGXMM_HOST_HOME in .env (run ./install.sh)}"
       DGXMM_TRUSTED_PROXIES: "${DGXMM_TRUSTED_PROXIES:-}"  # empty → config.yaml/default
+      DGXMM_INSTALL_ID: "${DGXMM_INSTALL_ID:-}"  # labels this install's images/containers (dgxmm.install)
       NVIDIA_VISIBLE_DEVICES: all
       NVIDIA_DRIVER_CAPABILITIES: utility
     ports:

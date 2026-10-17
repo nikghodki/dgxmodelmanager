@@ -1,0 +1,74 @@
+{
+ "ref": "unsloth/gemma-3-4b-it",
+ "architecture": "Gemma3ForConditionalGeneration",
+ "model_type": "gemma3",
+ "config": {
+  "architectures": [
+   "Gemma3ForConditionalGeneration"
+  ],
+  "model_type": "gemma3",
+  "vision_config": {
+   "attention_dropout": 0.0,
+   "hidden_act": "gelu_pytorch_tanh",
+   "hidden_size": 1152,
+   "image_size": 896,
+   "intermediate_size": 4304,
+   "layer_norm_eps": 1e-06,
+   "model_type": "siglip_vision_model",
+   "num_attention_heads": 16,
+   "num_channels": 3,
+   "num_hidden_layers": 27,
+   "patch_size": 14,
+   "torch_dtype": "bfloat16",
+   "vision_use_head": false
+  },
+  "text_config": {
+   "attention_bias": false,
+   "attention_dropout": 0.0,
+   "attn_logit_softcapping": null,
+   "cache_implementation": "hybrid",
+   "final_logit_softcapping": null,
+   "head_dim": 256,
+   "hidden_activation": "gelu_pytorch_tanh",
+   "hidden_size": 2560,
+   "initializer_range": 0.02,
+   "intermediate_size": 10240,
+   "max_position_embeddings": 131072,
+   "model_type": "gemma3_text",
+   "num_attention_heads": 8,
+   "num_hidden_layers": 34,
+   "num_key_value_heads": 4,
+   "query_pre_attn_scalar": 256,
+   "rms_norm_eps": 1e-06,
+   "rope_local_base_freq": 10000.0,
+   "rope_scaling": [
+    "factor",
+    "rope_type"
+   ],
+   "rope_theta": 1000000.0,
+   "sliding_window": 1024,
+   "sliding_window_pattern": 6,
+   "torch_dtype": "bfloat16",
+   "use_cache": true,
+   "vocab_size": 262208
+  }
+ },
+ "files": [
+  ".gitattributes",
+  "README.md",
+  "added_tokens.json",
+  "chat_template.jinja",
+  "chat_template.json",
+  "config.json",
+  "generation_config.json",
+  "model.safetensors.index.json",
+  "preprocessor_config.json",
+  "processor_config.json",
+  "special_tokens_map.json",
+  "tokenizer.json",
+  "tokenizer.model",
+  "tokenizer_config.json"
+ ],
+ "weight_files": 2,
+ "template": "{{ bos_token }}\n{%- if messages[0]['role'] == 'system' -%}\n    {%- if messages[0]['content'] is string -%}\n        {%- set first_user_prefix = messages[0]['content'] + '\n\n' -%}\n    {%- else -%}\n        {%- set first_user_prefix = messages[0]['content'][0]['text'] + '\n\n' -%}\n    {%- endif -%}\n    {%- set loop_messages = messages[1:] -%}\n{%- else -%}\n    {%- set first_user_prefix = \"\" -%}\n    {%- set loop_messages = messages -%}\n{%- endif -%}\n{%- for message in loop_messages -%}\n    {%- if (message['role'] == 'user') != (loop.index0 % 2 == 0) -%}\n        {{ raise_exception(\"Conversation roles must alternate user/assistant/user/assistant/...\") }}\n    {%- endif -%}\n    {%- if (message['role'] == 'assistant') -%}\n        {%- set role = \"model\" -%}\n    {%- else -%}\n        {%- set role = message['role'] -%}\n    {%- endif -%}\n    {{ '<start_of_turn>' + role + '\n' + (first_user_prefix if loop.first else \"\") }}\n    {%- if message['content'] is string -%}\n        {{ message['content'] | trim }}\n    {%- elif message['content'] is iterable -%}\n        {%- for item in message['content'] -%}\n            {%- if item['type'] == 'image' -%}\n                {{ '<start_of_image>' }}\n            {%- elif item['type'] == 'text' -%}\n                {{ item['text'] | trim }}\n            {%- endif -%}\n        {%- endfor -%}\n    {%- else -%}\n        {{ raise_exception(\"Invalid content type\") }}\n    {%- endif -%}\n    {{ '<end_of_turn>\n' }}\n{%- endfor -%}\n{%- if add_generation_prompt -%}\n    {{'<start_of_turn>model\n'}}\n{%- endif -%}\n"
+}

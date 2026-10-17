@@ -51,6 +51,26 @@ def test_kind_classification():
     assert classify_kind("ModernBertForMaskedLM") == "other"
 
 
+def test_strong_kind_evidence_overrides_the_architecture_rule(settings, fake_hf_repo):
+    """Snapshots whose files / config prove what they are, even when the architecture says *ForCausalLM."""
+    fake_hf_repo("acme/decider-2b", config=QWEN_TINY, files={"model.safetensors": 100, "decider_config.json": 10})
+    fake_hf_repo("acme/embed", config=QWEN_TINY, files={"model.safetensors": 100, "1_Pooling/config.json": 10})
+    fake_hf_repo("acme/eagle-head", config={**QWEN_TINY, "num_hidden_layers": 1})
+    fake_hf_repo("acme/Some-Reranker-0.6B", config=QWEN_TINY)
+    fake_hf_repo("acme/nli", config={"architectures": ["BartForSequenceClassification"], "model_type": "bart",
+                                     "id2label": {"0": "a", "1": "b", "2": "c"}, "num_hidden_layers": 2,
+                                     "hidden_size": 8, "num_attention_heads": 2, "vocab_size": 10})
+    kinds = {a.ref: a.kind for a in scan_hf_cache(hub(settings))}
+    assert kinds == {"acme/decider-2b": "decision", "acme/embed": "embedding", "acme/eagle-head": "draft",
+                     "acme/Some-Reranker-0.6B": "reranker", "acme/nli": "decision"}
+
+
+def test_plain_llm_keeps_llm(settings, fake_hf_repo):
+    fake_hf_repo("Qwen/Qwen3-Tiny", config=QWEN_TINY, files={"model.safetensors": 100, "tokenizer.json": 10})
+    [a] = scan_hf_cache(hub(settings))
+    assert a.kind == "llm"
+
+
 def test_inventory_service_get(settings, fake_hf_repo):
     fake_hf_repo("Qwen/Qwen3-Tiny", config=QWEN_TINY)
     inv = InventoryService(settings)

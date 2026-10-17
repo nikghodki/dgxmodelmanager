@@ -18,6 +18,7 @@ MAX_INPUT_CHARS before any rule runs; cuts drop the trailing partial word so no 
 """
 from __future__ import annotations
 
+import builtins
 import os
 import re
 import shlex
@@ -96,6 +97,9 @@ _TOKEN_SHAPES = [re.compile(p) for p in (
     r"(?<![A-Za-z0-9])xox[abprs]-[A-Za-z0-9-]{10,}",
     r"(?<![A-Za-z0-9])eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{4,}",
 )]
+# PEM private keys (multi-line); a block cut off before its END line is masked to the end of the text. Bounded.
+_PEM_KEY = re.compile(r"-----BEGIN ([A-Z0-9 ]{0,40}PRIVATE KEY)-----(?:.{0,16384}?-----END [A-Z0-9 ]{0,40}PRIVATE "
+                      r"KEY-----|.{0,16384})", re.S)
 _QUOTED = r"\"(?:[^\"\\]|\\.){0,2048}\"|'(?:[^'\\]|\\.){0,2048}'"  # bound = MAX_TOKEN_CHARS
 _VALUE = r"([bBrRuUfF]{0,2}(?:" + _QUOTED + r")|[^\s&'\",;(){}\[\]]+)"
 _INLINE_FLAG = re.compile(r"(?<![\w.-])(--?([A-Za-z][\w.-]" + _N + r"))(=|:|[ \t]{1,8})(?!--)" + _VALUE)
@@ -110,6 +114,24 @@ _PASS_ARG = re.compile(r"(?<![\w-])pass:[^\s'\"]+")  # openssl -passin pass:S
 _PAIR = re.compile(r"(?<![\w.-])([\"']?)((?=[\w.-]" + _N + r"?(?i:key|token|secret|pass|pw|auth|cred|cookie|sig))"
                    r"[A-Za-z_][\w.-]" + _N + r")\1(\s{0,8}[=:]\s{0,8})" + _VALUE)
 _SHELL_SAFE = re.compile(r"[\w@%+=:,./*-]+")
+
+
+_EXCEPTION_NAME = re.compile(r"^([A-Z][A-Za-z0-9]*?)(?:Error|Exception|Warning)$")
+_BUILTIN_EXCEPTIONS = frozenset(n for n in dir(builtins) if isinstance(getattr(builtins, n), type)
+                                and issubclass(getattr(builtins, n), BaseException))
+
+
+def _exception_message(name: str, sep: str) -> bool:
+    """`KeyError: '<message>'` is an exception and its message, not a key=value secret (masking it hid engine root
+    causes: vLLM reports an unknown parser as KeyError). Only the `Name: ` form, and only Python's own exception
+    names or names whose words carry no secret marker: `ApiKeyError: x`, `PasswordException: x` stay masked."""
+    m = _EXCEPTION_NAME.match(name)
+    if not m or sep.strip() != ":":
+        return False
+    if name in _BUILTIN_EXCEPTIONS:
+        return True
+    words = "-".join(w.lower() for w in re.findall(r"[A-Z][a-z0-9]*|[a-z0-9]+", m.group(1)))
+    return bool(words) and not is_sensitive_name(words)
 
 
 def is_sensitive_name(name: str) -> bool:
@@ -185,6 +207,7 @@ def _redact_userinfo(text: str) -> str:
 
 
 def redact_text(text: str, _depth: int = 0) -> str:
+    text = _PEM_KEY.sub(lambda m: f"-----BEGIN {m.group(1)}----- {MASK} -----END {m.group(1)}-----", text)
     text = _redact_userinfo(text)
     text = _HEADER.sub(lambda m: m.group(1) + m.group(2) + (MASK if m.group(3).strip() else m.group(3)), text)
     text = _AUTH_SCHEME.sub(lambda m: m.group(1) + m.group(2) + MASK, text)
@@ -205,10 +228,47 @@ def redact_text(text: str, _depth: int = 0) -> str:
 
     def _pair(m: re.Match) -> str:
         value = m.group(4)
-        if not is_sensitive_name(m.group(2)) or value.strip("'\"") == MASK:
+        if not is_sensitive_name(m.group(2)) or value.strip("'\"") == MASK or _exception_message(m.group(2), m.group(3)):
             return m.group(0)
         return m.group(1) + m.group(2) + m.group(1) + m.group(3) + _mask_value(value)
     return _PAIR.sub(_pair, text)
+
+
+_B64_LINE = re.compile(r"^[A-Za-z0-9+/]{40,128}={0,2}$")  # one line of a PEM / base64 key body
+_B64_TAIL = re.compile(r"^[A-Za-z0-9+/]{1,128}={0,2}$")   # its short last line
+B64_RUN = 3  # this many consecutive base64 lines are treated as key material
+
+
+def _mask_b64_runs(lines: list[str]) -> list[str]:
+    """Mask runs of >= B64_RUN consecutive base64 lines (and the short line ending a run): a PEM body whose BEGIN line
+    was cut off by a log tail."""
+    out, i, n = list(lines), 0, len(lines)
+    while i < n:
+        j = i
+        while j < n and _B64_LINE.match(lines[j].strip()):
+            j += 1
+        if j - i >= B64_RUN:
+            if j < n and _B64_TAIL.match(lines[j].strip()):
+                j += 1
+            for k in range(i, j):
+                end = "\n" if lines[k].endswith("\n") else ""
+                out[k] = MASK + end
+        i = max(j, i + 1)
+    return out
+
+
+def mask_pem_blocks(text: str) -> str:
+    """Mask whole PEM private-key blocks (BEGIN ... END, across lines)."""
+    return _PEM_KEY.sub(lambda m: f"-----BEGIN {m.group(1)}----- {MASK} -----END {m.group(1)}-----", text or "")
+
+
+def redact_log(text: str) -> str:
+    """Redact engine log output: multi-line PEM key blocks over the whole text, runs of base64 key lines (a PEM body
+    whose BEGIN line a tail cut off), then every line on its own with redact_text() (cost bounded per line). Line
+    breaks are kept. Used for the live logs view and for the log tails stored with failed deployments."""
+    text = mask_pem_blocks(text)
+    lines = _mask_b64_runs(text.splitlines(keepends=True))
+    return "".join(redact_text(line) for line in lines)
 
 
 def shell_tokens(text: str) -> list[tuple[str, int, int]]:

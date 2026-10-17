@@ -1,0 +1,21 @@
+{
+ "ref": "ibm-granite/granite-timeseries-ttm-r2",
+ "architecture": "TinyTimeMixerForPrediction",
+ "model_type": "tinytimemixer",
+ "config": {
+  "architectures": [
+   "TinyTimeMixerForPrediction"
+  ],
+  "model_type": "tinytimemixer"
+ },
+ "files": [
+  ".gitattributes",
+  "README.md",
+  "benchmarks.webp",
+  "config.json",
+  "generation_config.json",
+  "ttm_image.webp"
+ ],
+ "weight_files": 2,
+ "template": null
+}

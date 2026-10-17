@@ -1,0 +1,35 @@
+{
+ "ref": "intfloat/e5-mistral-7b-instruct",
+ "architecture": "MistralModel",
+ "model_type": "mistral",
+ "config": {
+  "architectures": [
+   "MistralModel"
+  ],
+  "model_type": "mistral",
+  "num_hidden_layers": 32,
+  "hidden_size": 4096,
+  "vocab_size": 32000,
+  "max_position_embeddings": 32768
+ },
+ "files": [
+  ".eval_results/ArguAna.yaml",
+  ".gitattributes",
+  "1_Pooling/config.json",
+  "README.md",
+  "added_tokens.json",
+  "config.json",
+  "config_sentence_transformers.json",
+  "lora/adapter_config.json",
+  "model.safetensors.index.json",
+  "modules.json",
+  "pytorch_model.bin.index.json",
+  "sentence_bert_config.json",
+  "special_tokens_map.json",
+  "tokenizer.json",
+  "tokenizer.model",
+  "tokenizer_config.json"
+ ],
+ "weight_files": 5,
+ "template": null
+}

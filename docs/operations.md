@@ -7,11 +7,13 @@ checkout on the host, as the user that installed it.
 - [Upgrade](#upgrade)
 - [Upgrading an existing install](#upgrading-an-existing-install)
 - [Changing settings](#changing-settings)
+- [Decision model](#decision-model)
 - [Backup and restore](#backup-and-restore)
 - [Uninstall](#uninstall)
 - [Logs](#logs)
 - [Health](#health)
 - [Freeing disk space](#freeing-disk-space)
+- [Admin command line](#admin-command-line)
 - [Troubleshooting](#troubleshooting)
 - [Known limitations](#known-limitations)
 - [Security hardening](#security-hardening)
@@ -32,7 +34,10 @@ nothing. In order:
    - stops if another DGXMM container exists that was created from a different checkout (only one
      instance per host);
    - checks that the UI port is free, unless it is used by this DGXMM;
-   - warns when less than 50 GiB is free on the HF cache disk.
+   - warns when less than 50 GiB is free on the HF cache disk;
+   - with `--with-decider`: requires at least 16 GiB of `MemAvailable` (skipped when the decider already
+     runs), 10 GiB free on the HF cache disk unless the model snapshot is already there, and warns when
+     the Docker disk has less than 30 GiB free and the decider image still has to be built.
 2. **Settings.** Works out the port, bind address, network, model paths, your uid/gid and the Docker
    socket's group id. Order of precedence: existing `.env`, then flags, then environment, then defaults.
    Paths and values are validated.
@@ -61,6 +66,10 @@ nothing. In order:
    for LiteLLM's `/health/liveliness`, then prints the single endpoint (`http://<host>:<port>/v1`) and
    how to create API keys. If LiteLLM or its database does not start, it shows their redacted logs and
    exits non-zero; DGXMM itself is already running at that point.
+10. **Decision model** (only with `--with-decider`). See [decision model](#decision-model): builds the
+    decider image, downloads and verifies the pinned model snapshot, enables the decider and waits up to
+    `DGXMM_DECIDER_TIMEOUT` seconds (default 900) until it is healthy, then prints its status. Each step
+    is skipped when already done. On failure it says which step failed; DGXMM itself keeps running.
 
 Other commands: `./install.sh status`, `logs [-f]`, `upgrade` and `uninstall [--purge]`. The `Makefile`
 has the same targets (`make install`, `make status`, …).
@@ -82,12 +91,35 @@ changes into `docker-compose.override.yaml` (see [configuration](configuration.m
 run `git checkout -- docker-compose.yaml`, and upgrade again. New keys in `config.example.yaml` are not
 added to your `config.yaml`. They take their defaults until you add them.
 
+**With the decision model.** The decider container is not touched by an upgrade, so it keeps answering
+from the image and key it was started with. When a release changes the decider image (its tag in
+`images.decision`, currently `dgxmm-decider:3`), DGXMM logs "the running decider predates this DGXMM
+build" at start and the Decision model page shows a banner with the reasons. With
+`DGXMM_WITH_DECIDER=1` in `.env` the installer builds the new image during the upgrade; otherwise build
+it on the page (**Build image…**) or with `docker exec dgxmm python -m dgxmm.admin decider build`. Then
+press **Restart with a new key** (or run `docker exec dgxmm python -m dgxmm.admin rotate-decider-key`):
+the old container is stopped and a new one starts from the new image with a new key. Until then the old
+decider keeps working.
+
 ## Upgrading an existing install
 
-What changes when an install from before the weights, LiteLLM-gateway and processes release (see the
-[changelog](../CHANGELOG.md)) is upgraded with `./install.sh upgrade`. Nothing needs to be done by hand
-unless a point below applies to you.
+What changes when an older install is upgraded with `./install.sh upgrade` (see the
+[changelog](../CHANGELOG.md) for each release). Nothing needs to be done by hand unless a point below
+applies to you.
 
+- **Decision model release.** The decision model is off after the upgrade: nothing new runs and no
+  extra memory is used until you enable it (see [decision model](#decision-model)). The new tables
+  (`decisions`, `diagnoses`, `artifact_kinds`, `cli_tokens`, `schema_version`) and columns
+  (`deployments.system`, `deployments.oom_killed`) are added at start. The rule-based parts of the new
+  features (failure diagnosis, parser suggestions, plan safety marks, model kinds, workload labels) work
+  right away. The installer generates `DGXMM_INSTALL_ID` in `.env`, and only containers and images
+  created from then on carry the install label, so `uninstall --purge` reports older engine containers
+  and keeps them. Engine starts are now queued one at a time (`max_concurrent_startups: 1`).
+- **A decider started by an older build** keeps running unchanged. If the Decision model page (or
+  `GET /api/decider/status` → `upgrade`) says it needs a restart, see [upgrade](#upgrade) and
+  [security](security.md#upgrading-a-decider-started-by-an-older-build). A decider network created
+  before install labels existed is reported and kept by `uninstall --purge`
+  (`docker network rm dgxmm-decider` removes it by hand).
 - **Database.** The new `app_settings` table, which holds the settings saved on the LiteLLM page, is
   created automatically when DGXMM starts. There is no migration step. Until you save something on
   the LiteLLM page, DGXMM keeps using `litellm_url` and `secrets/litellm_master_key` exactly as before.
@@ -116,9 +148,29 @@ unless a point below applies to you.
   `http://dgxmm-litellm:4000`, enter the bundled master key and save. DGXMM first removes its models
   from the LiteLLM it is leaving, then registers them with the bundled one. Virtual keys of the old
   LiteLLM are not copied. If another LiteLLM already publishes port 4000, use `--litellm-port`.
-- **New `config.yaml` keys** (`litellm_public_url`, `helper_image`, `helper_timeout_s`, `host_passwd`,
-  `trusted_proxies`) take their defaults. Set **Public endpoint URL** on the LiteLLM page, or
-  `litellm_public_url`, so the UI shows the endpoint your clients use.
+- **Database migrations.** Startup upgrades `data/dgxmm.sqlite3` in place, in this order: new tables
+  are created, new nullable columns and new non-unique indexes are added to existing tables, then the
+  versioned migrations run, each once, in its own transaction, recorded in the `schema_version` table
+  (`SELECT * FROM schema_version`). A failed migration is rolled back completely, the error is logged
+  and DGXMM does not start; the next start retries it. Migrations so far: 1 (baseline) and 2 (one
+  diagnosis per failure event: a unique index on `diagnoses (deployment_id, event_id)`; duplicates, if
+  any, are removed and the newest is kept). They were tested on databases of the previous release and
+  of this one. **Rolling back** to an older checkout (`git checkout <old> && ./install.sh`) keeps
+  working: migrations only add tables, columns and indexes, and older versions ignore them
+  (`schema_version`, `cli_tokens`, `decisions`, `diagnoses`, `artifact_kinds`); the previous release
+  was checked to read and write a migrated database. A database that a newer DGXMM migrated is reported
+  in the log ("written by a newer DGXMM") and left unchanged. Before rolling back to a release without
+  the decision model, disable and remove it (`docker exec dgxmm python -m dgxmm.admin decider disable
+  --remove`, or `POST /api/decider/disable` with `{"remove": true}`): older versions do not know the
+  system deployment. Take a [backup](#backup-and-restore) before upgrading.
+- **Decision model later.** Run `./install.sh --with-decider` (remembered in `.env`), or enable it in the
+  UI (**Integrations > Decision model**). See [decision model](#decision-model).
+- **New `config.yaml` keys** take their defaults: `litellm_public_url`, `helper_image`,
+  `helper_timeout_s`, `host_passwd`, `trusted_proxies`, and in the decision-model release the start-up
+  queue (`max_concurrent_startups`, `startup_queue_timeout_s`, `wake_queue_timeout_s`,
+  `wake_sync_wait_s`), `images.decision` and the `decider_*` keys (see
+  [configuration](configuration.md#decision-model-decider)). Set **Public endpoint URL** on the LiteLLM
+  page, or `litellm_public_url`, so the UI shows the endpoint your clients use.
 
 ## Changing settings
 
@@ -140,20 +192,106 @@ unless a point below applies to you.
   it was unreachable, the change is saved anyway with a warning: remove the leftover DGXMM models in that
   LiteLLM, or re-enable the integration with that URL so the next save/sync cleans them up.
 
+## Decision model
+
+The decision model ("decider", `vllm-sr/d3-mini` at a pinned revision) is an optional local model that
+DGXMM consults for failure diagnosis, parser suggestions, plan recommendations, model kinds and
+workload labels. Every feature falls back to its rules when the decider is off or unhealthy. It runs
+as a *system* deployment: about 13 GiB of GPU memory, never stopped by plans, never registered in LiteLLM,
+and stopped by the memory watchdog before any user deployment (when it uses more than its reservation, or as the
+first `auto_protect` victim; the supervisor restarts it later with backoff).
+
+**Install with the installer:**
+
+```bash
+./install.sh --with-decider          # or DGXMM_WITH_DECIDER=1 ./install.sh; remembered in .env
+```
+
+After DGXMM is healthy the installer runs, inside the `dgxmm` container:
+
+1. `decider build`: builds the decider image (`images.decision`, default `dgxmm-decider:3`) from
+   `deploy/decider` with the same code as the UI's **Build image** button. The first build pulls the
+   pinned vLLM base (about 21 GB) and takes a few minutes. It is skipped when the image exists.
+2. `decider download`: downloads the pinned snapshot into the HF cache (8.5 GiB) with progress,
+   resumable after an interruption (re-run the installer). Only files with a known SHA-256 are fetched:
+   code, config, tokenizer and `MODEL_MANIFEST.json` from the hash list in `deploy/decider`, then the
+   files that manifest lists (weights, licence, card; `assets/` is skipped). Anything else the Hub lists
+   is ignored, and unsafe names (absolute, `..`) are refused. Each file is hashed while it downloads and
+   only placed in the cache when it matches; a mismatch is discarded, downloaded once more, and if it
+   still does not match the step fails with nothing linked. It checks free disk space first, and only
+   one download runs at a time. A complete, verified snapshot needs no network. The HF token is never
+   sent (the repository is public).
+3. `decider enable --wait`: enables the decider through the running app, with the normal memory check.
+   If it does not fit, the installer lists the plans that would make room and changes nothing: those
+   plans stop or sleep your deployments, so pick one in the UI. Then it waits until the decider is
+   healthy.
+
+The installer builds and downloads before enabling (rather than letting the app do it on enable), so
+progress shows in the terminal, failures stop the install at the step that failed, and the slow parts
+can be retried on their own. Enabling from the UI still offers the in-app image build.
+
+**Admin CLI.** The same commands work by hand:
+
+```bash
+docker exec dgxmm python -m dgxmm.admin decider status        # --json, or --check (exit 1 unless healthy)
+docker exec dgxmm python -m dgxmm.admin decider build         # --force rebuilds
+docker exec dgxmm python -m dgxmm.admin decider download      # --verify-only checks without downloading
+docker exec dgxmm python -m dgxmm.admin decider download --model vllm-sr/d3-nano   # the other supported model
+docker exec dgxmm python -m dgxmm.admin decider enable --wait # --timeout SECONDS (default 900)
+docker exec dgxmm python -m dgxmm.admin decider disable       # --remove also removes the deployment
+```
+
+`build` and `download` work on their own. `status`, `enable` and `disable` call the app's API over its
+admin unix socket inside the container (`data/run/admin.sock`, mode 0600 in a 0700 directory, served by
+a second listener without proxy-header handling) with a short-lived admin token that the command creates
+in the database and deletes when it finishes. The token is never printed. It is refused on the TCP port
+(whatever `X-Forwarded-For` says) and on any request with forwarding headers, and accepted only on the
+decider routes (and the inventory refresh), for at most the wait time plus 10 minutes (so
+`--timeout` is at most 10200 s), and only while its user is an admin. It works before the first admin
+login (pending password change). The audit log shows the oldest admin as the actor (`--user NAME` picks
+another admin), marks these actions `"via": "cli"`, and records each token's issue and revocation.
+
+**Remembered vs. requested.** With `DGXMM_WITH_DECIDER=1` only remembered in `.env`, an install or
+upgrade never fails because of the decider: low memory, a failed build, download or enable are warnings
+(DGXMM itself is upgraded; the app's memory check decides at enable), and a decider an admin disabled
+stays disabled. Passing `--with-decider` on the command line means "set it up now": the memory and disk
+checks are fatal, failures exit non-zero, and a disabled decider is enabled again.
+
+**Turning it off:** disable it on the Decision model page (or `decider disable`). The installer leaves it
+off; set `DGXMM_WITH_DECIDER=0` in `.env` to stop it trying altogether.
+
+`./install.sh status` shows the decider's state and, with `DGXMM_WITH_DECIDER=1`, exits non-zero while it
+is not healthy. The UI's top bar shows a **Decision model** chip (Healthy, Building, Starting, Stopping,
+Sleeping, Stopped, Disabled or Error) that opens the Decision model page.
+
+**Install labels.** The installer generates `DGXMM_INSTALL_ID` once (kept in `.env`); DGXMM labels the
+containers it creates and the images it builds `dgxmm.install=<id>`, so uninstall touches only this
+install's decider container and image. Containers and images from before the label are reported and
+kept (remove them by hand).
+
+**Data retention.** The decision log (`decisions`) keeps 30 days and at most the newest 50 000 rows
+(`decider_retention_days`, `decider_max_rows` in `config.yaml`); stored diagnoses (`diagnoses`) keep the latest
+20 per deployment and are deleted with the deployment. The metrics loop prunes both once a minute (with the
+metrics rollups, which keep 30 days). Feedback on a pruned decision answers 404.
+
 ## Backup and restore
 
 What to keep:
 
 | Path | Contains |
 |---|---|
-| `data/` | `dgxmm.sqlite3`: users, deployments and their configs, events, calibration, benchmarks, 30-day metrics, audit log. Also cached vLLM architecture lists. |
+| `data/` | `dgxmm.sqlite3`: users, deployments and their configs, events, calibration, benchmarks, 30-day metrics, audit log, runtime settings (including the decision model's on/off switch, deployment, per-feature switches and thresholds: `app_settings` keys `decider.*`), the decision log (`decisions`, with feedback), failure diagnoses, model-kind cache and `schema_version`. Also cached vLLM architecture lists. |
+| `data/run/admin.sock` | The admin CLI's unix socket while DGXMM runs. Not data: `tar` skips it ("socket ignored") and DGXMM recreates it at start. |
+| `data/secrets/decider_api_key` | The decision model's API key (mode 600; part of `data/`). If it is lost, a new one is generated and the decider has to be restarted (disable, then enable) to use it. |
 | `data/litellm-db/` | Bundled LiteLLM only: its Postgres database (virtual keys, budgets, spend, registered models) |
 | `secrets/` | HF token, LiteLLM keys (incl. the bundled LiteLLM's master/salt key and DB password), first admin password |
 | `config.yaml`, `.env` | your configuration |
 | `docker-compose.override.yaml` | only if you created one |
 
 Model files (HF cache, GGUF directories) are not part of a DGXMM backup. Back them up separately or
-download them again.
+download them again. For the decision model: `docker exec dgxmm python -m dgxmm.admin decider download`
+(or `./install.sh` with `DGXMM_WITH_DECIDER=1`) fetches and verifies its snapshot again. The decider
+image is rebuilt with `decider build`.
 
 **Backup (brief stop):**
 
@@ -214,6 +352,12 @@ Docker group do not match. If you restored from the online backup, rename `dgxmm
 `dgxmm.sqlite3` and make sure no stale `dgxmm.sqlite3-wal` file sits next to it. Deployments whose
 containers do not exist on the new host are marked `failed` at startup. Start them from the UI.
 
+The decision model's settings and decision log come back with `dgxmm.sqlite3`. If the decider was
+enabled, DGXMM restarts its deployment like any other (on a new host: download its snapshot and build
+its image first, see above, then **Enable** on the Decision model page or `decider enable --wait`). This
+procedure (online backup, restore into a new data directory, start) was checked: thresholds, feature
+switches, the decision log and the decider key came back unchanged.
+
 ## Uninstall
 
 ```bash
@@ -224,8 +368,12 @@ containers do not exist on the new host are marked `failed` at startup. Start th
 | | `uninstall` | `uninstall --purge` |
 |---|---|---|
 | `dgxmm` container and image | removed | removed |
-| Engine containers (`dgxmm.managed=true`) | left running (a reinstall picks them up again) | removed |
+| Decision model container (this install's, label `dgxmm.install`) | stopped and removed; the database still has it enabled, so a reinstall brings it back | removed |
+| Decision model image (labels `dgxmm.built=true` and this install's `dgxmm.install`) | kept | removed (other images, e.g. from before install labels, are reported and kept) |
+| Decision model snapshots (`<HF cache>/hub/models--vllm-sr--d3-mini`, `models--vllm-sr--d3-nano`, and the shared-store blobs only they use) | kept | kept; removed with `--purge-decider-model` |
+| Engine containers (`dgxmm.managed=true`) | left running (a reinstall picks them up again) | removed if labelled for this install (`dgxmm.install`); others (from before install labels, or another install) are reported and kept |
 | Docker network | kept | removed if the installer created it |
+| Decision model network (`decider_network`, default `dgxmm-decider`) | kept | removed if this install created it (labels `dgxmm.purpose=decider` and this install's `dgxmm.install`); others are reported and kept |
 | Bundled LiteLLM containers (`dgxmm-litellm`, `dgxmm-litellm-db`) | removed | removed |
 | `data/` (incl. the LiteLLM database `data/litellm-db`), `secrets/`, `config.yaml`, `.env` | kept | deleted |
 | LiteLLM / `postgres:16` images | kept | kept (`docker image rm` them by hand) |
@@ -240,12 +388,16 @@ see what would happen.
 ./install.sh logs        # last 200 lines of the dgxmm container (DGXMM_LOG_LINES=1000 for more)
 ./install.sh logs -f     # follow
 docker logs dgxmm-<deployment-name>     # an engine container
+docker logs dgxmm-decider               # the decision model (while its container exists)
 ```
 
 In the UI, a deployment's **Logs** button shows its engine log (admins). The **Events** tab keeps the
 last log lines of every failure, even after the container has been removed. The DGXMM log covers
-startup reconciliation, memory watchdog changes, LiteLLM sync failures, calibration measurements and
-errors. The log is managed by Docker, and DGXMM writes no log files.
+startup reconciliation, memory watchdog changes, LiteLLM sync failures, calibration measurements, the
+decision model's supervisor (probes, restarts, "the running decider predates this DGXMM build"),
+decider retention passes and errors. The log is managed by Docker, and DGXMM writes no log files.
+Decision-model questions and answers are not logged there: they are in the decision log on the Decision
+model page (`GET /api/decider/decisions`).
 
 ## Health
 
@@ -303,6 +455,28 @@ admin-only and audited.
 
 Deleting files outside DGXMM (for example with `rm` or `huggingface-cli delete-cache`) is fine too.
 The next rescan (or **Rescan**) updates the list.
+
+## Admin command line
+
+Every admin command runs inside the `dgxmm` container, as `docker exec dgxmm python -m dgxmm.admin
+<command>` (`--help` on any command lists its options):
+
+| Command | What it does |
+|---|---|
+| `reset-password USER` | Sets a new random password (printed once), signs the user out everywhere and requires a change at next sign-in. See [forgot the admin password](#forgot-the-admin-password). |
+| `list-users` | Lists user names and roles. |
+| `reset-calibration REPO [--engine vllm\|llamacpp]` | Forgets the learned memory calibration of a model, so estimates start from the formula again. |
+| `decider status [--json] [--check]` | The decision model's state; `--check` exits 1 unless it is enabled and healthy. |
+| `decider build [--force]` | Builds the decider image (skipped when it exists). |
+| `decider download [--model vllm-sr/d3-nano] [--verify-only]` | Downloads the pinned model snapshot into the HF cache and verifies every file; `--verify-only` only checks it. |
+| `decider enable [--wait] [--timeout SECONDS]` | Enables the decider through the running app (normal memory check); `--wait` waits until it is healthy (default 900 s). |
+| `decider disable [--remove]` | Disables it and stops its deployment; `--remove` also deletes the deployment. |
+| `decider admin-disabled` | Exits 0 when an admin explicitly disabled the decider (used by the installer). |
+| `rotate-decider-key [--wait SECONDS]` | New bearer key for the decider; a running decider is restarted with it. Exit 0 rotated, 1 failed, 2 not picked up by DGXMM, 3 still in progress (run it again to keep waiting). Default wait 90 s. |
+
+`decider status|enable|disable` act as the oldest admin (`decider --user NAME …` picks another one) over
+the admin unix socket; see [decision model](#decision-model). Every command that changes something is
+written to the audit log.
 
 ## Troubleshooting
 
@@ -366,8 +540,20 @@ A deployment fails with "startup timed out after 900s". Open its **Events** tab 
   `DGXMM_PULL_ENGINES=1 ./install.sh` or `docker pull <image>`.
 - "aborted: available memory fell below the safety margin during startup": the model needed more than
   estimated, or something else grew. Try a smaller context or fp8 KV cache.
-- **Exit code 137** ("likely out of memory"): the kernel killed the engine. DGXMM adds 10 % to the next
-  estimate for that configuration automatically.
+- **Out of memory** ("out of memory: Docker reports the container was OOM-killed", or "…the kernel OOM
+  killer killed a process"): the kernel killed the engine. DGXMM adds 10 % to the next estimate for that
+  configuration automatically, and the diagnosis is "Out of memory".
+- **Exit code 137 without that** ("killed by SIGKILL"): something sent SIGKILL, such as `docker kill`, or
+  a `docker stop` that timed out. It is not treated as out of memory and does not change estimates.
+
+### A deployment stays `queued`
+
+Only `max_concurrent_startups` (default 1) engines start at a time, and the deployment page says which
+deployment it is waiting for. That start-up ends within `startup_timeout_s` (900 s) by becoming ready or
+failing; then the next queued deployment starts. A queued deployment fails by itself after
+`startup_queue_timeout_s` (30 minutes), or when it no longer fits at its turn. To give up earlier, press
+**Stop** on it (that only leaves the queue). A wake-up that waits (*Waiting to wake up*) gives up after
+`wake_queue_timeout_s` (300 s). After a DGXMM restart, queued deployments re-enter the queue.
 
 ### Gated model: 401/403 from Hugging Face
 
@@ -457,6 +643,45 @@ command shown in the error (the uid:gid are `DGXMM_UID:DGXMM_GID` from `.env`), 
 llmfit only adds scores. Search, fit badges and downloads keep working. Check it with
 `docker exec dgxmm llmfit --version`.
 
+### Decision model not healthy
+
+Start with the chip in the top bar or `docker exec dgxmm python -m dgxmm.admin decider status`. While
+it is not healthy every feature uses its rules, so nothing else is affected.
+
+- **Enable answers `image_missing` or `image_outdated`**: the image `dgxmm-decider:3` is not built, or
+  was built before the selected model was supported. Build it on the Decision model page or with
+  `decider build` (`--force` to rebuild).
+- **"Make room for the decision model"** (`insufficient_memory`): it needs 13 GiB (d3-mini) or 9 GiB
+  (d3-nano). Pick one of the plans, stop something yourself, or switch to d3-nano.
+- **Starting for several minutes**: the first start compiles GPU kernels (2–4 minutes for d3-mini). It
+  becomes healthy only after its warm-up questions.
+- **Failed with exit code 2** ("snapshot missing"): the model files are not in the HF cache. Run
+  `docker exec dgxmm python -m dgxmm.admin decider download` (add `--model vllm-sr/d3-nano` for nano)
+  or press **Download** on the Model card, then **Start**.
+- **Failed with exit code 3** (diagnosis *Decision model files fail the integrity check*): a file of the
+  pinned snapshot no longer matches its hash, for example because something wrote into the HF cache.
+  The decider refuses to run it. `decider download --verify-only` lists the files that differ;
+  `decider download` fetches them again and verifies them; then **Start**.
+- **Failed with exit code 4** (*Decision model key not delivered*): the decider got no key file, or
+  found a key in its environment (a `DECISION_API_KEY` override, which it refuses). Remove any such
+  override, check the DGXMM log for why the key could not be written, then **Disable** and **Enable** so
+  DGXMM starts it again with a fresh key file. **Rotate key** writes a new key if
+  `data/secrets/decider_api_key` is unreadable.
+- **Paused (rules only)**: the circuit breaker opened after three failed questions in a row; it retries
+  after 60 seconds or as soon as a health probe succeeds.
+- **Auto-restart "Gave up — …"**: 5 restart attempts in an hour failed or crashed again (the reason
+  follows the dash, e.g. a missing image or a docker error). Read its Events tab and
+  `docker logs dgxmm-decider`, fix the cause, then press **Retry** (or **Disable** and **Enable**).
+- **Stopped by the watchdog** (Events: "watchdog: …"): memory ran low, or the decider used more than
+  its reservation. The supervisor starts it again after its backoff once memory has recovered.
+
+### `429 rate_limited` from the API
+
+Some routes have per-user limits (see [API limits](configuration.md#api-limits)), for example 10 changes a
+minute on the Decision model page or 30 parser suggestions a minute. The response has a `Retry-After`
+header; wait that many seconds. Plan previews are never refused for this: over the limit they come back
+without a model recommendation. Limits are per DGXMM process and reset when it restarts.
+
 ### Forgot the admin password
 
 Reset it from the host. This works while DGXMM is running:
@@ -506,6 +731,8 @@ uninstall it first.
   are the more reliable figures.
 
 ## Security hardening
+
+See also the threat model in [security.md](security.md).
 
 - **Docker socket = root.** Anyone with the DGXMM admin role can start containers on the host. Only
   make trusted people admins, and give everyone else the `viewer` role.

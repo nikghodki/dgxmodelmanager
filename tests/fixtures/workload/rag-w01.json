@@ -1,0 +1,48 @@
+{
+ "name": "rag-w01",
+ "label": "long_context_rag",
+ "window_minutes": 10,
+ "summary": {
+  "minutes": 10,
+  "idle_fraction": 0.0,
+  "mean_running": 0.775,
+  "peak_running": 0.9166666666666666,
+  "mean_waiting": 0.0,
+  "peak_waiting": 0.0,
+  "queued_fraction": 0.0,
+  "prompt_tps": 1046.0253,
+  "gen_tps": 22.7614,
+  "prompt_gen_ratio": 45.96,
+  "prefix_hit_rate": 0.0034,
+  "spec_accept_rate": null,
+  "kv_usage_mean": 0.0894,
+  "kv_usage_peak": 0.10517670040845321,
+  "ttft_p50": 0.5138,
+  "e2e_p50": 5.9159,
+  "running_min": 0.58,
+  "running_max": 0.92,
+  "running_cv": 0.13,
+  "requests_per_min": 7.9,
+  "prompt_tokens_per_request": 7985,
+  "output_tokens_per_request": 174
+ },
+ "engine": "vllm",
+ "model_ref": "Qwen/Qwen3-0.6B",
+ "config": {
+  "max_model_len": 16384,
+  "max_num_seqs": 8,
+  "max_num_batched_tokens": 4096,
+  "kv_tokens": 16384,
+  "tool_call_parser": "hermes",
+  "reasoning_parser": "qwen3",
+  "enable_prefix_caching": true
+ },
+ "traffic": {
+  "ok": 169,
+  "err": 0,
+  "tool_calls": 0,
+  "prompt_tokens": 1148289,
+  "completion_tokens": 25350
+ },
+ "source": "real minute rollups of a DGXMM test deployment on the DGX Spark, traffic from scripts/decider_eval/traffic.py"
+}

@@ -1,0 +1,49 @@
+{
+ "ref": "RedHatAI/Llama-3.1-8B-Instruct-speculator.eagle3",
+ "architecture": "Eagle3Speculator",
+ "model_type": null,
+ "config": {
+  "architectures": [
+   "Eagle3Speculator"
+  ],
+  "draft_vocab_size": 32000,
+  "speculators_model_type": "eagle3",
+  "transformer_layer_config": {
+   "attention_bias": false,
+   "attention_dropout": 0.0,
+   "head_dim": 128,
+   "hidden_act": "silu",
+   "hidden_size": 4096,
+   "initializer_range": 0.02,
+   "intermediate_size": 14336,
+   "max_position_embeddings": 131072,
+   "mlp_bias": false,
+   "model_type": "llama",
+   "num_attention_heads": 32,
+   "num_hidden_layers": 1,
+   "num_key_value_heads": 8,
+   "pretraining_tp": 1,
+   "rms_norm_eps": 1e-05,
+   "rope_scaling": null,
+   "rope_theta": 500000.0,
+   "torch_dtype": "bfloat16",
+   "use_cache": true,
+   "vocab_size": 128256
+  },
+  "auto_map": {
+   "": "eagle3.Eagle3SpeculatorConfig"
+  }
+ },
+ "files": [
+  ".gitattributes",
+  "README.md",
+  "assets/Llama-3.1-8B-Instruct-HumanEval.png",
+  "assets/Llama-3.1-8B-Instruct-math_reasoning.png",
+  "assets/Llama-3.1-8B-Instruct-summarization.png",
+  "config.json",
+  "eagle3.py",
+  "generation_config.json"
+ ],
+ "weight_files": 1,
+ "template": null
+}

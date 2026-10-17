@@ -52,6 +52,18 @@ describe("deploymentActions", () => {
     expect(deploymentActions(d("stopped"), true)).toEqual(["open", "reconfigure", "start", "remove"]);
     expect(deploymentActions(d("unknown"), true)).toEqual(["open", "stop"]);
   });
+  it("a system deployment (the decision model) is managed on its page: no switch, reconfigure or start", () => {
+    const sys = (state: string) => ({ state, sleep_capable: false, system: true });
+    expect(deploymentActions(sys("ready"), true)).toEqual(["open", "manage", "stop"]);
+    expect(deploymentActions(sys("stopped"), true)).toEqual(["open", "manage", "remove"]);
+    expect(deploymentActions(sys("failed"), true)).toEqual(["open", "manage", "remove"]);
+    expect(deploymentActions(sys("loading"), true)).toEqual(["open", "manage", "stop"]);
+    expect(deploymentActions(sys("ready"), false)).toEqual(["open"]);
+  });
+  it("a queued deployment (waiting for a start-up slot) can only be stopped (cancelled)", () => {
+    expect(deploymentActions(d("queued"), true)).toEqual(["open", "stop"]);
+    expect(deploymentActions(d("queued"), false)).toEqual(["open"]);
+  });
 });
 
 import { submitState } from "./logic";

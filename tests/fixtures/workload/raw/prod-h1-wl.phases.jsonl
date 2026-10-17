@@ -1,0 +1,6 @@
+{"phase": "chat", "start": 1792202660.546517, "end": 1792203740.5506146, "ok": 33, "err": 0, "tool_calls": 0, "prompt_tokens": 5477, "completion_tokens": 8682}
+{"phase": "agent", "start": 1792203740.5511014, "end": 1792204827.6492658, "ok": 347, "err": 0, "tool_calls": 28, "prompt_tokens": 480229, "completion_tokens": 83966}
+{"phase": "batch", "start": 1792204827.649447, "end": 1792205922.5643482, "ok": 1687, "err": 0, "tool_calls": 0, "prompt_tokens": 160571, "completion_tokens": 430976}
+{"phase": "rag", "start": 1792205922.5741553, "end": 1792207006.0051136, "ok": 169, "err": 0, "tool_calls": 0, "prompt_tokens": 1148289, "completion_tokens": 25350}
+{"phase": "mixed", "start": 1792207006.0053148, "end": 1792208096.1097457, "ok": 423, "err": 0, "tool_calls": 6, "prompt_tokens": 232400, "completion_tokens": 106788}
+{"phase": "idle", "start": 1792208096.1101038, "end": 1792209176.1939702, "ok": 0, "err": 0, "tool_calls": 0, "prompt_tokens": 0, "completion_tokens": 0}

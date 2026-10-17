@@ -1,0 +1,33 @@
+{
+ "ref": "BAAI/bge-large-en-v1.5",
+ "architecture": "BertModel",
+ "model_type": "bert",
+ "config": {
+  "architectures": [
+   "BertModel"
+  ],
+  "model_type": "bert",
+  "id2label": {
+   "0": "LABEL_0"
+  },
+  "num_hidden_layers": 24,
+  "hidden_size": 1024,
+  "vocab_size": 30522,
+  "max_position_embeddings": 512
+ },
+ "files": [
+  ".gitattributes",
+  "1_Pooling/config.json",
+  "README.md",
+  "config.json",
+  "config_sentence_transformers.json",
+  "modules.json",
+  "sentence_bert_config.json",
+  "special_tokens_map.json",
+  "tokenizer.json",
+  "tokenizer_config.json",
+  "vocab.txt"
+ ],
+ "weight_files": 3,
+ "template": null
+}

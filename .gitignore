@@ -228,3 +228,9 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# TypeScript must never emit next to the sources (Vite would resolve the stale .js first)
+frontend/src/**/*.js
+frontend/src/**/*.jsx
+frontend/vite.config.js
+*.tsbuildinfo

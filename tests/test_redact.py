@@ -620,3 +620,21 @@ def test_nul_padded_titles_drop_empty_args():
     # empties are collapsed after redaction, so they still count as positionals for it
     out = format_command(["htpasswd", "-b", "f", "", "", S])[0]
     assert S not in out
+
+
+def test_exception_names_are_not_secret_names():
+    """`KeyError: '<message>'` (vLLM's invalid-parser error) is an exception, not a key=value secret: masking it
+    hid the root cause from the diagnosis card and the decision model. Token-shaped values are still masked."""
+    from dgxmm.memory.redact import is_sensitive_name, redact_text
+    line = ("(APIServer pid=1) KeyError: 'invalid tool call parser: qwen3_tools (chose from { deepseek_v3,hermes })'")
+    assert redact_text(line) == line
+    assert redact_text("KeyError: 'model'") == "KeyError: 'model'"
+    assert redact_text("ValueError: max_model_len 131072 is too large") == "ValueError: max_model_len 131072 is too large"
+    assert redact_text("TokenizerError: 'cannot load'") == "TokenizerError: 'cannot load'"
+    # only the `Name: ` form, and never names that carry a secret marker
+    for text, secret in (("SecretKeyError=supersecretvalue99", "supersecretvalue99"),
+                         ("ApiKeyError: mypassword123", "mypassword123"), ("PasswordException: hunter2", "hunter2"),
+                         ("KeyError=hunter2", "hunter2"), ("AuthenticationError: 'bad " + HF + "'", HF)):
+        assert secret not in redact_text(text), text
+    for name in ("api_key", "KEY", "HF_TOKEN", "keyfile", "error_key", "password", "ApiKeyError", "KeyError"):
+        assert is_sensitive_name(name)

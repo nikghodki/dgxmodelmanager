@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { useNavigate, useParams, useSearchParams } from "react-router-dom";
-import { Activity, ArrowLeftRight, FileText, Network, Gauge, Lightbulb, Loader2, MoreHorizontal, Moon, Play, Power, RefreshCw, Settings2, Sun, Trash2 } from "lucide-react";
+import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
+import { Activity, ArrowLeftRight, BrainCircuit, Clock, Cpu, FileText, Network, Gauge, Lightbulb, Loader2, MoreHorizontal, Moon, Play, Power, RefreshCw, Settings2, Sun, Trash2 } from "lucide-react";
 import { api } from "@/api";
 import { useIsAdmin } from "@/auth";
 import { ConfirmDialog } from "@/components/app/confirm-dialog";
@@ -24,10 +24,16 @@ import { engineLabel, fmtBytes, fmtMs, fmtNum } from "@/format";
 import { useActionMutation } from "@/hooks/use-action-mutation";
 import { benchmarkSeries } from "@/lib/benchmarks";
 import { estimateParts } from "@/lib/estimate";
-import { adviceApplicable, deploymentActions } from "@/logic";
+import { SYSTEM_REMOVE_TEXT, adviceApplicable, deploymentActions } from "@/logic";
 import { useLive } from "@/stream";
-import type { Deployment } from "@/types";
+import type { Deployment, Workload } from "@/types";
 import { SwitchDialog } from "@/components/app/switch-dialog";
+import { DecisionChip, SystemBadge } from "@/components/app/decision-chip";
+import { DiagnosisCard, useDiagnosis } from "@/components/app/diagnosis-card";
+
+/** How long after a failure the page says "Diagnosing…" while no (fresh) diagnosis has arrived. */
+const DIAGNOSIS_WAIT_MS = 5 * 60_000;
+import { causeLabel, splitAdvice, workloadLabel, workloadRefetchMs } from "@/lib/decider-labels";
 
 const WINDOWS = ["live", "24h", "7d"] as const;
 const TABS = ["overview", "litellm", "performance", "advice", "benchmarks", "events"];
@@ -66,32 +72,57 @@ function Performance({ id }: { id: number }) {
   );
 }
 
-function Advice({ d, onApply }: { d: Deployment; onApply: (patch: Record<string, any>) => void }) {
+function AdviceCard({ a, d, onApply }: { a: any; d: Deployment; onApply: (patch: Record<string, any>) => void }) {
   const admin = useIsAdmin();
-  const q = useQuery({ queryKey: ["advice", d.id], queryFn: () => api<any[]>(`/deployments/${d.id}/advice`), refetchInterval: 60000 });
-  if (q.error) return <ErrorState error={q.error} onRetry={() => q.refetch()} />;
-  if (!q.data?.length) return <EmptyState icon={Lightbulb} title="No suggestions right now" description="Advice appears as DGXMM collects metrics and benchmarks for this deployment." />;
   const tone = (s: string) => (s === "critical" ? "bg-status-critical-bg text-status-critical" : s === "warning" ? "bg-status-warning-bg text-status-warning" : s === "info" ? "bg-status-neutral-bg text-status-neutral" : "bg-primary/10 text-primary");
   return (
-    <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-      {q.data.map((a) => (
-        <Card key={a.id} className="min-w-0 shadow-card">
-          <CardHeader className="space-y-1.5 pb-2">
-            <div className="flex flex-wrap items-center gap-2">
-              <span className={`rounded-full px-2 py-0.5 text-[11px] font-medium capitalize ${tone(a.severity)}`}>{a.severity}</span>
-              <Badge variant="outline" className="text-[11px]">{a.confidence}</Badge>
-            </div>
-            <CardTitle className="text-sm">{a.title}</CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-2 text-sm">
-            <p className="text-muted-foreground">{a.rationale}</p>
-            <p className="text-xs"><span className="text-muted-foreground">Expected:</span> {a.expected_effect}</p>
-            {admin && adviceApplicable(a, d) && (
-              <Button size="sm" variant="outline" onClick={() => onApply({ ...(a.patch ?? {}), ...(a.model_ref ? { model_ref: a.model_ref } : {}) })}>Apply…</Button>
-            )}
-          </CardContent>
-        </Card>
-      ))}
+    <Card className="min-w-0 shadow-card">
+      <CardHeader className="space-y-1.5 pb-2">
+        <div className="flex flex-wrap items-center gap-2">
+          <span className={`rounded-full px-2 py-0.5 text-[11px] font-medium capitalize ${tone(a.severity)}`}>{a.severity}</span>
+          <Badge variant="outline" className="text-[11px]">{a.confidence}</Badge>
+        </div>
+        <CardTitle className="text-sm">{a.title}</CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-2 text-sm">
+        <p className="text-muted-foreground">{a.rationale}</p>
+        <p className="text-xs"><span className="text-muted-foreground">Expected:</span> {a.expected_effect}</p>
+        {admin && adviceApplicable(a, d) && (
+          <Button size="sm" variant="outline" onClick={() => onApply({ ...(a.patch ?? {}), ...(a.model_ref ? { model_ref: a.model_ref } : {}) })}>Apply…</Button>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+/** Advice arrives ordered by `relevance` for the deployment's workload (server-side); with a known workload the
+ *  relevant items get their own heading. */
+function Advice({ d, onApply }: { d: Deployment; onApply: (patch: Record<string, any>) => void }) {
+  const wl = useQuery({ queryKey: ["workload", d.id], queryFn: () => api<Workload | null>(`/deployments/${d.id}/workload`), retry: false,
+    refetchInterval: (query) => workloadRefetchMs(query.state.data) });
+  const workload = wl.data && wl.data.source !== "none" && wl.data.label ? wl.data : null;
+  // Keyed by the workload label: once the background computation lands, the advice is re-fetched in its order.
+  const q = useQuery({ queryKey: ["advice", d.id, workload?.label ?? null], queryFn: () => api<any[]>(`/deployments/${d.id}/advice`),
+    refetchInterval: 60000, placeholderData: (prev) => prev });
+  if (q.error) return <ErrorState error={q.error} onRetry={() => q.refetch()} />;
+  const badge = workload && (
+    <DecisionChip source={workload.source} confidence={workload.confidence} prefix={`Workload: ${workloadLabel(workload.label)}`}
+      className="text-xs" title={workload.source === "model" ? "Workload classified by the decision model from this deployment's metrics" : "Workload from this deployment's metrics"} />
+  );
+  if (!q.data?.length) return (
+    <div className="space-y-3">{badge && <div>{badge}</div>}
+      <EmptyState icon={Lightbulb} title="No suggestions right now" description="Advice appears as DGXMM collects metrics and benchmarks for this deployment." /></div>
+  );
+  const { top, rest } = splitAdvice(q.data, !!workload);
+  const grid = (items: any[]) => <div className="grid grid-cols-1 gap-3 md:grid-cols-2">{items.map((a) => <AdviceCard key={a.id} a={a} d={d} onApply={onApply} />)}</div>;
+  const heading = (t: string) => <h3 className="text-xs font-medium uppercase tracking-wider text-muted-foreground">{t}</h3>;
+  return (
+    <div className="space-y-3">
+      {badge && <div>{badge}</div>}
+      {top.length ? <>
+        {heading("Most relevant for this workload")}{grid(top)}
+        <div className="border-t pt-3">{heading("Other suggestions")}</div>{grid(rest)}
+      </> : grid(rest)}
     </div>
   );
 }
@@ -166,8 +197,9 @@ export function DeploymentDetail() {
   const nav = useNavigate();
   const dep = useQuery({ queryKey: ["deployment", id], queryFn: () => api<Deployment>(`/deployments/${id}`) });
   const litellm = useDeploymentLiteLLM(id);
+  const diagnosis = useDiagnosis(id).data?.diagnosis ?? null;
   const [logs, setLogs] = useState(false);
-  const [dialog, setDialog] = useState<null | { mode: "switch" | "reconfigure"; patch?: Record<string, any> }>(null);
+  const [dialog, setDialog] = useState<null | { mode: "switch" | "reconfigure"; patch?: Record<string, any>; source?: string }>(null);
   const [confirm, setConfirm] = useState<null | "stop" | "remove">(null);
   const act = useActionMutation((action: string) => api(`/deployments/${id}/${action}`, { method: "POST" }), {
     success: (_r, a) => `${a[0].toUpperCase()}${a.slice(1)} requested`, invalidate: [["deployment", id], ["deployments"]],
@@ -189,16 +221,23 @@ export function DeploymentDetail() {
   const icon = (a: string, Icon: typeof Moon) => (act.isPending && act.variables === a
     ? <Loader2 className="mr-1 h-4 w-4 animate-spin" aria-hidden /> : <Icon className="mr-1 h-4 w-4" />);
   const parts = estimateParts(d.estimate ?? {});
+  const applyFix = acts.includes("reconfigure") ? (patch: Record<string, unknown>) => setDialog({ mode: "reconfigure", patch, source: "the diagnosis" }) : undefined;
+  // A diagnosis older than the latest failure belongs to an earlier failure: the current one is still being diagnosed.
+  const failedAt = Math.max(0, ...(d.events ?? []).filter((e) => e.to === "failed").map((e) => Date.parse(e.ts) || 0));
+  const staleDiagnosis = !!diagnosis && failedAt > 0 && (Date.parse(diagnosis.created_at) || 0) < failedAt;
+  const currentDiagnosis = d.state === "failed" && diagnosis && !staleDiagnosis ? diagnosis : null;
+  const diagnosing = d.state === "failed" && !currentDiagnosis && failedAt > 0 && Date.now() - failedAt < DIAGNOSIS_WAIT_MS;
 
   return (
     <div className="space-y-6">
       <PageHeader
-        title={<span className="flex items-center gap-3">{d.name}<StatusBadge state={d.state} /></span>}
+        title={<span className="flex items-center gap-3">{d.name}<StatusBadge state={d.state} />{d.system && <SystemBadge />}</span>}
         description={<span className="break-all">{d.model_ref} · {engineLabel(d.engine)}</span>}
         actions={<>
           {acts.includes("sleep") && <Button variant="outline" size="sm" disabled={busy} onClick={() => act.mutate("sleep")}>{icon("sleep", Moon)}Sleep</Button>}
           {acts.includes("wake") && <Button variant="outline" size="sm" disabled={busy} onClick={() => act.mutate("wake")}>{icon("wake", Sun)}Wake</Button>}
           {acts.includes("start") && <Button size="sm" disabled={busy} onClick={() => act.mutate("start")}>{icon("start", Play)}Start</Button>}
+          {acts.includes("manage") && <Button asChild variant="outline" size="sm"><Link to="/decision-model"><BrainCircuit className="mr-1 h-4 w-4" />Decision model page</Link></Button>}
           {acts.includes("reconfigure") && <Button variant="outline" size="sm" disabled={busy} onClick={() => setDialog({ mode: "reconfigure" })}><Settings2 className="mr-1 h-4 w-4" />Reconfigure</Button>}
           {admin && <Button variant="outline" size="sm" onClick={() => setLogs(true)}><FileText className="mr-1 h-4 w-4" />Logs</Button>}
           {(acts.includes("stop") || acts.includes("remove") || acts.includes("switch")) && (
@@ -214,7 +253,21 @@ export function DeploymentDetail() {
           )}
         </>}
       />
+      {d.startup_queue && (
+        <p role="status" className="flex items-start gap-2 rounded-lg border bg-muted/50 px-4 py-3 text-sm text-muted-foreground">
+          <Clock aria-hidden className="mt-0.5 h-4 w-4 shrink-0" />
+          <span><span className="font-medium text-foreground">{d.startup_queue.kind === "wake" ? "Waiting to wake up" : "Queued"}: </span>
+            {d.startup_queue.reason}. Its memory stays reserved{d.startup_queue.kind === "wake" ? "" : " and the fit is checked again when its turn comes"}.</span>
+        </p>
+      )}
       {d.last_error && <ErrorState error={new Error(d.last_error)} />}
+      <p aria-live="polite" data-diagnosis-live className="sr-only">{currentDiagnosis ? `Diagnosis: ${currentDiagnosis.source === "none" || !currentDiagnosis.cause ? "not confident" : causeLabel(currentDiagnosis.cause, currentDiagnosis.label)}` : ""}</p>
+      {d.system && (
+        <p className="flex items-start gap-2 rounded-lg border bg-muted/50 px-4 py-3 text-sm text-muted-foreground">
+          <Cpu aria-hidden className="mt-0.5 h-4 w-4 shrink-0" />
+          <span>Used by the decision model and managed on the Decision model page. Plans never stop or sleep it to make room, and it is not registered in LiteLLM. Under memory pressure the watchdog stops it before any of your deployments (and always when it uses far more memory than it reserved, even with auto-protect off); the AI suggestions fall back to rules until it runs again.</span>
+        </p>
+      )}
       <ModelNameTaken error={act.error} fixHref={admin ? nameFixHref(d) : undefined} fixLabel={`Set a model name for ${d.name}`} />
 
       <Tabs value={tab} onValueChange={(t) => setParams(t === "overview" ? {} : { tab: t }, { replace: true })}>
@@ -228,6 +281,8 @@ export function DeploymentDetail() {
         </TabsList>
 
         <TabsContent value="overview" className="mt-4 grid grid-cols-1 gap-4 lg:grid-cols-3">
+          {currentDiagnosis && <DiagnosisCard diagnosis={currentDiagnosis} admin={admin} className="lg:col-span-3" onApplyFix={applyFix} />}
+          {diagnosing && <p className="flex items-center gap-2 text-sm text-muted-foreground lg:col-span-3"><Loader2 aria-hidden className="h-4 w-4 animate-spin" />Diagnosing…</p>}
           <ApiAccessCard d={d} info={litellm.data} loading={litellm.isLoading} error={litellm.error} />
           <Card className="min-w-0 shadow-card">
             <CardHeader className="pb-2"><CardTitle className="text-sm">Memory</CardTitle>
@@ -250,9 +305,10 @@ export function DeploymentDetail() {
 
         <TabsContent value="litellm" className="mt-4"><LiteLLMTab d={d} info={litellm.data} loading={litellm.isLoading} error={litellm.error} admin={admin} suggested={params.get("alias")} onRenamed={() => act.reset()} /></TabsContent>
         <TabsContent value="performance" className="mt-4"><Performance id={id} /></TabsContent>
-        <TabsContent value="advice" className="mt-4"><Advice d={d} onApply={(patch) => setDialog({ mode: "reconfigure", patch })} /></TabsContent>
+        <TabsContent value="advice" className="mt-4"><Advice d={d} onApply={(patch) => setDialog({ mode: "reconfigure", patch, source: "the advice" })} /></TabsContent>
         <TabsContent value="benchmarks" className="mt-4"><Benchmarks d={d} /></TabsContent>
-        <TabsContent value="events" className="mt-4">
+        <TabsContent value="events" className="mt-4 space-y-4">
+          {diagnosis && <DiagnosisCard diagnosis={diagnosis} admin={admin} onApplyFix={d.state === "failed" ? applyFix : undefined} />}
           <Card className="shadow-card"><CardContent className="p-0">
             <ol className="divide-y">
               {(d.events ?? []).map((e, i) => (
@@ -274,11 +330,11 @@ export function DeploymentDetail() {
       {admin && <LogsSheet id={id} open={logs} onOpenChange={setLogs} />}
       <ConfirmDialog open={!!confirm} onOpenChange={(o) => !o && setConfirm(null)}
         title={confirm === "stop" ? `Stop ${d.name}?` : `Remove ${d.name}?`}
-        description={confirm === "stop" ? "The container is stopped and its memory released." : "Its settings, events and history are deleted. This cannot be undone."}
-        confirmLabel={confirm === "stop" ? "Stop" : "Remove"} destructive pending={act.isPending || remove.isPending}
+        description={confirm === "stop" ? "The container is stopped and its memory released." : `Its settings, events and history are deleted. This cannot be undone.${d.system ? ` ${SYSTEM_REMOVE_TEXT}` : ""}`}
+        confirmLabel={confirm === "stop" ? "Stop" : d.system ? "Remove and turn off" : "Remove"} destructive pending={act.isPending || remove.isPending}
         requireText={confirm === "stop" && d.state === "ready" ? d.name : undefined}
         onConfirm={() => { if (confirm === "stop") act.mutate("stop", { onSettled: () => setConfirm(null) }); else remove.mutate(undefined); }} />
-      {dialog && <SwitchDialog mode={dialog.mode} deployment={d} initialPatch={dialog.patch} onClose={() => setDialog(null)} />}
+      {dialog && <SwitchDialog mode={dialog.mode} deployment={d} initialPatch={dialog.patch} patchSource={dialog.source} onClose={() => setDialog(null)} />}
     </div>
   );
 }

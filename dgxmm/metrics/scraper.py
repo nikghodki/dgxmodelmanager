@@ -15,6 +15,7 @@ class MetricsScraper:
                  clock: Callable[[], float] = time.time):
         self.settings, self.deployer, self.http, self.store = settings, deployer, http, store
         self.events, self.budget, self.clock = events, budget, clock
+        self.retention: list[Callable[[], object]] = []  # run after each rollup, in the same worker thread
 
     async def scrape_once(self) -> dict[int, dict]:
         now = self.clock()
@@ -23,6 +24,8 @@ class MetricsScraper:
             if v["state"] != "ready" or not v["port"]:
                 continue
             engine = self.deployer.engines.get(v["engine"])
+            if engine is None or not getattr(engine, "scrape_metrics", True):
+                continue  # e.g. the decision model: no /metrics
             try:
                 r = await self.http.get(self.deployer.base_url(v["name"], v["port"]) + "/metrics", timeout=5)
                 r.raise_for_status()
@@ -37,13 +40,21 @@ class MetricsScraper:
             self.events.publish("metrics", out)
         return out
 
+    def _rollup(self) -> None:
+        self.store.rollup()
+        for fn in self.retention:
+            try:
+                fn()
+            except Exception:
+                log.exception("retention pass failed")
+
     async def run(self) -> None:
         last_rollup = self.clock()
         while True:
             try:
                 await self.scrape_once()
                 if self.clock() - last_rollup >= 60:
-                    await asyncio.to_thread(self.store.rollup)
+                    await asyncio.to_thread(self._rollup)
                     last_rollup = self.clock()
             except Exception:
                 log.exception("metrics loop failed")

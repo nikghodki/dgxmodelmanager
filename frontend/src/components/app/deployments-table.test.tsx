@@ -50,6 +50,23 @@ describe("DeploymentsTable", () => {
     expect((await screen.findAllByText(/same model name/)).length).toBeGreaterThan(0);
   });
 
+  it("shows no LiteLLM registration badge for a system deployment, and manages it on the Decision model page", async () => {
+    const qc = new QueryClient();
+    qc.setQueryData(["live", 1], []);
+    render(
+      <QueryClientProvider client={qc}><MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}><TooltipProvider delayDuration={0}>
+        <DeploymentsTable isAdmin onSwitch={vi.fn()} onReconfigure={vi.fn()}
+          deployments={[{ id: 1, name: "decider", engine: "decision", model_ref: "vllm-sr/d3-mini", state: "ready", reserved_bytes: 1, actual_bytes: 1, litellm_status: "none", model_name: null, served_name: "d3-mini", alias: null, sleep_capable: false, last_error: null, system: true } as any]} />
+      </TooltipProvider></MemoryRouter></QueryClientProvider>,
+    );
+    expect(screen.queryByText("Not registered")).toBeNull();
+    expect(screen.queryByText("d3-mini")).toBeNull();
+    expect(screen.getAllByTitle("System deployments aren't registered in LiteLLM").length).toBeGreaterThan(0);
+    await userEvent.click(screen.getByRole("button", { name: "Actions for decider" }));
+    expect(await screen.findByRole("menuitem", { name: /Decision model page/ })).toBeInTheDocument();
+    for (const name of [/Switch model/, /Reconfigure/, /Start/]) expect(screen.queryByRole("menuitem", { name })).toBeNull();
+  });
+
   function renderRow(row: Record<string, unknown>) {
     const qc = new QueryClient();
     qc.setQueryData(["live", 1], []);
@@ -78,5 +95,30 @@ describe("DeploymentsTable", () => {
   it("keeps a plain badge without a LiteLLM error", () => {
     renderRow({ litellm_status: "synced", litellm_error: null });
     expect(screen.getByText("Synced").closest("[tabindex]")).toBeNull();
+  });
+
+  it("marks system deployments with a System badge", () => {
+    const qc = new QueryClient();
+    qc.setQueryData(["live", 1], []); qc.setQueryData(["live", 2], []);
+    render(
+      <QueryClientProvider client={qc}><MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}><TooltipProvider>
+        <DeploymentsTable isAdmin={false} onSwitch={vi.fn()} onReconfigure={vi.fn()}
+          deployments={[
+            { id: 1, name: "decider", engine: "decision", model_ref: "vllm-sr/d3-mini", state: "ready", reserved_bytes: 1, actual_bytes: 1, litellm_status: "disabled", sleep_capable: false, last_error: null, system: true } as any,
+            { id: 2, name: "chat", engine: "vllm", model_ref: "org/m", state: "ready", reserved_bytes: 1, actual_bytes: 1, litellm_status: "synced", sleep_capable: false, last_error: null } as any,
+          ]} />
+      </TooltipProvider></MemoryRouter></QueryClientProvider>,
+    );
+    expect(screen.getByText("decider").closest("tr")!.textContent).toContain("System");
+    expect(screen.getByText("chat").closest("tr")!.textContent).not.toContain("System");
+  });
+
+  it("shows why a queued deployment waits, as text and in a tooltip", async () => {
+    renderRow({ state: "queued", startup_queue: { position: 1, waiting_for: ["decider"], kind: "launch", since: 0, limit: 1,
+      reason: "waiting for decider to finish starting before it can start (one engine starts at a time)" } });
+    expect(screen.getByText("Queued")).toBeInTheDocument();
+    expect(screen.getByText(/Waiting for decider/)).toBeInTheDocument();
+    await userEvent.hover(screen.getByText("Queued"));
+    expect((await screen.findAllByText(/one engine starts at a time/)).length).toBeGreaterThan(0);
   });
 });

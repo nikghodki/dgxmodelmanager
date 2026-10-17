@@ -83,8 +83,8 @@ describe("LiteLLM page", () => {
     const pub = await screen.findByLabelText("Public endpoint URL");
     await userEvent.clear(pub);
     expect(screen.getByTestId("endpoint-preview")).toHaveTextContent("http://litellm-proxy:4000/v1");
-    await userEvent.type(pub, "http://10.0.0.5:4000/");
-    expect(screen.getByTestId("endpoint-preview")).toHaveTextContent("http://10.0.0.5:4000/v1");
+    await userEvent.type(pub, "http://198.51.100.5:4000/");
+    expect(screen.getByTestId("endpoint-preview")).toHaveTextContent("http://198.51.100.5:4000/v1");
   });
 
   it("never renders the master key: a replaced key is sent once and the field is cleared", async () => {

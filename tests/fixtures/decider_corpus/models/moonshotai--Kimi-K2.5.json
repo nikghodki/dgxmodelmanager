@@ -1,0 +1,120 @@
+{
+ "ref": "moonshotai/Kimi-K2.5",
+ "architecture": "KimiK25ForConditionalGeneration",
+ "model_type": "kimi_k25",
+ "config": {
+  "architectures": [
+   "KimiK25ForConditionalGeneration"
+  ],
+  "model_type": "kimi_k25",
+  "vision_config": {
+   "_attn_implementation": "flash_attention_2",
+   "init_pos_emb_height": 64,
+   "init_pos_emb_time": 4,
+   "init_pos_emb_width": 64,
+   "merge_kernel_size": [
+    2,
+    2
+   ],
+   "merge_type": "sd2_tpool",
+   "mm_hidden_size": 1152,
+   "mm_projector_type": "patchmerger",
+   "patch_size": 14,
+   "pos_emb_type": "divided_fixed",
+   "projector_hidden_act": "gelu",
+   "projector_ln_eps": 1e-05,
+   "text_hidden_size": 7168,
+   "video_attn_type": "spatial_temporal",
+   "vt_hidden_size": 1152,
+   "vt_intermediate_size": 4304,
+   "vt_num_attention_heads": 16,
+   "vt_num_hidden_layers": 27
+  },
+  "text_config": {
+   "_name_or_path": "",
+   "add_cross_attention": false,
+   "architectures": [
+    "DeepseekV3ForCausalLM"
+   ],
+   "attention_bias": false,
+   "attention_dropout": 0.0,
+   "auto_map": [
+    "AutoConfig",
+    "AutoModel",
+    "AutoModelForCausalLM"
+   ],
+   "aux_loss_alpha": 0.001,
+   "bad_words_ids": null,
+   "begin_suppress_tokens": null,
+   "bos_token_id": 163584,
+   "chunk_size_feed_forward": 0,
+   "cross_attention_hidden_size": null,
+   "decoder_start_token_id": null,
+   "diversity_penalty": 0.0,
+   "do_sample": false,
+   "dtype": "bfloat16",
+   "early_stopping": false,
+   "encoder_no_repeat_ngram_size": 0,
+   "eos_token_id": 163585,
+   "ep_size": 1,
+   "exponential_decay_length_penalty": null,
+   "finetuning_task": null,
+   "first_k_dense_replace": 1,
+   "forced_bos_token_id": null,
+   "forced_eos_token_id": null,
+   "hidden_act": "silu",
+   "hidden_size": 7168,
+   "id2label": [
+    "0",
+    "1"
+   ],
+   "initializer_range": 0.02,
+   "intermediate_size": 18432,
+   "is_decoder": false,
+   "is_encoder_decoder": false,
+   "kv_lora_rank": 512,
+   "label2id": [
+    "LABEL_0",
+    "LABEL_1"
+   ],
+   "length_penalty": 1.0,
+   "max_length": 20,
+   "max_position_embeddings": 262144,
+   "min_length": 0,
+   "model_type": "kimi_k2",
+   "moe_intermediate_size": 2048
+  },
+  "auto_map": {
+   "AutoConfig": "configuration_kimi_k25.KimiK25Config",
+   "AutoModel": "modeling_kimi_k25.KimiK25ForConditionalGeneration",
+   "AutoModelForCausalLM": "modeling_kimi_k25.KimiK25ForConditionalGeneration"
+  }
+ },
+ "files": [
+  ".gitattributes",
+  "LICENSE",
+  "README.md",
+  "THIRD_PARTY_NOTICES.md",
+  "chat_template.jinja",
+  "config.json",
+  "configuration_deepseek.py",
+  "configuration_kimi_k25.py",
+  "docs/deploy_guidance.md",
+  "figures/demo_video.mp4",
+  "figures/kimi-logo.png",
+  "generation_config.json",
+  "kimi_k25_processor.py",
+  "kimi_k25_vision_processing.py",
+  "media_utils.py",
+  "model.safetensors.index.json",
+  "modeling_deepseek.py",
+  "modeling_kimi_k25.py",
+  "preprocessor_config.json",
+  "tiktoken.model",
+  "tokenization_kimi.py",
+  "tokenizer_config.json",
+  "tool_declaration_ts.py"
+ ],
+ "weight_files": 64,
+ "template": "{%- macro render_content(msg) -%}\n    {%- set c = msg.get('content') -%}\n    {%- if c is string -%}\n      {{ c }}\n    {%- elif c is not none -%}\n      {% for content in c -%}\n        {% if content['type'] == 'image' or content['type'] == 'image_url' -%}\n          <|media_begin|>image<|media_content|><|media_pad|><|media_end|>\n        {% elif content['type'] == 'video' or content['type']== 'video_url'-%}\n          <|kimi_k25_video_placeholder|>\n        {% else -%}\n          {{ content['text'] }}\n        {%- endif -%}\n      {%- endfor -%}\n    {%- endif -%}\n{%- endmacro -%}\n\n{% macro set_roles(message) -%}\n  {%- set role_name =  message.get('name') or  message['role'] -%}\n  {%- if message['role'] == 'user' -%}\n    <|im_user|>{{role_name}}<|im_middle|>\n  {%- elif message['role'] == 'assistant' -%}\n    <|im_assistant|>{{role_name}}<|im_middle|>\n  {%- else -%}\n    <|im_system|>{{role_name}}<|im_middle|>\n  {%- endif -%}\n{%- endmacro -%}\n\n\n{%- macro render_toolcalls(message) -%}\n  <|tool_calls_section_begin|>\n  {%- for tool_call in message['tool_calls'] -%}\n    {%- set formatted_id = tool_call['id'] -%}\n    <|tool_call_begin|>{{ formatted_id }}<|tool_call_argument_begin|>{% if tool_call['function']['arguments'] is string %}{{ tool_call['function']['arguments'] }}{% else %}{{ tool_call['function']['arguments'] | tojson }}{% endif %}<|tool_call_end|>\n  {%- endfor -%}\n  <|tool_calls_section_end|>\n{%- endmacro -%}\n\n\n{# Find last non-tool-call assisitant message #}\n{%- set ns = namespace(last_non_tool_call_assistant_msg=-1) -%}\n{%- for idx in range(messages|length-1, -1, -1) -%}\n    {%- if messages[idx]['role'] == 'assistant' and not messages[idx].get('tool_calls') -%}\n        {%- set ns.last_non_tool_call_assistant_msg = idx -%}\n        {%- break -%}\n    {%- endif -%}\n{%- endfor -%}\n\n{# split all messages into history & suffix, reasoning_content in suffix should be reserved.#}\n{%- set hist_msgs = messages[:ns.last_non_tool_call_assistant_msg+1] -%}\n{%- set suffix_msgs = messages[ns.last_non_tool_call_assistant_msg+1:] -%}\n\n{%- if tools -%}\n  {%- if tools_ts_str -%}\n    <|im_system|>tool_declare<|im_middle|>{{ tools_ts_str }}<|im_end|>\n  {%- else -%}\n    <|im_system|>tool_declare<|im_middle|>{{ tools | tojson(separators=(',', ':')) }}<|im_end|>\n  {%- endif -%}\n{%- endif -%}\n  \n{%- for message in hist_msgs -%}\n  {{set_roles(message)}}\n  {%- if message['role'] == 'assistant' -%}\n    <think></think>{{render_content(message)}}\n    {%- if message.get('tool_calls') -%}\n      {{render_toolcalls(message)}}\n    {%- endif -%}\n  {%- elif message['role'] == 'tool' -%}\n    {%- set tool_call_id = message.tool_call_id -%}\n    ## Return of {{ tool_call_id }}\n{{render_content(message)}}\n  {%- elif message['content'] is not none -%}\n    {{render_content(message)}}\n  {%- endif -%}\n  <|im_end|>\n{%- endfor -%}\n\n{%- for message in suffix_msgs -%}\n  {{set_roles(message)}}\n  {%- if message['role'] == 'assistant' -%}\n    {%- if thinking is defined and thinking is false -%}\n    <think></think>{{render_content(message)}}\n    {%- else -%}\n    {%- set rc = message.get('reasoning_content', '') -%}\n    <think>{{rc}}</think>{{render_content(message)}}\n    {%- endif -%}\n    {%- if message.get('tool_calls') -%}\n     {{render_toolcalls(message)}}\n    {%- endif -%}\n  {%- elif message['role'] == 'tool' -%}\n    {%- set tool_call_id = message.tool_call_id -%}\n    ## Return of {{ tool_call_id }}\n{{render_content(message)}}\n  {%- elif message['content'] is not none -%}\n    {{render_content(message)}}\n  {%- endif -%}\n  <|im_end|>\n{%- endfor -%}\n\n\n{%- if add_generation_prompt -%}\n  <|im_assistant|>assistant<|im_middle|>\n  {%- if thinking is defined and thinking is false -%}\n  <think></think>\n  {%- else -%}\n  <think>\n  {%- endif -%}\n{%- endif -%}"
+}

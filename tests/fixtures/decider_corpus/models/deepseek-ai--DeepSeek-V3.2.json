@@ -1,0 +1,49 @@
+{
+ "ref": "deepseek-ai/DeepSeek-V3.2",
+ "architecture": "DeepseekV32ForCausalLM",
+ "model_type": "deepseek_v32",
+ "config": {
+  "architectures": [
+   "DeepseekV32ForCausalLM"
+  ],
+  "model_type": "deepseek_v32",
+  "num_hidden_layers": 61,
+  "hidden_size": 7168,
+  "vocab_size": 129280,
+  "num_nextn_predict_layers": 1,
+  "max_position_embeddings": 163840
+ },
+ "files": [
+  ".gitattributes",
+  "LICENSE",
+  "README.md",
+  "assets/benchmark.png",
+  "assets/olympiad_cases/CMO2025.jsonl",
+  "assets/olympiad_cases/IMO2025.jsonl",
+  "assets/olympiad_cases/ioi_submissions_final.json",
+  "assets/olympiad_cases/wf_submissions.json",
+  "assets/paper.pdf",
+  "config.json",
+  "encoding/encoding_dsv32.py",
+  "encoding/test_encoding_dsv32.py",
+  "encoding/test_input.json",
+  "encoding/test_input_search_w_date.json",
+  "encoding/test_input_search_wo_date.json",
+  "encoding/test_output.txt",
+  "encoding/test_output_search_w_date.txt",
+  "encoding/test_output_search_wo_date.txt",
+  "generation_config.json",
+  "inference/README.md",
+  "inference/config_671B_v3.2.json",
+  "inference/convert.py",
+  "inference/generate.py",
+  "inference/kernel.py",
+  "inference/model.py",
+  "inference/requirements.txt",
+  "model.safetensors.index.json",
+  "tokenizer.json",
+  "tokenizer_config.json"
+ ],
+ "weight_files": 163,
+ "template": null
+}

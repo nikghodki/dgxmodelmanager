@@ -1,0 +1,39 @@
+{
+ "ref": "protectai/deberta-v3-base-prompt-injection-v2",
+ "architecture": "DebertaV2ForSequenceClassification",
+ "model_type": "deberta-v2",
+ "config": {
+  "architectures": [
+   "DebertaV2ForSequenceClassification"
+  ],
+  "model_type": "deberta-v2",
+  "id2label": {
+   "0": "SAFE",
+   "1": "INJECTION"
+  },
+  "num_hidden_layers": 12,
+  "hidden_size": 768,
+  "vocab_size": 128100,
+  "max_position_embeddings": 512
+ },
+ "files": [
+  ".gitattributes",
+  "LICENSE",
+  "README.md",
+  "added_tokens.json",
+  "config.json",
+  "deberta-v3-base-prompt-injection-v2_emissions.csv",
+  "onnx/added_tokens.json",
+  "onnx/config.json",
+  "onnx/special_tokens_map.json",
+  "onnx/spm.model",
+  "onnx/tokenizer.json",
+  "onnx/tokenizer_config.json",
+  "special_tokens_map.json",
+  "spm.model",
+  "tokenizer.json",
+  "tokenizer_config.json"
+ ],
+ "weight_files": 3,
+ "template": null
+}

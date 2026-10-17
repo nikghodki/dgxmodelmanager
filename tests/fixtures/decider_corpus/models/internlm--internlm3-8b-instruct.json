@@ -1,0 +1,36 @@
+{
+ "ref": "internlm/internlm3-8b-instruct",
+ "architecture": "InternLM3ForCausalLM",
+ "model_type": "internlm3",
+ "config": {
+  "architectures": [
+   "InternLM3ForCausalLM"
+  ],
+  "model_type": "internlm3",
+  "num_hidden_layers": 48,
+  "hidden_size": 4096,
+  "vocab_size": 128512,
+  "max_position_embeddings": 32768,
+  "auto_map": {
+   "AutoConfig": "configuration_internlm3.InternLM3Config",
+   "AutoModel": "modeling_internlm3.InternLM3Model",
+   "AutoModelForCausalLM": "modeling_internlm3.InternLM3ForCausalLM"
+  }
+ },
+ "files": [
+  ".gitattributes",
+  "LICENSE.txt",
+  "README.md",
+  "config.json",
+  "configuration_internlm3.py",
+  "generation_config.json",
+  "model.safetensors.index.json",
+  "modeling_internlm3.py",
+  "special_tokens_map.json",
+  "tokenization_internlm3.py",
+  "tokenizer.model",
+  "tokenizer_config.json"
+ ],
+ "weight_files": 2,
+ "template": "{{ bos_token }}{% for message in messages %}{{'<|im_start|>' + message['role'] + '\n' + message['content'] + '<|im_end|>' + '\n'}}{% endfor %}{% if add_generation_prompt %}{{ '<|im_start|>assistant\n' }}{% endif %}"
+}

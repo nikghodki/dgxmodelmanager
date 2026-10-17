@@ -1,0 +1,48 @@
+{
+ "name": "idle-w03",
+ "label": "idle",
+ "window_minutes": 10,
+ "summary": {
+  "minutes": 10,
+  "idle_fraction": 1.0,
+  "mean_running": null,
+  "peak_running": 0.0,
+  "mean_waiting": null,
+  "peak_waiting": 0.0,
+  "queued_fraction": null,
+  "prompt_tps": null,
+  "gen_tps": null,
+  "prompt_gen_ratio": null,
+  "prefix_hit_rate": null,
+  "spec_accept_rate": null,
+  "kv_usage_mean": null,
+  "kv_usage_peak": 0.0,
+  "ttft_p50": null,
+  "e2e_p50": null,
+  "running_min": null,
+  "running_max": null,
+  "running_cv": null,
+  "requests_per_min": null,
+  "prompt_tokens_per_request": null,
+  "output_tokens_per_request": null
+ },
+ "engine": "vllm",
+ "model_ref": "Qwen/Qwen3-0.6B",
+ "config": {
+  "max_model_len": 16384,
+  "max_num_seqs": 8,
+  "max_num_batched_tokens": 4096,
+  "kv_tokens": 16384,
+  "tool_call_parser": "hermes",
+  "reasoning_parser": "qwen3",
+  "enable_prefix_caching": true
+ },
+ "traffic": {
+  "ok": 0,
+  "err": 0,
+  "tool_calls": 0,
+  "prompt_tokens": 0,
+  "completion_tokens": 0
+ },
+ "source": "real minute rollups of a DGXMM test deployment on the DGX Spark, traffic from scripts/decider_eval/traffic.py"
+}

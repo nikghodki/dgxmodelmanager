@@ -1,0 +1,27 @@
+{
+ "ref": "mistralai/Magistral-Small-2506",
+ "architecture": "MistralForCausalLM",
+ "model_type": "mistral",
+ "config": {
+  "architectures": [
+   "MistralForCausalLM"
+  ],
+  "model_type": "mistral",
+  "num_hidden_layers": 40,
+  "hidden_size": 5120,
+  "vocab_size": 131072,
+  "max_position_embeddings": 40960
+ },
+ "files": [
+  ".gitattributes",
+  "README.md",
+  "SYSTEM_PROMPT.txt",
+  "config.json",
+  "generation_config.json",
+  "model.safetensors.index.json",
+  "params.json",
+  "tekken.json"
+ ],
+ "weight_files": 11,
+ "template": null
+}

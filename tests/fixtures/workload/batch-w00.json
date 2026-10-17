@@ -1,0 +1,48 @@
+{
+ "name": "batch-w00",
+ "label": "batch_throughput",
+ "window_minutes": 10,
+ "summary": {
+  "minutes": 10,
+  "idle_fraction": 0.0,
+  "mean_running": 7.95,
+  "peak_running": 8.0,
+  "mean_waiting": 15.95,
+  "peak_waiting": 16.0,
+  "queued_fraction": 1.0,
+  "prompt_tps": 150.6778,
+  "gen_tps": 400.1248,
+  "prompt_gen_ratio": 0.38,
+  "prefix_hit_rate": 0.0133,
+  "spec_accept_rate": null,
+  "kv_usage_mean": 0.0313,
+  "kv_usage_peak": 0.03540667732196767,
+  "ttft_p50": 14.7891,
+  "e2e_p50": 17.2717,
+  "running_min": 7.75,
+  "running_max": 8.0,
+  "running_cv": 0.01,
+  "requests_per_min": 83.0,
+  "prompt_tokens_per_request": 109,
+  "output_tokens_per_request": 289
+ },
+ "engine": "vllm",
+ "model_ref": "Qwen/Qwen3-0.6B",
+ "config": {
+  "max_model_len": 16384,
+  "max_num_seqs": 8,
+  "max_num_batched_tokens": 4096,
+  "kv_tokens": 16384,
+  "tool_call_parser": "hermes",
+  "reasoning_parser": "qwen3",
+  "enable_prefix_caching": true
+ },
+ "traffic": {
+  "ok": 1687,
+  "err": 0,
+  "tool_calls": 0,
+  "prompt_tokens": 160571,
+  "completion_tokens": 430976
+ },
+ "source": "real minute rollups of a DGXMM test deployment on the DGX Spark, traffic from scripts/decider_eval/traffic.py"
+}

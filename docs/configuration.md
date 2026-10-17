@@ -15,8 +15,9 @@ start, and `./install.sh` does not recreate an unchanged container, so after edi
 `docker restart dgxmm`. Engine containers keep running either way.
 
 A few settings can also be changed at runtime in the UI. They are stored in DGXMM's database and win
-over `config.yaml`: currently the [LiteLLM connection](#runtime-settings-and-precedence) (URLs, master
-key, on/off). They apply immediately, without a restart.
+over `config.yaml`: the [LiteLLM connection](#runtime-settings-and-precedence) (URLs, master key,
+on/off) and the [decision model](#decision-model-runtime-settings) (on/off, model, per-feature switches
+and thresholds). They apply immediately, without a restart.
 
 - [config.yaml reference](#configyaml-reference)
 - [Environment variable overrides](#environment-variable-overrides)
@@ -30,6 +31,8 @@ key, on/off). They apply immediately, without a restart.
 - [Bundled LiteLLM](#bundled-litellm)
 - [Hugging Face token](#hugging-face-token)
 - [Tuning the memory budget](#tuning-the-memory-budget)
+- [Decision model runtime settings](#decision-model-runtime-settings)
+- [API limits](#api-limits)
 
 ## config.yaml reference
 
@@ -44,7 +47,7 @@ the container.
 |---|---|---|---|
 | `safety_margin_gib` | float ≥ 0 | `8` | Memory that is never given to models. It is also the watchdog's critical threshold and the startup-abort threshold. |
 | `os_reserve_gib` | float ≥ 0 | `4` | Kept back for the OS, desktop and other processes. |
-| `auto_protect` | bool | `false` | `true`: when memory turns critical, the watchdog stops the lowest-priority deployment by itself. `false`: it only warns. |
+| `auto_protect` | bool | `false` | `true`: when memory turns critical, the watchdog stops the lowest-priority deployment by itself, and the decision model before any user deployment. `false`: it only warns (a decision model that exceeds its own reservation is stopped either way, see `decider_overuse_margin_gib`). |
 | `vllm_runtime_fixed_gib` | float | `3.0` | Fixed vLLM overhead added to every vLLM estimate. |
 | `vllm_cuda_graph_gib` | float | `1.5` | CUDA graph memory added to every vLLM estimate. |
 | `llamacpp_runtime_fixed_gib` | float | `0.5` | Fixed llama.cpp overhead added to every llama.cpp estimate. |
@@ -60,8 +63,61 @@ the container.
 | `publish_bind` | string | `127.0.0.1` | Host address that engine ports are published on. Keep it on loopback: clients should go through LiteLLM or the Docker network. |
 | `engine_base_host` | string or null | `null` | `null`: DGXMM (and LiteLLM) reach engines as `dgxmm-<name>:<port>` on `docker_network`. Set a hostname or IP to use the published ports on that host instead. |
 | `startup_timeout_s` | int | `900` | Seconds an engine may take to become ready before DGXMM fails it. |
+| `max_concurrent_startups` | int ≥ 0 | `1` | Engines starting/loading at the same time (the decision model included); the others wait in state `queued`. `0` = no limit, which lets vLLM's start-up memory profile fail when two engines start together on unified memory. |
+| `startup_queue_timeout_s` | float > 0 | `1800` | A queued deployment fails after waiting this long for a start-up slot. |
+| `wake_queue_timeout_s` | float > 0 | `300` | A wake-up waiting for a running start-up gives up after this long (409 `startup_busy`, or the reason in the deployment's last error if it was already continuing in the background). |
+| `wake_sync_wait_s` | float ≥ 0 | `50` | The wake request waits this long for its turn; after that it answers 202 with `startup_queue` and the wake-up continues in the background. |
 | `vllm_cache_mounts` | list of `{host, target, mode}` | `~/.cache/vllm`, `~/.cache/flashinfer`, `~/.triton` → `/root/...` | Host directories mounted into vLLM containers so compiled kernels survive restarts. `mode` defaults to `rw`. |
 | `llmfit_bin` | string | `llmfit` | llmfit executable used for catalog scores. |
+
+### Decision model (decider)
+
+Whether the decider runs, which model it runs and the per-feature switches and thresholds are not in
+`config.yaml`: they are set on the **Decision model** page and stored in the database (see
+[decision model runtime settings](#decision-model-runtime-settings)). The model is `vllm-sr/d3-mini`
+(default, 13 GiB reserved) or `vllm-sr/d3-nano` (9 GiB), both pinned to a revision whose files are
+checked against hashes built into the decider image. Using it: [usage](usage.md#decision-model);
+measurements: [decider-evaluation.md](decider-evaluation.md). The keys below tune its container,
+supervision and data retention; the defaults fit a DGX Spark.
+
+| Key | Type | Default | Meaning |
+|---|---|---|---|
+| `images.decision` | string | `dgxmm-decider:3` | Local image the decider runs from (built from `deploy/decider`, never pulled). The tag changes whenever the image's contract with DGXMM changes, so an older image counts as missing and is rebuilt. The image lists the models it can serve in its `dgxmm.decider.models` label; enabling a model the image does not list answers 409 `image_outdated` (rebuild it). |
+| `decider_network` | string | `dgxmm-decider` | Docker network of the decider. DGXMM creates it as an *internal* network (no outbound traffic, no published port, labelled `dgxmm.purpose=decider` and `dgxmm.install`), refuses a non-internal network of that name, and attaches its own container to it. Empty: the decider joins `docker_network` instead, where every container on that network can reach it and only its key protects it. Letters, digits and `_ . -`, up to 63 characters. |
+| `decider_user` | `uid:gid` | `10001:10001` | User the decider container runs as (the image's unprivileged user). Root (`0`) is refused. |
+| `decider_memory_limit_gib` | float ≥ 2 | `16` | cgroup memory limit of the decider container (swap off). On GB10 GPU memory is not charged to the cgroup, so this caps the host-side memory: the process, `/tmp` and the page cache of the weights it reads (measured peaks 9.3–12.7 GiB). The 13 GiB budget reservation is separate. |
+| `decider_pids_limit` | int ≥ 64 | `512` | Processes and threads in the decider container (measured peak about 100). |
+| `decider_tmp_gib` | float > 0 | `0.75` | Size of the decider's `/tmp` tmpfs (GPU kernel caches, about 0.23 GiB used). It counts as used memory, so it is capped to stay inside the reservation. |
+| `decider_key_file` | path or null | `null` | File of the decider's bearer key, generated on first use (mode 600). `null`: `data/secrets/decider_api_key`. |
+| `decider_build_dir` | path or null | `null` | Docker build context of the decider image. `null`: the `deploy/decider` directory shipped with DGXMM (`/app/deploy/decider` in the container). |
+| `install_id` | string or null | `null` | Set from `DGXMM_INSTALL_ID` in `.env` (generated by the installer). Labels the containers DGXMM creates and the images it builds `dgxmm.install=<id>`, so `uninstall --purge` removes only this install's. |
+| `decider_max_in_flight` | int | `2` | Questions sent to the decider at once. d3_server answers one request at a time and finishes requests whose caller already gave up, so the rest wait in DGXMM. |
+| `decider_queue_timeout_s` | float | `1.0` | Longest wait for a slot for interactive questions (plan, parser); background ones (diagnosis, kind, workload) may wait up to half their deadline. A question that cannot start in time, or whose remaining deadline is shorter than the measured service time, is answered by rules at once. |
+| `decider_probe_interval_s` | float | `30` | How often the supervisor probes a ready decider (`/health` plus one question). |
+| `decider_probe_timeout_s` | float | `10` | Probe timeout. |
+| `decider_hang_probes` | int | `3` | Failed probes in a row (container still running) after which the decider is restarted. |
+| `decider_restart_backoff_s` | float | `30` | Delay before the next automatic restart; doubles after each restart. |
+| `decider_restart_backoff_max_s` | float | `900` | Upper bound of that delay. |
+| `decider_max_restarts_per_hour` | int | `5` | After this many automatic restart attempts in an hour (failed ones included) the supervisor gives up until the decider is enabled again (**Retry** on the Decision model page). |
+| `decider_stable_s` | float | `600` | Healthy this long after a restart resets the backoff. |
+| `decider_retention_days` | int ≥ 1 | `30` | Decision-log rows (`decisions`) older than this are deleted (once a minute, by the metrics loop). |
+| `decider_max_rows` | int ≥ 1000 | `50000` | At most this many of the newest decision-log rows are kept. Diagnoses keep the latest 20 per deployment and are deleted with it. |
+| `decider_overuse_margin_gib` | float ≥ 0 | `2` | The memory watchdog stops the decider when its measured memory exceeds its 13 GiB reservation by more than this in two budget samples in a row. |
+
+Automatic restarts happen only for a decider that crashed, hangs or was stopped by the memory watchdog while
+enabled (never after an admin stopped it), never while the memory watchdog reports pressure, and through the
+normal fit check and start-up queue. A watchdog stop counts as a failure: the restart waits out the (doubling)
+backoff, so a decider that keeps running away is not restarted in a loop.
+
+**Watchdog and `auto_protect`.** The decision model is advisory, so the watchdog gives it up first. Whatever
+`auto_protect` says, it stops the decider when its measured memory exceeds its reservation by more than
+`decider_overuse_margin_gib` in two budget samples in a row. With `auto_protect: true` it is also the first
+deployment stopped when memory turns critical. With the default `auto_protect: false`, critical memory only raises
+the alert, also for the decider. If stopping the decider fails, it is skipped and the normal order applies.
+
+Each feature waits a fixed time for an answer before it falls back to its rules (not configurable): failure
+diagnosis 10 s (in the background), parser suggestions 4 s per question, plan recommendation 2 s, model kind and
+workload 2 s (in the background). Plan rankings are cached for 2 minutes and workload labels for 15 minutes.
 
 ### Models and storage
 
@@ -90,7 +146,7 @@ the container.
 | `base_path` | string | `/dgxmm` | URL prefix of the UI and API. The frontend is built for `/dgxmm`, so leave this alone. |
 | `session_ttl_s` | int | `43200` (12 h) | Login session lifetime. It is extended on every request. |
 | `secure_cookies` | `auto` / `always` / `never` | `auto` | `auto`: the cookie is `Secure` when the request is HTTPS (directly or via `X-Forwarded-Proto`). Use `always` behind an HTTPS proxy. |
-| `trusted_proxies` | comma-separated IPs/CIDRs (or a YAML list) | `127.0.0.1,::1` | IPs/subnets trusted to set `X-Forwarded-For` (for correct client IPs in logs and rate limiting). Default is loopback-only; an empty value means the default. Set it to your proxy's IP or Docker network subnet, for example `172.18.0.0/16`. `*` trusts every client (logged as a warning; not recommended). Invalid entries stop DGXMM from starting. `DGXMM_TRUSTED_PROXIES` in `.env` overrides it. |
+| `trusted_proxies` | comma-separated IPs/CIDRs (or a YAML list) | `127.0.0.1,::1` | IPs/subnets trusted to set `X-Forwarded-For` (for correct client IPs in logs and rate limiting). Default is loopback-only; an empty value means the default. Set it to your proxy's IP or Docker network subnet, for example `172.18.0.0/16`. `*` trusts every client (logged as a warning; not recommended). Invalid entries stop DGXMM from starting. Peers on the decider's internal network (`decider_network`) are never trusted, even when a range here covers them. `DGXMM_TRUSTED_PROXIES` in `.env` overrides it. |
 
 ### Polling intervals
 
@@ -159,6 +215,8 @@ from an older `.env` are appended.
 | `DGXMM_HOST_HOME` | `DGXMM_HOST_HOME` | `$HOME` | Home directory that `~` in `config.yaml` expands to. |
 | `DGXMM_WITH_LITELLM` | `--with-litellm` / `DGXMM_WITH_LITELLM=1` | `0` (key not written) | Run the [bundled LiteLLM](#bundled-litellm). Written only when enabled; set `0` to turn it off. |
 | `DGXMM_LITELLM_PORT` | `--litellm-port` / `DGXMM_LITELLM_PORT` | `4000` | Host port of the bundled LiteLLM, bound to `DGXMM_BIND`. |
+| `DGXMM_WITH_DECIDER` | `--with-decider` / `DGXMM_WITH_DECIDER=1` | `0` (key not written) | Set up the [decision model](operations.md#decision-model) on every install/upgrade: build its image, download and verify its model snapshot, enable it and wait until it is healthy. Written only when enabled. Set `0` so the installer stops re-enabling it (disabling it is done in the UI or with the admin CLI). |
+| `DGXMM_INSTALL_ID` | (generated once) | 12 random letters/digits | Labels the containers DGXMM creates and the images it builds (`dgxmm.install`), so `uninstall` removes only this install's decider container and image. |
 | `DGXMM_TRUSTED_PROXIES` | `DGXMM_TRUSTED_PROXIES` | empty | Passed to the container as an override of [`trusted_proxies`](#web-ui-and-sessions). Empty means `config.yaml` (or the loopback default) applies. |
 | `COMPOSE_PROFILES` | (written with `DGXMM_WITH_LITELLM=1`) | `litellm` | Makes a plain `docker compose up -d` start the bundled LiteLLM too. A stray shell value is never adopted. |
 
@@ -177,6 +235,8 @@ Variables and flags that only affect one installer run:
 | `DGXMM_PULL_ENGINES=1` | Pull the engine images listed in `config.yaml` before starting. |
 | `DGXMM_HEALTH_TIMEOUT` | Seconds to wait for the container to become healthy (default 300). |
 | `DGXMM_LITELLM_HEALTH_TIMEOUT` | Same for the bundled LiteLLM (default 300). `DGXMM_LITELLM_MAX_RESTARTS` (default 3) fails sooner on a crash loop. |
+| `DGXMM_DECIDER_TIMEOUT` | With `--with-decider`: seconds to wait for the decider to become healthy (default 900, at most 10200; its first start compiles GPU kernels for a few minutes). |
+| `--purge-decider-model` | With `uninstall --purge`: also delete the snapshots of every supported decision model (`<HF cache>/hub/models--vllm-sr--d3-mini`, `models--vllm-sr--d3-nano`) and the shared-store blobs (`<HF cache>/hub/blobs`) only they use. Other models, and blobs another model also uses, are kept. |
 | `DGXMM_LOG_LINES` | Lines shown by `./install.sh logs` (default 200). |
 
 When the installer generates `config.yaml`, it puts your HF cache, models directory, home directory
@@ -471,3 +531,36 @@ umask 077; printf '%s' 'hf_xxx' > secrets/hf_token; docker restart dgxmm
   wizard.
 - Per deployment, the biggest levers are context length, concurrent sequences, the KV pool size
   (`kv_tokens`), and the KV cache dtype (`fp8` halves KV memory).
+
+## Decision model runtime settings
+
+The Decision model page stores its settings in the `app_settings` table (a backup of `data/` keeps them).
+They are not in `config.yaml` and have no environment override:
+
+| `app_settings` key | Default | Set by | Meaning |
+|---|---|---|---|
+| `decider.enabled` | `false` | **Enable** / **Disable**, `decider enable` / `disable` | Whether the decider should run. Disabled: every feature uses its rules only. |
+| `decider.model` | not set (= `vllm-sr/d3-mini`) | **Model** card, `PUT /api/decider/settings {"model": …}` | The model the next (re)start runs: `vllm-sr/d3-mini` or `vllm-sr/d3-nano`. Unknown values fall back to d3-mini. |
+| `decider.feature.<feature>.enabled` | `true` | **Features** card | Ask the model for this feature (`diagnosis`, `parser`, `plan`, `kind`, `workload`). Off: rules only. |
+| `decider.feature.<feature>.threshold` | diagnosis `0.8`, parser `0.8`, plan `0.6`, kind `0.8`, workload `0.75` | **Features** card (in percent) | Minimum confidence for a model answer to be used (0–1). |
+| `decider.deployment_id`, `decider.switch_from` | — | DGXMM | Internal: the decider's deployment, and the previous model while a model switch is not yet confirmed ready. |
+
+Thresholds you saved override the defaults, also when a later release changes a default. The same settings
+can be changed with `PUT /api/decider/settings`, for example
+`{"features": {"plan": {"threshold": 0.7}, "workload": {"enabled": false}}}` (admin, see
+[API limits](#api-limits)).
+
+## API limits
+
+| What | Limit |
+|---|---|
+| Sign-in | 5 attempts per minute per client IP and per username |
+| Decision model changes (`PUT /api/decider/settings`, `POST /api/decider/enable`, `disable`, `models/download`, `image/build`, `rotate-key`) | 10 per minute per admin, shared |
+| Parser suggestions (`POST /api/decider/suggest-config`) | 30 per minute per user, 120 per minute for all users |
+| Plan ranking by the model in `POST /api/deployments/preview` | 30 per minute per user, 120 for all users; over it the preview still answers, with safety marks but no model ranking |
+| Decision log (`GET /api/decider/decisions`) | 120 per minute per user |
+| Feedback (`POST /api/decider/decisions/{id}/feedback`) | 60 per minute per user |
+| Request bodies under `/api/decider` | 64 KiB (`413 request_too_large`, also for chunked bodies) |
+
+Over a limit the API answers `429 rate_limited` with a `Retry-After` header. The limits are in memory and per
+process: a restart resets them. They are not configurable.

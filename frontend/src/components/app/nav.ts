@@ -1,5 +1,5 @@
 import type { LucideIcon } from "lucide-react";
-import { Activity, Download, HardDrive, LayoutDashboard, Network, Puzzle, ScrollText, Search, Server, Users } from "lucide-react";
+import { Activity, BrainCircuit, Download, HardDrive, LayoutDashboard, Network, Puzzle, ScrollText, Search, Server, Users } from "lucide-react";
 
 export interface NavItem { to: string; label: string; icon: LucideIcon; end?: boolean; /** Extra ⌘K search words. */ keywords?: string }
 export interface NavGroup { label: string; admin?: boolean; items: NavItem[] }
@@ -18,6 +18,7 @@ export const NAV_GROUPS: NavGroup[] = [
   ] },
   { label: "Integrations", admin: true, items: [
     { to: "/litellm", label: "LiteLLM", icon: Network, keywords: "virtual keys api endpoint proxy openai master key" },
+    { to: "/decision-model", label: "Decision model", icon: BrainCircuit, keywords: "AI decider d3-mini diagnosis suggestions recommendations thresholds feedback" },
   ] },
   { label: "Admin", admin: true, items: [
     { to: "/users", label: "Users", icon: Users },

@@ -1,0 +1,75 @@
+{
+ "ref": "ibm-granite/granite-speech-4.1-2b",
+ "architecture": "GraniteSpeechForConditionalGeneration",
+ "model_type": "granite_speech",
+ "config": {
+  "architectures": [
+   "GraniteSpeechForConditionalGeneration"
+  ],
+  "model_type": "granite_speech",
+  "text_config": {
+   "_name_or_path": "ibm-granite/granite-4.0-1b-base",
+   "architectures": [
+    "GraniteForCausalLM"
+   ],
+   "attention_bias": false,
+   "attention_dropout": 0.0,
+   "attention_multiplier": 0.0078125,
+   "bos_token_id": 100257,
+   "dtype": "bfloat16",
+   "embedding_multiplier": 12.0,
+   "eos_token_id": 100257,
+   "hidden_act": "silu",
+   "hidden_size": 2048,
+   "initializer_range": 0.1,
+   "intermediate_size": 4096,
+   "logits_scaling": 8.0,
+   "max_position_embeddings": 4096,
+   "mlp_bias": false,
+   "model_type": "granite",
+   "num_attention_heads": 16,
+   "num_hidden_layers": 40,
+   "num_key_value_heads": 4,
+   "pad_token_id": 100256,
+   "residual_multiplier": 0.22,
+   "rms_norm_eps": 1e-05,
+   "rope_parameters": [
+    "rope_theta",
+    "rope_type"
+   ],
+   "rope_scaling": null,
+   "rope_theta": 10000.0,
+   "use_cache": true,
+   "vocab_size": 100353
+  }
+ },
+ "files": [
+  ".eval_results/MODEL_ibm-granite-granite-speech-4.1-2b_DATASET_hf-audio-esb-datasets-test-only-sorted_ami_test.jsonl",
+  ".eval_results/MODEL_ibm-granite-granite-speech-4.1-2b_DATASET_hf-audio-esb-datasets-test-only-sorted_earnings22_test.jsonl",
+  ".eval_results/MODEL_ibm-granite-granite-speech-4.1-2b_DATASET_hf-audio-esb-datasets-test-only-sorted_gigaspeech_test.jsonl",
+  ".eval_results/MODEL_ibm-granite-granite-speech-4.1-2b_DATASET_hf-audio-esb-datasets-test-only-sorted_librispeech_test.clean.jsonl",
+  ".eval_results/MODEL_ibm-granite-granite-speech-4.1-2b_DATASET_hf-audio-esb-datasets-test-only-sorted_librispeech_test.other.jsonl",
+  ".eval_results/MODEL_ibm-granite-granite-speech-4.1-2b_DATASET_hf-audio-esb-datasets-test-only-sorted_spgispeech_test.jsonl",
+  ".eval_results/MODEL_ibm-granite-granite-speech-4.1-2b_DATASET_hf-audio-esb-datasets-test-only-sorted_tedlium_test.jsonl",
+  ".eval_results/MODEL_ibm-granite-granite-speech-4.1-2b_DATASET_hf-audio-esb-datasets-test-only-sorted_voxpopuli_test.jsonl",
+  ".eval_results/open_asr_leaderboard.yaml",
+  ".eval_results/output.log",
+  ".gitattributes",
+  "README.md",
+  "added_tokens.json",
+  "chat_template.jinja",
+  "config.json",
+  "merges.txt",
+  "model.safetensors.index.json",
+  "model.sig",
+  "multilingual_sample.wav",
+  "preprocessor_config.json",
+  "processor_config.json",
+  "special_tokens_map.json",
+  "tokenizer.json",
+  "tokenizer_config.json",
+  "vocab.json"
+ ],
+ "weight_files": 4,
+ "template": "{% for message in messages %}{% if message['role'] == 'user' %}USER: {{ message['content'] }}\n ASSISTANT:{% elif message['role'] == 'assistant' %}{{ message['content'] }}{% endif %}{% endfor %}"
+}

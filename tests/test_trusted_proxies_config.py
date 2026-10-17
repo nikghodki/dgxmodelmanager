@@ -30,7 +30,7 @@ def test_trusted_proxies_invalid_cidr():
 
 def test_trusted_proxies_invalid_list_entry():
     with pytest.raises(ValueError, match="Invalid IP/CIDR"):
-        Settings(trusted_proxies=["10.0.0.1", "bad-entry"])
+        Settings(trusted_proxies=["198.51.100.1", "bad-entry"])
 
 
 def test_empty_env_var_uses_default():

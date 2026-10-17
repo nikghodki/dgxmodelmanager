@@ -1,0 +1,40 @@
+{
+ "ref": "z-lab/Qwen3-8B-DFlash-b16",
+ "architecture": "DFlashDraftModel",
+ "model_type": "qwen3",
+ "config": {
+  "architectures": [
+   "DFlashDraftModel"
+  ],
+  "model_type": "qwen3",
+  "num_hidden_layers": 5,
+  "hidden_size": 4096,
+  "vocab_size": 151936,
+  "dflash_config": {
+   "mask_token_id": 151669,
+   "target_layer_ids": [
+    1,
+    9,
+    17,
+    25,
+    33
+   ]
+  },
+  "max_position_embeddings": 40960,
+  "auto_map": {
+   "AutoModel": "dflash.DFlashDraftModel"
+  }
+ },
+ "files": [
+  ".gitattributes",
+  "README.md",
+  "assets/dflash_system.png",
+  "assets/speedup.png",
+  "config.json",
+  "dflash.py",
+  "modeling_dflash.py",
+  "utils.py"
+ ],
+ "weight_files": 1,
+ "template": null
+}

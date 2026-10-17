@@ -50,14 +50,14 @@ async def test_concurrent_deploys_cannot_both_claim_memory(stack):
     assert len(stack.sdk.run_calls) == 1
 
 
-async def test_exit_137_marks_failed_likely_oom(stack):
+async def test_exit_137_oom_killed_marks_failed_out_of_memory(stack):
     dep = await stack.deployer.deploy(req(), 1)
     c = stack.sdk.container(dep["container_id"])
     c.log_text = "CUDA out of memory"
-    c.status, c.exit_code = "exited", 137
+    c.status, c.exit_code, c.oom_killed = "exited", 137, True
     assert await stack.deployer.wait_ready(dep["id"], 5) == "failed"
     v = stack.deployer.view(dep["id"], with_events=True)
-    assert v["exit_code"] == 137 and "likely out of memory" in v["last_error"]
+    assert v["exit_code"] == 137 and "out of memory: Docker reports" in v["last_error"]
     assert "CUDA out of memory" in v["events"][0]["log_tail"]
 
 
@@ -137,3 +137,51 @@ async def test_state_hooks_called(stack):
     await become_ready(stack, dep)
     await asyncio.sleep(0.05)
     assert seen[-1] == "ready"
+
+
+async def test_port_held_by_a_host_process_is_skipped(stack):
+    """DGXMM runs in a container and cannot see host listeners; docker reports the conflict at start. Real case:
+    `failed to bind host port 127.0.0.1:8100/tcp: address already in use` (tests/fixtures/real_failures)."""
+    lo = stack.settings.port_range[0]
+    stack.sdk.busy_host_ports = {lo, lo + 1}
+    dep = await stack.deployer.deploy(req(), 1)
+    assert dep["state"] == "starting" and dep["port"] == lo + 2
+    assert [c["ports"] for c in stack.sdk.run_calls][-1] == {f"{lo + 2}/tcp": ("127.0.0.1", lo + 2)}
+    assert "--port" in stack.sdk.run_calls[-1]["command"] and str(lo + 2) in stack.sdk.run_calls[-1]["command"]
+
+
+async def test_port_conflicts_give_up_after_a_few_ports(stack):
+    lo, hi = stack.settings.port_range
+    stack.sdk.busy_host_ports = set(range(lo, hi + 1))
+    with pytest.raises(DeployError) as e:
+        await stack.deployer.deploy(req(), 1)
+    assert e.value.code == "docker_error" and "address already in use" in e.value.message
+    assert len(stack.sdk.run_calls) == 4
+    # docker created the container before the start failed: nothing may stay behind (real leftover on the DGX)
+    assert stack.sdk._containers == {}
+
+
+async def test_reclassified_model_new_deploy_refused_existing_deployment_restarts(stack, fake_hf_repo):
+    """A *ForCausalLM decision checkpoint (decider_config.json) is now kind `decision`: no NEW vLLM chat deployment,
+    but a deployment created before the reclassification keeps restarting and reconfiguring."""
+    from tests.conftest import QWEN_TINY
+    fake_hf_repo("example/decision-checkpoint", config=QWEN_TINY,
+                 files={"model.safetensors": GIB, "decider_config.json": 10})
+    stack.inv.refresh()
+    assert stack.inv.get("example/decision-checkpoint").kind == "decision"
+    with pytest.raises(DeployError) as e:
+        await stack.deployer.deploy(req("new", "example/decision-checkpoint"), 1)
+    assert e.value.code == "engine_unsupported"
+    cfg = stack.deployer.engines["vllm"].validate_config(
+        {"max_model_len": 4096, "max_num_seqs": 2, "max_num_batched_tokens": 2048}).model_dump(mode="json")
+    with stack.db.session() as s:
+        row = Deployment(name="old", engine="vllm", model_ref="example/decision-checkpoint", config=cfg,
+                         state="stopped", port=None)
+        s.add(row)
+        s.flush()
+        dep_id = row.id
+    stack.http.all_healthy = True
+    v = await stack.deployer.restart(dep_id, 1)
+    assert v["state"] in ("starting", "loading") and await stack.deployer.wait_ready(dep_id, 5) == "ready"
+    v = await stack.deployer.reconfigure(dep_id, {**cfg, "max_num_seqs": 1})
+    assert v["config"]["max_num_seqs"] == 1 and v["model_ref"] == "example/decision-checkpoint"

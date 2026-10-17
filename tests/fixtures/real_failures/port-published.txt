@@ -1,0 +1,9 @@
+# label: port_in_use
+# engine: vllm
+# model_ref: Qwen/Qwen3-0.6B
+# exit_code: None
+# message: docker error: 500 Server Error for http+docker://localhost/v1.53/containers/421e0d112f3f81a2cede90f1877e6beb39a284edab9a5923eb2b1398e7d83d19/start: Internal Server Error ("failed to set up container networking: driver failed programming external connectivity on endpoint dgxmm-prod-h1-port (e21d866dc1cf9fb13e156468e0f33da629db61fa0701203adab726264dfbe59b): failed to bind host port 127.0.0.1:8100/tcp: address already in use")
+# induced: a host process listened on 127.0.0.1:8100, the port DGXMM allocated; deployed through the live DGXMM API
+# source: stored by DGXMM (deployment event) on the DGX Spark; DGXMM diagnosis: port_in_use / rules
+---
+

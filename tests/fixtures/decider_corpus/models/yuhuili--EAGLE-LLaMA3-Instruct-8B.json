@@ -1,0 +1,26 @@
+{
+ "ref": "yuhuili/EAGLE-LLaMA3-Instruct-8B",
+ "architecture": "LlamaForCausalLM",
+ "model_type": "llama",
+ "config": {
+  "architectures": [
+   "LlamaForCausalLM"
+  ],
+  "model_type": "llama",
+  "num_hidden_layers": 1,
+  "hidden_size": 4096,
+  "vocab_size": 128256,
+  "max_position_embeddings": 2048
+ },
+ "files": [
+  ".gitattributes",
+  "LICENSE",
+  "README.md",
+  "config.json",
+  "figs/e3.gif",
+  "figs/eagle3r.jpg",
+  "figs/logo.png"
+ ],
+ "weight_files": 1,
+ "template": null
+}

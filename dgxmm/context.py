@@ -13,6 +13,7 @@ from dgxmm.db import Database
 from dgxmm.events import EventBroker
 
 log = logging.getLogger("dgxmm")
+UNTRUSTED_PROXIES_REFRESH_S = 30.0  # how often the decider network's subnets are re-read (dgxmm/proxy_headers.py)
 
 
 @dataclass
@@ -40,13 +41,32 @@ class AppContext:
     weights: Any = None  # WeightsDeleter (delete / clean up downloaded weights)
     startup: list = field(default_factory=list)          # awaited once, in order, before serving
     background: list = field(default_factory=list)       # long-running coroutines
+    rate_limiters: dict = field(default_factory=dict)    # dgxmm.api.ratelimit buckets
     budget_listeners: list = field(default_factory=list)  # async fn(budget) after each refresh
     settings_store: Any = None  # SettingsStore; created from db + settings when not given
+    decider: Any = None  # dgxmm.decider.service.Decider; always constructed (disabled by default)
+    untrusted_proxy_networks: list = field(default_factory=list)  # never proxies (dgxmm/proxy_headers.py)
+    decider_image: Any = None  # dgxmm.decider.image.DeciderImage (status + on-demand build)
+    diagnosis: Any = None  # DiagnosisService (failure diagnosis)
+    workload: Any = None   # WorkloadService (workload label for advice ordering)
+    kinds: Any = None      # KindService (model-derived artifact kinds)
 
     def __post_init__(self) -> None:
         if self.settings_store is None:
             from dgxmm.settings_store import SettingsStore
             self.settings_store = SettingsStore(self.db, self.settings)
+        if self.decider is None:
+            from dgxmm.decider.service import Decider
+            self.decider = Decider(db=self.db, settings=self.settings, store=self.settings_store,
+                                   deployer=lambda: self.deployer, http=lambda: self.http)
+        # removing the decider's deployment (from any page) turns the decider off and clears its deployment id
+        hooks, on_removed = getattr(self.deployer, "removal_hooks", None), getattr(self.decider, "on_deployment_removed",
+                                                                                 None)
+        if hooks is not None and on_removed is not None and on_removed not in hooks:
+            hooks.append(on_removed)
+        if self.decider_image is None:
+            from dgxmm.decider.image import DeciderImage
+            self.decider_image = DeciderImage(self.settings, lambda: self.docker, self.events)
 
 
 async def budget_loop(ctx: AppContext) -> None:
@@ -158,6 +178,8 @@ def build_context(settings: Settings) -> AppContext:
     from dgxmm.metrics.store import MetricsStore
     store = MetricsStore(db)
     scraper = MetricsScraper(settings, deployer, http, store, events, budget)
+    from dgxmm.decider.retention import prune as prune_decider_tables
+    scraper.retention.append(lambda: prune_decider_tables(db, settings))
     ctx.metrics = store
     ctx.background.append(scraper.run)
 
@@ -171,12 +193,54 @@ def build_context(settings: Settings) -> AppContext:
     ctx.advisor = AdvisorService(deployer, inventory, store, db)
     ctx.benchmarks = BenchmarkRunner(db, events)
 
+    from dgxmm.decider.features import wire_features
+    wire_features(ctx)
+
     async def _containers_loop():
         # keeps the read-only container-name cache warm for the budget loop, which only reads the cache
         while True:
             await asyncio.to_thread(docker.directory.refresh)
             await asyncio.sleep(CONTAINER_CACHE_TTL_S)
 
-    ctx.startup += [_bootstrap, _recover_downloads, _inventory, _reconcile]
-    ctx.background += [_budget_loop, _inventory_loop, _containers_loop]
+    async def _decider_network():
+        # After DGXMM's own container is recreated (upgrade), re-join the decider's internal network so a running
+        # decider stays reachable. Never creates the network (the first decider start does).
+        try:
+            if await asyncio.to_thread(docker.attach_self, settings.decider_network):
+                log.info("attached to the decider network %s", settings.decider_network)
+        except Exception:
+            log.warning("could not join the decider network %s", settings.decider_network, exc_info=True)
+
+    async def refresh_untrusted_proxies():
+        from dgxmm.proxy_headers import parse_networks
+        try:
+            ctx.untrusted_proxy_networks = parse_networks(
+                await asyncio.to_thread(docker.network_subnets, settings.decider_network))
+        except Exception:
+            log.debug("could not read the decider network's subnets", exc_info=True)
+
+    async def _untrusted_proxies_loop():
+        # the decider's network is never a proxy (dgxmm/proxy_headers.py); it is created at the first decider start
+        while True:
+            await asyncio.sleep(UNTRUSTED_PROXIES_REFRESH_S)
+            await refresh_untrusted_proxies()
+
+    async def _decider_upgrade_check():
+        from dgxmm.decider import upgrade
+        try:
+            up = await asyncio.to_thread(upgrade.check, ctx)
+        except Exception:
+            return
+        if up["needed"]:
+            log.warning("the running decider predates this DGXMM build (%s): rebuild its image and restart it "
+                        "(Decision model page, or POST /api/decider/rotate-key)", "; ".join(up["reasons"]))
+
+    ctx.startup += [_bootstrap, _recover_downloads, _decider_network, refresh_untrusted_proxies, _inventory, _reconcile,
+                    _decider_upgrade_check]
+    from dgxmm.decider import rotation
+
+    async def _decider_rotation():
+        await rotation.watch(ctx)  # admin CLI rotate-decider-key requests
+
+    ctx.background += [_budget_loop, _inventory_loop, _containers_loop, _decider_rotation, _untrusted_proxies_loop]
     return ctx

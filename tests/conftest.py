@@ -148,7 +148,9 @@ def stack(settings, db, fake_hf_repo):
     inv.refresh()
     sdk, probe, engines_http = FakeDockerClient(), FakeProbe(), FakeEngines()
     events = EventBroker()
-    deployer = Deployer(settings=settings, db=db, docker=DockerController(sdk), inventory=inv,
+    docker = DockerController(sdk)
+    docker.own_container_id = lambda: "dgxmm-self"  # as if DGXMM ran in a container (joins the decider network)
+    deployer = Deployer(settings=settings, db=db, docker=docker, inventory=inv,
                         engines=build_engines(settings), http=engines_http.client(), events=events)
     deployer.budget = BudgetService(settings, probe, deployer.usage_rows)
     return SimpleNamespace(settings=settings, db=db, inv=inv, sdk=sdk, probe=probe, http=engines_http,

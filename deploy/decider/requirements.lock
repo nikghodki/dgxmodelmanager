@@ -1,0 +1,14 @@
+# Python packages the decider adds to its pinned base image (vllm/vllm-openai@sha256:22d3b121…, linux/arm64,
+# CPython 3.12, pip 26.2.1). This is exactly the set `pip install --dry-run --report` resolves inside that base for
+#     transformers==5.17.0 flash-linear-attention==0.5.2
+# (everything else they need is already in the base at a compatible version). The Dockerfile installs it with
+# --no-deps --require-hashes, so pip installs these four files and nothing else, and fails on any hash mismatch.
+# Regenerate (only when changing a pin or the base digest): scripts/decider_lock.sh
+transformers==5.17.0 \
+    --hash=sha256:78ec1ce21579b38dfb83950a0658cd119f87212a2fcfdff478096ce9d6c03801
+flash-linear-attention==0.5.2 \
+    --hash=sha256:dcf405d81f5426393b59037097aa700d0f4a841465d5028d5aa543f4502f2400
+fla-core==0.5.2 \
+    --hash=sha256:5e830c85bad3d0d34677f98ac7074d08687a3756f0f0499d95ceb96eb6920761
+tokenizers==0.23.3 \
+    --hash=sha256:ec82e80e65a862275b97c3d90b7a523df8d9519ee48aeb4e9625b2cc909274e0

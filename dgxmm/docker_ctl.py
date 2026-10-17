@@ -19,10 +19,25 @@ from docker.types import Mount as DockerMount
 from dgxmm.engines.base import MANAGED_LABEL, ContainerSpec
 
 log = logging.getLogger(__name__)
+INSTALL_LABEL = "dgxmm.install"  # per-install id (Settings.install_id), set by the deployer
 HELPER_LABEL = "dgxmm.helper"
 HELPER_MOUNT = "/x"  # where a helper sees the single host directory it may touch
 CONTAINER_CACHE_TTL_S = 30.0
 LOOKUP_TIMEOUT_S = 3
+
+
+class SecretDeliveryFailed(RuntimeError):
+    """A secret file could not be written into a freshly started container (which is then removed). If the container
+    had already exited, ``exit_code`` and a redacted ``log_tail`` say why (e.g. the decider's integrity check)."""
+
+    def __init__(self, message: str, exit_code: int | None = None, log_tail: str | None = None):
+        super().__init__(message)
+        self.exit_code, self.log_tail = exit_code, log_tail
+
+
+# Exit codes of deploy/decider/entrypoint.sh / launch.py
+EARLY_EXIT_REASONS = {2: "the pinned model snapshot is missing", 3: "snapshot integrity check failed",
+                      4: "no API key was delivered"}
 
 
 class HelperUnavailable(RuntimeError):
@@ -41,6 +56,7 @@ class ContainerInfo:
     mounts: list[dict] = field(default_factory=list)
     networks: list[str] = field(default_factory=list)
     host_ports: set[int] = field(default_factory=set)
+    oom_killed: bool = False  # Docker's State.OOMKilled of an exited container (the kernel OOM-killed it)
 
     @property
     def managed(self) -> bool:
@@ -68,6 +84,7 @@ def _info(c) -> ContainerInfo:
         mounts=[{"source": m.get("Source"), "target": m.get("Destination"), "mode": m.get("Mode", "")}
                 for m in a.get("Mounts") or []],
         networks=list((a.get("NetworkSettings", {}).get("Networks") or {}).keys()), host_ports=ports,
+        oom_killed=status in ("exited", "dead") and state.get("OOMKilled") is True,
     )
 
 
@@ -138,6 +155,13 @@ class DockerController:
     def __init__(self, client, lookup_client=None):
         self.client = client
         self.directory = ContainerDirectory(lookup_client or client)
+        self._own_id: str | None = None
+
+    def own_container_id(self) -> str | None:
+        """Id of the container this process runs in (None when DGXMM runs on the host)."""
+        if self._own_id is None:
+            self._own_id = self._own_container_id("/proc/self/mountinfo", "/proc/self/cgroup")
+        return self._own_id
 
     def lookup(self, cid: str | None, refresh: bool = True) -> dict | None:
         """Cached, read-only name/image lookup by full container id (for the processes view)."""
@@ -173,6 +197,9 @@ class DockerController:
     def run(self, spec: ContainerSpec) -> str:
         if spec.labels.get(MANAGED_LABEL) != "true":
             raise PermissionError("refusing to create a container without the dgxmm.managed label")
+        if spec.internal_network:
+            install = spec.labels.get(INSTALL_LABEL)
+            self.ensure_internal_network(spec.network, install_id=install)
         kwargs: dict = dict(image=spec.image, command=spec.command, name=spec.name, detach=True,
                             environment=spec.environment, labels=spec.labels, network=spec.network,
                             volumes={m.host: {"bind": m.target, "mode": m.mode} for m in spec.mounts},
@@ -185,7 +212,169 @@ class DockerController:
             kwargs["device_requests"] = [DeviceRequest(count=-1, capabilities=[["gpu"]])]
         if spec.ipc_host:
             kwargs["ipc_mode"] = "host"
-        return self.client.containers.run(**kwargs).id
+        if spec.user:
+            kwargs["user"] = spec.user
+        if spec.read_only:
+            kwargs["read_only"] = True
+        if spec.tmpfs:
+            kwargs["tmpfs"] = dict(spec.tmpfs)
+        if spec.cap_drop:
+            kwargs["cap_drop"] = list(spec.cap_drop)
+        if spec.security_opt:
+            kwargs["security_opt"] = list(spec.security_opt)
+        if spec.pids_limit:
+            kwargs["pids_limit"] = spec.pids_limit
+        if spec.mem_limit:
+            kwargs["mem_limit"] = spec.mem_limit
+            kwargs["memswap_limit"] = spec.mem_limit  # no swap on top of the limit
+        try:
+            cid = self.client.containers.run(**kwargs).id
+        except Exception:
+            # docker-py creates, then starts: a failed start (device request, port in use, bad mount ...) leaves the
+            # container in state "created". Never leave it behind.
+            self.remove_leftover(spec.name, spec.labels.get("dgxmm.deployment_id"))
+            raise
+        if spec.secret_files:
+            try:
+                for path, data in spec.secret_files.items():
+                    self.write_secret_file(cid, path, data)
+            except Exception as e:
+                exit_code, tail = self._exit_details(cid)
+                try:
+                    self.client.containers.get(cid).remove(force=True)
+                except Exception:
+                    log.warning("could not remove %s after a failed secret delivery", spec.name, exc_info=True)
+                if exit_code is not None:
+                    why = EARLY_EXIT_REASONS.get(exit_code)
+                    raise SecretDeliveryFailed(f"{spec.name} exited with code {exit_code} before its key could be "
+                                               f"delivered" + (f": {why}" if why else ""), exit_code, tail) from None
+                raise SecretDeliveryFailed(f"could not deliver a secret file to {spec.name}: {e}") from None
+        return cid
+
+    def remove_leftover(self, name: str, deployment_id: int | str | None = None) -> bool:
+        """Remove the dgxmm-managed container called ``name`` if one exists (any state); never an unmanaged one,
+        and with ``deployment_id`` only if its dgxmm.deployment_id label matches. True if one was removed. Errors are
+        logged, not raised (cleanup paths call it)."""
+        try:
+            if deployment_id is not None:
+                c = self._guard(name)
+                if (c.labels or {}).get("dgxmm.deployment_id") != str(deployment_id):
+                    log.warning("not removing %s: it belongs to another deployment", name)
+                    return False
+            self.remove_by_name(name)
+            return True
+        except PermissionError:
+            log.warning("not removing %s: it is not managed by dgxmm", name)
+        except docker.errors.NotFound:
+            pass
+        except Exception:
+            log.warning("could not remove leftover container %s", name, exc_info=True)
+        return False
+
+    def _exit_details(self, cid: str, tail: int = 120) -> tuple[int | None, str | None]:
+        """(exit code, redacted log tail) if the container has already stopped, else (None, None)."""
+        from dgxmm.memory.redact import redact_log
+        try:
+            c = self.client.containers.get(cid)
+            c.reload()
+            state = (c.attrs or {}).get("State") or {}
+            if state.get("Status") not in ("exited", "dead"):
+                return None, None
+            logs = c.logs(tail=tail)
+            text = logs.decode(errors="replace") if isinstance(logs, bytes) else str(logs or "")
+            return int(state.get("ExitCode", -1)), redact_log(text)
+        except Exception:
+            log.warning("could not inspect %s after a failed secret delivery", cid[:12], exc_info=True)
+            return None, None
+
+    def write_secret_file(self, cid: str, path: str, data: bytes, timeout: float = 20.0) -> None:
+        """Write `data` to `path` (mode 0400, atomically) inside the running container `cid`, through `docker exec`
+        stdin: unlike `put_archive` this reaches a tmpfs and works with a read-only root filesystem, and the content
+        never appears in the environment, a command line or `docker inspect`. Errors never contain the content."""
+        if not path.startswith("/") or "\n" in path:
+            raise ValueError("secret path must be absolute")
+        api = self.client.api
+        cmd = ["/bin/sh", "-c", 'umask 0377 && cat > "$1.part" && mv -f "$1.part" "$1"', "dgxmm-secret", path]
+        exec_id = api.exec_create(cid, cmd, stdin=True, stdout=True, stderr=True)["Id"]
+        sock = api.exec_start(exec_id, socket=True)
+        raw = getattr(sock, "_sock", sock)
+        try:
+            raw.settimeout(timeout)
+            raw.sendall(data)
+            raw.shutdown(socket.SHUT_WR)
+            while raw.recv(4096):  # drain until the exec closes its side
+                pass
+        finally:
+            sock.close()
+        deadline = time.monotonic() + timeout
+        while True:
+            info = api.exec_inspect(exec_id)
+            if not info.get("Running"):
+                break
+            if time.monotonic() > deadline:
+                raise SecretDeliveryFailed("timed out writing the secret file")
+            time.sleep(0.05)
+        if info.get("ExitCode") != 0:
+            raise SecretDeliveryFailed(f"writing the secret file exited with {info.get('ExitCode')}")
+
+    def ensure_internal_network(self, name: str, install_id: str | None = None) -> None:
+        """`name` exists as an *internal* network (created if missing) and this DGXMM container is attached to it.
+        Refuses a non-internal network of that name, and refuses when DGXMM is not in a container (it could never
+        reach a container on an internal network). A network it creates carries dgxmm.install=<install_id> (when
+        set), so `./install.sh uninstall --purge` removes only this install's."""
+        try:
+            net = self.client.networks.get(name)
+        except docker.errors.NotFound:
+            labels = {MANAGED_LABEL: "true", "dgxmm.purpose": "decider"}
+            if install_id:
+                labels[INSTALL_LABEL] = install_id
+            net = self.client.networks.create(name, driver="bridge", internal=True, check_duplicate=True,
+                                              labels=labels)
+        if not (net.attrs or {}).get("Internal"):
+            raise PermissionError(f"docker network {name} is not internal; refusing to attach the decider to it "
+                                  "(remove it, or set decider_network to another name)")
+        if not self._join(net):
+            raise RuntimeError(f"DGXMM is not running in a container, so it cannot reach the decider on the internal "
+                               f"network {name}; set decider_network: '' to use docker_network instead")
+
+    def network_subnets(self, name: str) -> list[str]:
+        """The IPAM subnets of docker network `name` ([] if it does not exist)."""
+        if not name:
+            return []
+        try:
+            net = self.client.networks.get(name)
+        except docker.errors.NotFound:
+            return []
+        cfg = ((net.attrs or {}).get("IPAM") or {}).get("Config") or []
+        return [c["Subnet"] for c in cfg if isinstance(c, dict) and c.get("Subnet")]
+
+    def attach_self(self, name: str) -> bool:
+        """Startup: join the decider network if it exists (never creates it). True if attached."""
+        if not name:
+            return False
+        try:
+            net = self.client.networks.get(name)
+        except docker.errors.NotFound:
+            return False
+        if not (net.attrs or {}).get("Internal"):
+            log.warning("docker network %s is not internal; not joining it", name)
+            return False
+        return self._join(net)
+
+    def _join(self, net) -> bool:
+        me = self.own_container_id()
+        if not me:
+            return False
+        net.reload()
+        members = (net.attrs or {}).get("Containers") or {}
+        if any(cid.startswith(me) or me.startswith(cid) for cid in members):
+            return True
+        try:
+            net.connect(me)
+        except docker.errors.APIError as e:
+            if "already exists" not in str(e):
+                raise
+        return True
 
     def stop_and_remove(self, cid: str | None, timeout: int = 30) -> None:
         if not cid:
@@ -208,7 +397,10 @@ class DockerController:
             c = self._guard(name)
         except docker.errors.NotFound:
             return
-        c.remove(force=True)
+        try:
+            c.remove(force=True)
+        except docker.errors.NotFound:
+            pass
 
     def logs(self, cid: str | None, tail: int = 200) -> str:
         if not cid:
@@ -217,6 +409,27 @@ class DockerController:
             return self.client.containers.get(cid).logs(tail=tail).decode(errors="replace")
         except docker.errors.NotFound:
             return ""
+
+    def image_present(self, tag: str) -> bool:
+        try:
+            self.client.images.get(tag)
+            return True
+        except docker.errors.ImageNotFound:
+            return False
+
+    def image_labels(self, tag: str) -> dict | None:
+        """Labels of a local image (None if it does not exist)."""
+        try:
+            img = self.client.images.get(tag)
+        except docker.errors.ImageNotFound:
+            return None
+        return dict(getattr(img, "labels", None) or {})
+
+    def build_image(self, fileobj, tag: str, labels: dict[str, str] | None = None):
+        """Build ``tag`` from an in-memory tar build context; yields the daemon's decoded progress chunks. Local
+        only: nothing is pushed. Always labelled ``dgxmm.built=true`` (plus ``labels``)."""
+        return self.client.api.build(fileobj=fileobj, custom_context=True, tag=tag, rm=True, forcerm=True,
+                                     decode=True, labels={**(labels or {}), "dgxmm.built": "true"})
 
     def run_oneshot(self, image: str, entrypoint: list[str], command: list[str]) -> str:
         out = self.client.containers.run(image, command=command, entrypoint=entrypoint, remove=True,
