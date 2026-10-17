@@ -36,5 +36,6 @@ describe("engineLabel", () => {
   it("names engines for display", () => {
     expect(engineLabel("llamacpp")).toBe("llama.cpp");
     expect(engineLabel("vllm")).toBe("vLLM");
+    expect(engineLabel("decision")).toBe("Decision model");
   });
 });

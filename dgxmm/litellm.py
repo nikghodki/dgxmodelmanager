@@ -435,8 +435,8 @@ class LiteLLMSync:
         owner: dict[str, dict] = {}
         conflicts: dict[int, str] = {}
         for v in sorted(self.deployer.list_views(), key=lambda v: v["id"]):
-            if v["state"] != "ready" or not v["served_name"] or not v["port"]:
-                continue
+            if v["state"] != "ready" or not v["served_name"] or not v["port"] or v.get("system"):
+                continue  # system deployments (the decision model) are never LiteLLM models
             name = v["alias"] or v["served_name"]
             if name in owner:
                 conflicts[v["id"]] = (f"model name {name} is already registered for deployment {owner[name]['name']}; "
@@ -455,6 +455,8 @@ class LiteLLMSync:
         with self.db.session() as s:
             for d in s.scalars(select(Deployment)):
                 status = ready_status if d.state == "ready" else ("disabled" if ready_status == "disabled" else "none")
+                if d.system:
+                    status = "none"
                 if d.state == "ready" and ready_status == "synced" and d.id in self.conflicts:
                     status = "error"
                 if d.litellm_status != status:

@@ -11,9 +11,37 @@ python3 -m venv .venv
 .venv/bin/pytest -q                 # backend + installer tests (or: make test)
 ```
 
-The tests need no GPU, no Docker daemon and no network. Docker, NVML, engines and the Hub are faked
-(`tests/fakes.py`). The installer tests run `install.sh` in a temporary copy of the repo against stub
-commands (`tests/fixtures/install_stubs/`). `make lint` runs shellcheck on the installer in a container.
+The tests need no GPU, no Docker daemon and no network. Docker, NVML, engines, the decision model and
+the Hub are faked (`tests/fakes.py`). The installer tests run `install.sh` in a temporary copy of the
+repo against stub commands (`tests/fixtures/install_stubs/`). The suite also includes:
+
+- `tests/test_repo_hygiene.py`: tracked files must not contain the development machine's user name,
+  host name or private IP addresses. Use the placeholders it names (`dgxuser`, `dgx-host`, the
+  documentation ranges `192.0.2.0/24`, `198.51.100.0/24`, `203.0.113.0/24`).
+- `tests/test_docs_links.py`: every relative link and `#anchor` in the README, CHANGELOG, CONTRIBUTING
+  and `docs/*.md` resolves, and the Decision model page's **Docs** link points at an existing heading.
+- `tests/test_frontend_hygiene.py`: no compiled `.js` next to the TypeScript sources.
+- `tests/test_real_corpus.py`: the decision-model rules against the real-data corpora in
+  `tests/fixtures/` (see [docs/decider-evaluation.md](docs/decider-evaluation.md)).
+
+Run one file with `.venv/bin/pytest -q tests/test_docs_links.py`.
+
+**Pylint.** CI (`.github/workflows/pylint.yml`, Python 3.12) runs `pylint --errors-only dgxmm`, configured
+in `pyproject.toml` (`[tool.pylint]`). Locally: `.venv/bin/pip install pylint && .venv/bin/pylint --errors-only dgxmm`.
+
+
+**CI Tests.** The `.github/workflows/tests.yml` workflow runs backend pytest (Python 3.12) and
+frontend vitest + build (Node 22) on every push and pull request to main. Backend tests install
+dev dependencies (`pip install -e '.[dev]'`) for pytest-asyncio. Tests that need Docker or GPU
+are skipped when those aren't available.
+
+**Shell scripts.** `make lint` runs shellcheck on the installer and its test stubs in a container. To
+check every shell script:
+
+```bash
+docker run --rm -v "$PWD:/mnt" -w /mnt koalaman/shellcheck:stable \
+  install.sh tests/fixtures/install_stubs/* deploy/decider/entrypoint.sh scripts/*.sh
+```
 
 To try backend changes on a real box, rebuild and restart the container with `./install.sh`. Do not
 start a second backend from source on a host where DGXMM is installed: every instance adopts the
@@ -24,7 +52,8 @@ containers labelled `dgxmm.managed=true`.
 ```bash
 cd frontend
 npm ci
-npx vitest run        # unit and component tests
+npx vitest run        # unit and component tests (including theme contrast checks)
+npx tsc --noEmit      # type-check only
 npm run build         # type-check + production build into frontend/dist
 ```
 
@@ -63,7 +92,8 @@ DGXMM_USER=admin DGXMM_PASSWORD='…' scripts/validate_on_box.sh
 dgxmm/            FastAPI backend (module map: docs/architecture.md#backend-module-map)
   api/            HTTP routers, one per area
   deployer/       deployment lifecycle, states, reconcile, adopt
-  engines/        vLLM and llama.cpp plug-ins
+  engines/        vLLM, llama.cpp and decision-model plug-ins
+  decider/        decision model: client, supervisor, image, snapshot, key, and one module per feature
   memory/         budget, estimates, calibration, host probes
   planner/ catalog/ inventory/ metrics/ advisor/ auth/
 frontend/src/
@@ -72,10 +102,11 @@ frontend/src/
   components/app/ app building blocks (shell, tables, memory bar, plan chooser, palette)
   lib/ hooks/     pure helpers and hooks (with *.test.ts next to them)
   api.ts auth.tsx stream.ts types.ts
-tests/            pytest suite
+tests/            pytest suite (fixtures/ holds the real-data corpora)
 install.sh        installer (see ./install.sh --help)
 docs/             user documentation; docs/superpowers/ holds design history
-deploy/           example nginx config, bundled LiteLLM config (deploy/litellm/)
+deploy/           example nginx config, bundled LiteLLM config (deploy/litellm/), decider image (deploy/decider/)
+scripts/          end-to-end check, decider image and evaluation tools (scripts/decider_eval/)
 ```
 
 Conventions:
@@ -92,8 +123,10 @@ Conventions:
 
 - Use [Conventional Commits](https://www.conventionalcommits.org/): `feat(scope): …`, `fix(ui): …`,
   `docs: …`, `test: …`, `style: …`, `chore: …`.
-- Keep `.venv/bin/pytest -q`, `npx vitest run` and `npm run build` green. Add tests with every
-  behaviour change.
+- Keep `.venv/bin/pytest -q`, `npx vitest run` and `npm run build` green, and shellcheck clean. Add
+  tests with every behaviour change.
+- Decision-model features must stay advisory and fail open: rules first, the model only above its
+  threshold, and no change without an admin's confirmation (see [docs/security.md](docs/security.md)).
 - Update the docs in `docs/` when you change behaviour, configuration keys or installer options.
 - Add user-visible changes to the `[Unreleased]` section of [CHANGELOG.md](CHANGELOG.md).
 - Never commit `.env`, `config.yaml`, `data/` or `secrets/` (they are gitignored).

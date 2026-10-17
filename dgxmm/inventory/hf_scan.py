@@ -4,27 +4,34 @@ from __future__ import annotations
 import json
 import logging
 import os
-import re
 from pathlib import Path
 
 from dgxmm.inventory.archspec import parse_hf_config
 from dgxmm.inventory.artifact import ModelArtifact
+from dgxmm.inventory.kinds import artifact_kind, classify_kind  # noqa: F401  (classify_kind re-exported)
 
 log = logging.getLogger(__name__)
-_LLM_SUFFIX = re.compile(r"(CausalLM|ConditionalGeneration|LMHeadModel)$")
-_NON_LLM_PREFIX = ("Whisper", "Bart", "MBart", "T5", "MT5", "Pegasus", "Marian", "Speech", "Wav2Vec",
-                   "Seamless", "Blip", "Clip", "Siglip", "Encodec")
-_DRAFT_HINTS = ("Draft", "Eagle", "DFlash", "Medusa")
+DOWNLOAD_MARKER = ".dgxmm-download.json"  # written by dgxmm.downloads while a download has not finished
+MAX_MARKER_BYTES = 1024 * 1024
 
 
-def classify_kind(arch: str | None) -> str:
-    if not arch:
-        return "other"
-    if any(h in arch for h in _DRAFT_HINTS):
-        return "draft"
-    if _LLM_SUFFIX.search(arch) and not arch.startswith(_NON_LLM_PREFIX):
-        return "llm"
-    return "other"
+def _pending_files(repo_dir: Path, snap: Path, sizes: dict[str, int]) -> tuple[list[str], int]:
+    """Files an unfinished DGXMM download of this snapshot lists that are not (yet) in it: (missing, listed).
+    A marker for a different revision, or an unreadable one, does not apply to this snapshot."""
+    m = repo_dir / DOWNLOAD_MARKER
+    try:
+        if not m.is_file() or m.is_symlink() or m.stat().st_size > MAX_MARKER_BYTES:
+            return [], 0
+        data = json.loads(m.read_text())
+    except (OSError, ValueError):
+        return [], 0
+    if not isinstance(data, dict) or not isinstance(data.get("files"), list):
+        return [], 0
+    rev = data.get("revision")
+    if isinstance(rev, str) and len(rev) == 40 and rev != snap.name:
+        return [], 0
+    files = [f for f in data["files"] if isinstance(f, str)]
+    return [f for f in files if f not in sizes], len(files)
 
 
 def _resolve_size(p: Path) -> int | None:
@@ -101,13 +108,18 @@ def _scan_repo(d: Path) -> ModelArtifact | None:
         log.warning("cannot parse %s config: %s", ref, e)
         arch = None
         problems.append(f"config.json not understood: {e}")
+    missing, listed = _pending_files(d, snap, sizes)
+    if missing:
+        problems.append(f"download not finished: {len(missing)} of {listed} files missing ({missing[0]}"
+                        + (", …)" if len(missing) > 1 else ")"))
     weights = _weights(sizes)
     fmt = "safetensors" if any(k.endswith(".safetensors") for k in sizes) else "other"
     architecture = arch.architecture if arch else None
+    complete = arch is not None and "download in progress or interrupted" not in problems and not missing
     return ModelArtifact(
         ref=ref, source="hf", local_path=str(snap), revision=snap.name, format=fmt, weights_bytes=weights,
-        size_bytes=sum(sizes.values()), complete=arch is not None and "download in progress or interrupted" not in problems,
-        kind=classify_kind(architecture), arch=arch, architecture=architecture,
+        size_bytes=sum(sizes.values()), complete=complete,
+        kind=artifact_kind(architecture, config, sorted(sizes), ref), arch=arch, architecture=architecture,
         quant=arch.quant if arch else None, problems=problems, config=config, files=sorted(sizes),
     )
 

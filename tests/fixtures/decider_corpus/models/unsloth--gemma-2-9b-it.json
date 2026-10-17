@@ -1,0 +1,28 @@
+{
+ "ref": "unsloth/gemma-2-9b-it",
+ "architecture": "Gemma2ForCausalLM",
+ "model_type": "gemma2",
+ "config": {
+  "architectures": [
+   "Gemma2ForCausalLM"
+  ],
+  "model_type": "gemma2",
+  "num_hidden_layers": 42,
+  "hidden_size": 3584,
+  "vocab_size": 256000,
+  "max_position_embeddings": 8192
+ },
+ "files": [
+  ".gitattributes",
+  "README.md",
+  "config.json",
+  "generation_config.json",
+  "model.safetensors.index.json",
+  "special_tokens_map.json",
+  "tokenizer.json",
+  "tokenizer.model",
+  "tokenizer_config.json"
+ ],
+ "weight_files": 4,
+ "template": "{{ bos_token }}{% if messages[0]['role'] == 'system' %}{{ raise_exception('System role not supported') }}{% endif %}{% for message in messages %}{% if (message['role'] == 'user') != (loop.index0 % 2 == 0) %}{{ raise_exception('Conversation roles must alternate user/assistant/user/assistant/...') }}{% endif %}{% if (message['role'] == 'assistant') %}{% set role = 'model' %}{% else %}{% set role = message['role'] %}{% endif %}{{ '<start_of_turn>' + role + '\n' + message['content'] | trim + '<end_of_turn>\n' }}{% endfor %}{% if add_generation_prompt %}{{'<start_of_turn>model\n'}}{% endif %}"
+}

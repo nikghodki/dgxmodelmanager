@@ -3,8 +3,10 @@
 DGXMM is a self-hosted web app for serving local LLMs on an NVIDIA DGX Spark (GB10, 128 GB unified
 memory) or a similar single-GPU Linux box. It deploys the models on your disk as vLLM or llama.cpp
 containers, checks before every start that a model fits next to everything already running, and
-serves all of them through one OpenAI-compatible LiteLLM endpoint with virtual keys. It runs as a
-single container and installs with one command.
+serves all of them through one OpenAI-compatible LiteLLM endpoint with virtual keys. An optional small
+local decision model adds advice (why a start failed, which parser a model needs, which plan to pick),
+always after DGXMM's own rules and never without your confirmation. It runs as a single container and
+installs with one command.
 
 ![DGXMM dashboard: free memory, unified memory bar, KPI tiles and deployments](docs/images/dashboard-light.png)
 
@@ -22,6 +24,27 @@ single container and installs with one command.
   against an allowlist, and the default vLLM image is pinned by digest.
 - Switch a deployment to another model or reconfigure it, with automatic rollback if the new one does
   not become ready. Estimates are calibrated from measured memory after each start.
+- Engines start one at a time: a deployment started while another one loads waits as **Queued** with
+  its memory reserved, so vLLM's start-up memory check is never disturbed.
+
+**Smart features (optional decision model)**
+
+All of them are advisory: rules run first, the model is asked only when no rule answers and its answer
+is used only above a confidence threshold. The model is off by default; the rules work without it.
+
+- **Failure diagnosis**: why a deployment failed (out of memory, KV cache too small, context too long,
+  gated repo, bad parser, port in use, disk full, …) with a fix hint and **Apply fix…**, which prefills
+  Reconfigure for you to review.
+- **Parser suggestions**: the tool-call and reasoning parser for a model in the deploy wizard.
+- **Plan recommendation**: unsafe plans (stopping a busy, depended-on or higher-priority deployment) are
+  marked, and one safe plan is **Recommended**.
+- **Model-kind detection**: embeddings, rerankers, drafts, speech, vision and classifier models are
+  told apart from chat LLMs.
+- **Workload-aware advice**: each deployment's traffic is labelled (chat, agent, batch, RAG, idle) and
+  its tuning advice ordered by it.
+- The model (`vllm-sr/d3-mini`, or the smaller `d3-nano`) runs locally in a locked-down container on an
+  internal network; every answer shows its source (**Rules** or **AI** with its confidence) and can be
+  rated. See [decision model](docs/usage.md#decision-model).
 
 **Models and storage**
 
@@ -54,20 +77,24 @@ single container and installs with one command.
 **Administration**
 
 - `admin` and `viewer` roles; every change is written to an audit log.
-- Argon2id passwords, CSRF protection and login rate limiting; a command-line password reset
-  (`python -m dgxmm.admin reset-password`).
+- Argon2id passwords, CSRF protection and login rate limiting; an admin command line for password
+  resets and the decision model (`docker exec dgxmm python -m dgxmm.admin …`).
 - Light and dark themes, a phone-sized layout and a command palette (<kbd>⌘K</kbd> / <kbd>Ctrl K</kbd>).
 
 ## Screenshots
 
 | | |
 |---|---|
-| ![Deploy wizard with the memory check and ways to make a model fit](docs/images/deploy-dark.png) | ![LiteLLM page with the connection settings and the models registered in LiteLLM](docs/images/litellm.png) |
-| Deploy wizard with the memory check | LiteLLM: connection and registered models |
-| ![Deployment API access card with the single endpoint, model name and code snippets](docs/images/api-access.png) | ![Models on disk with Delete and Clean up actions](docs/images/models.png) |
-| A deployment's API access card | Models on disk with Delete and Clean up |
-| ![Processes page grouped by container, with masked command lines](docs/images/processes.png) | ![Catalog search results with fit badges](docs/images/catalog-light.png) |
-| Processes, grouped by container | Catalog with fit badges |
+| ![Decision model page with status, per-feature switches and thresholds, and the model choice](docs/images/decision-model-light.png) | ![Dashboard in the dark theme with the decision model as a system deployment](docs/images/dashboard-dark.png) |
+| Decision model: status, features and thresholds | Dashboard (dark theme) |
+| ![Deploy wizard with tool-call and reasoning parsers filled in from rules](docs/images/wizard-suggestions-light.png) | ![Memory check with a recommended plan and an unsafe one](docs/images/plan-chooser-light.png) |
+| Parser suggestions in the deploy wizard | A plan recommended by the safety rules |
+| ![Deployment page of the decision model with its System badge](docs/images/deployment-detail-light.png) | ![Deploy wizard with the memory check and ways to make a model fit](docs/images/deploy-dark.png) |
+| A deployment's page | Deploy wizard with the memory check |
+| ![LiteLLM page with the connection settings and the models registered in LiteLLM](docs/images/litellm.png) | ![Deployment API access card with the single endpoint, model name and code snippets](docs/images/api-access.png) |
+| LiteLLM: connection and registered models | A deployment's API access card |
+| ![Models on disk with Delete and Clean up actions](docs/images/models.png) | ![Processes page grouped by container, with masked command lines](docs/images/processes.png) |
+| Models on disk with Delete and Clean up | Processes, grouped by container |
 
 ## Quick start
 
@@ -78,6 +105,9 @@ single container and installs with one command.
 - The NVIDIA Container Toolkit, registered as the Docker `nvidia` runtime.
 - A normal user in the `docker` group (the installer refuses to run as root).
 - Disk space for models: 50 GiB or more free is recommended.
+- For the optional decision model: about 13 GiB of free memory while it runs (9 GiB with d3-nano), 8.5 GiB
+  in the HF cache, and 30 GB free on the Docker disk to build its image (the pinned vLLM base is about
+  21 GB).
 
 **Install**
 
@@ -90,6 +120,14 @@ endpoint, add `--with-litellm`:
 
 ```bash
 ./install.sh --with-litellm
+```
+
+To also set up the local decision model (build its image, download and verify the model, enable it and
+wait until it is healthy), add `--with-decider`. You can also enable it later in the UI under
+**Integrations > Decision model**:
+
+```bash
+./install.sh --with-decider
 ```
 
 The installer checks the host, writes `.env` and `config.yaml` for your paths, creates `data/`,
@@ -156,6 +194,8 @@ Options are flags or environment variables; `./install.sh --help` lists all of t
 | Where models live | `./install.sh --hf-cache /data/hf --models-dir /data/gguf` |
 | Token for gated Hugging Face models | `HF_TOKEN=hf_xxx ./install.sh` |
 | Bundled LiteLLM (one `/v1` endpoint) | `./install.sh --with-litellm` (`--litellm-port 4001` for another port) |
+| Local decision model (diagnosis, suggestions, ~13 GiB GPU memory) | `./install.sh --with-decider` (see [decision model](docs/operations.md#decision-model)) |
+| Remove it again with its model files | `./install.sh uninstall --purge --purge-decider-model` |
 | Register with an existing LiteLLM | `LITELLM_URL=http://litellm-proxy:4000 LITELLM_MASTER_KEY=sk-xxx ./install.sh` |
 | See what would happen | `./install.sh --dry-run` |
 
@@ -183,10 +223,12 @@ are never deleted by the installer. Before upgrading, read
 
 | Guide | What it covers |
 |---|---|
-| [Usage](docs/usage.md) | The UI page by page: deploying, deployment detail, models on disk, catalog, planner, processes, LiteLLM and virtual keys, users, calling your models |
-| [Configuration](docs/configuration.md) | Every `config.yaml` key, `.env` and installer variables, secrets, model directories, reverse proxy, LiteLLM and the bundled LiteLLM |
-| [Operations](docs/operations.md) | What the installer does, upgrading, backups, logs, freeing disk space, troubleshooting, password reset, known limitations |
-| [Architecture](docs/architecture.md) | Components, deploy flow, memory model, state machine, LiteLLM sync, weight deletion, process view, HTTP API, security model |
+| [Usage](docs/usage.md) | The UI page by page: deploying, the start-up queue, deployment detail, models on disk, catalog, planner, processes, LiteLLM and virtual keys, the [decision model](docs/usage.md#decision-model), users, calling your models |
+| [Configuration](docs/configuration.md) | Every `config.yaml` key, `.env` and installer variables, secrets, model directories, reverse proxy, LiteLLM and the bundled LiteLLM, decision-model settings, API limits |
+| [Operations](docs/operations.md) | What the installer does, upgrading, the decision model, backups, logs, freeing disk space, admin command line, troubleshooting, known limitations |
+| [Architecture](docs/architecture.md) | Components, deploy flow, memory model, state machine, start-up queue, watchdog, decision model, LiteLLM sync, weight deletion, process view, HTTP API, security model |
+| [Security](docs/security.md) | Threat model: assets, trust boundaries, the decision model's container, network, key and supply chain, residual risks |
+| [Decision-model evaluation](docs/decider-evaluation.md) | How the decision model's features and thresholds were checked on real data, and its performance and capacity |
 | [Changelog](CHANGELOG.md) | What changed in each release |
 | [Contributing](CONTRIBUTING.md) | Development setup, tests, code layout |
 
@@ -205,7 +247,10 @@ are never deleted by the installer. Before upgrading, read
 - Process command lines are visible to every signed-in user. Secrets in them are masked on a
   best-effort basis, so do not pass secrets as command-line arguments (see
   [known limitations](docs/operations.md#known-limitations)).
-- See [security hardening](docs/operations.md#security-hardening) for more.
+- The optional decision model runs as an unprivileged, read-only container on an internal network with no
+  published port; its bearer key is delivered as a file and can be rotated.
+- See [security hardening](docs/operations.md#security-hardening) and the
+  [threat model](docs/security.md) for more.
 
 ## License
 

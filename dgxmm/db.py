@@ -5,8 +5,8 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Iterator
 
-from sqlalchemy import (JSON, BigInteger, Boolean, DateTime, Float, ForeignKey, Integer, String, Text, create_engine, event,
-                        inspect, text)
+from sqlalchemy import (JSON, BigInteger, Boolean, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint,
+                        create_engine, event, inspect, text)
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 
@@ -43,6 +43,16 @@ class UserSession(Base):
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
+class CliToken(Base):
+    """Short-lived admin token for the local admin CLI (dgxmm/auth/cli_tokens.py). Only the SHA-256 is stored."""
+    __tablename__ = "cli_tokens"
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)  # sha256(token)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    scope: Mapped[str] = mapped_column(String(32))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
 class Deployment(Base):
     __tablename__ = "deployments"
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -60,7 +70,13 @@ class Deployment(Base):
     litellm_status: Mapped[str] = mapped_column(String(16), default="none")
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     exit_code: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # The last exit was an out-of-memory kill (Docker's OOMKilled, or the kernel OOM killer's line in the log).
+    oom_killed: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     adopted_from: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    # System deployment (the decision model): never a plan stop/sleep candidate or LiteLLM model; the watchdog stops it
+    # first under memory pressure, and whenever its own memory runs away (dgxmm/watchdog.py).
+    # A real column, not a config key: config is user-visible and editable. NULL on rows from older versions.
+    system: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     created_by: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
@@ -169,6 +185,27 @@ class AuditLog(Base):
     ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
 
 
+class DecisionRecord(Base):
+    """One decider decision (rules, model or abstained). Never stores raw untrusted input: only its hash."""
+    __tablename__ = "decisions"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+    feature: Mapped[str] = mapped_column(String(32), index=True)
+    subject: Mapped[str] = mapped_column(String(256), default="")
+    source: Mapped[str] = mapped_column(String(8))  # rules | model | none
+    choice: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    probabilities: Mapped[dict] = mapped_column(JSON, default=dict)
+    latency_ms: Mapped[float | None] = mapped_column(Float, nullable=True)
+    model: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    revision: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    input_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    error: Mapped[str | None] = mapped_column(String(64), nullable=True)  # error code when the model call failed
+    feedback: Mapped[str | None] = mapped_column(String(8), nullable=True)  # accepted | rejected
+    feedback_by: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    feedback_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
 class AppSetting(Base):
     """Runtime settings editable from the UI (take precedence over config.yaml/env)."""
     __tablename__ = "app_settings"
@@ -177,9 +214,40 @@ class AppSetting(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
 
+class DiagnosisRow(Base):
+    """Why a deployment failed (decision-model feature 1). The latest row per deployment is shown."""
+    __tablename__ = "diagnoses"
+    __table_args__ = (UniqueConstraint("deployment_id", "event_id", name="uq_diagnoses_event"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    deployment_id: Mapped[int] = mapped_column(ForeignKey("deployments.id", ondelete="CASCADE"), index=True)
+    event_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    cause: Mapped[str | None] = mapped_column(String(64), nullable=True)  # NULL = could not diagnose confidently
+    source: Mapped[str] = mapped_column(String(8))  # rules | model | none
+    confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    decision_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    summary: Mapped[str] = mapped_column(Text, default="")
+    fix_hint: Mapped[str] = mapped_column(Text, default="")
+    patch: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    log_excerpt: Mapped[str] = mapped_column(Text, default="")  # redacted
+
+
+class ArtifactKindRow(Base):
+    """Cache of model-derived artifact kinds (decision-model feature 4), keyed by ref + snapshot mtime."""
+    __tablename__ = "artifact_kinds"
+    ref: Mapped[str] = mapped_column(String(1024), primary_key=True)
+    mtime: Mapped[float] = mapped_column(Float)
+    kind: Mapped[str | None] = mapped_column(String(16), nullable=True)  # model's top choice (even below threshold)
+    source: Mapped[str] = mapped_column(String(8))  # rules | model | none
+    confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    decision_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
 def add_missing_columns(engine) -> list[str]:
-    """Tiny idempotent schema upgrade (there is no migration framework): `create_all` creates new tables but
-    never alters existing ones, so add any nullable model column missing from an existing table."""
+    """Idempotent schema upgrade step: `create_all` creates new tables but never alters existing ones, so add any
+    nullable model column missing from an existing table. Constraints, unique indexes and data changes are
+    versioned migrations instead (dgxmm/migrations.py)."""
     added: list[str] = []
     insp = inspect(engine)
     existing_tables = set(insp.get_table_names())
@@ -213,13 +281,24 @@ class Database:
         @event.listens_for(self.engine, "connect")
         def _pragmas(conn, _):  # noqa: ANN001
             cur = conn.cursor()
+            cur.execute("PRAGMA busy_timeout=5000")  # first: switching to WAL needs a lock another process may hold
             cur.execute("PRAGMA journal_mode=WAL")
             cur.execute("PRAGMA foreign_keys=ON")
-            cur.execute("PRAGMA busy_timeout=5000")
             cur.close()
 
-        Base.metadata.create_all(self.engine)
+        from dgxmm import migrations  # imports this module's Base lazily (no cycle)
+        # Concurrent startups (the app and an admin CLI) can race on CREATE TABLE: every lost race means another
+        # process created a table, so re-checking converges within one round per table.
+        for attempt in range(len(Base.metadata.tables) + 1):
+            try:
+                Base.metadata.create_all(self.engine)
+                break
+            except OperationalError as e:
+                if "already exists" not in str(e) or attempt == len(Base.metadata.tables):
+                    raise
         add_missing_columns(self.engine)
+        migrations.add_missing_indexes(self.engine, Base.metadata)
+        migrations.migrate(self.engine)
         self._factory = sessionmaker(self.engine, expire_on_commit=False)
 
     @contextmanager

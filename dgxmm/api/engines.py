@@ -9,5 +9,6 @@ router = APIRouter(prefix="/api/engines", tags=["engines"])
 @router.get("")
 def engines(p: Principal = Depends(current_principal), ctx: AppContext = Depends(get_ctx)):
     return [{"name": name, "supports_sleep": e.supports_sleep, "defaults": e.config_model().model_dump(mode="json"),
-             "schema": e.config_model.model_json_schema(), "image": getattr(ctx.settings.images, name, None)}
+             "schema": e.config_model.model_json_schema(), "image": getattr(ctx.settings.images, name, None),
+             "system": bool(getattr(e, "system", False))}
             for name, e in ctx.engines.items()]

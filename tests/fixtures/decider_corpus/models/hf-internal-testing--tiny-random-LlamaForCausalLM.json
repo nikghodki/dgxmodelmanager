@@ -1,0 +1,26 @@
+{
+ "ref": "hf-internal-testing/tiny-random-LlamaForCausalLM",
+ "architecture": "LlamaForCausalLM",
+ "model_type": "llama",
+ "config": {
+  "architectures": [
+   "LlamaForCausalLM"
+  ],
+  "model_type": "llama",
+  "num_hidden_layers": 2,
+  "hidden_size": 16,
+  "vocab_size": 32000,
+  "max_position_embeddings": 2048
+ },
+ "files": [
+  "README.md",
+  "config.json",
+  "generation_config.json",
+  "special_tokens_map.json",
+  "tokenizer.json",
+  "tokenizer.model",
+  "tokenizer_config.json"
+ ],
+ "weight_files": 1,
+ "template": "{% if messages[0]['role'] == 'system' %}{% set loop_messages = messages[1:] %}{% set system_message = messages[0]['content'] %}{% elif USE_DEFAULT_PROMPT == true and not '<<SYS>>' in messages[0]['content'] %}{% set loop_messages = messages %}{% set system_message = 'DEFAULT_SYSTEM_MESSAGE' %}{% else %}{% set loop_messages = messages %}{% set system_message = false %}{% endif %}{% for message in loop_messages %}{% if (message['role'] == 'user') != (loop.index0 % 2 == 0) %}{{ raise_exception('Conversation roles must alternate user/assistant/user/assistant/...') }}{% endif %}{% if loop.index0 == 0 and system_message != false %}{% set content = '<<SYS>>\n' + system_message + '\n<</SYS>>\n\n' + message['content'] %}{% else %}{% set content = message['content'] %}{% endif %}{% if message['role'] == 'user' %}{{ bos_token + '[INST] ' + content.strip() + ' [/INST]' }}{% elif message['role'] == 'system' %}{{ '<<SYS>>\n' + content.strip() + '\n<</SYS>>\n\n' }}{% elif message['role'] == 'assistant' %}{{ ' '  + content.strip() + ' ' + eos_token }}{% endif %}{% endfor %}"
+}

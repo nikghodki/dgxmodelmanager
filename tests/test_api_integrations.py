@@ -422,11 +422,11 @@ def test_full_virtual_key_only_in_create_response(lite, caplog):
 
 def test_public_url_seeded_from_config(lite):
     from dgxmm.settings_store import LITELLM_PUBLIC_URL
-    lite.ctx.settings.litellm_public_url = "http://10.0.0.5:4000"
+    lite.ctx.settings.litellm_public_url = "http://198.51.100.5:4000"
     j = lite.get(BASE).json()
-    assert j["public_url"] == "http://10.0.0.5:4000" and j["endpoint"] == "http://10.0.0.5:4000/v1"
+    assert j["public_url"] == "http://198.51.100.5:4000" and j["endpoint"] == "http://198.51.100.5:4000/v1"
     # re-sending the config default stores nothing and is not a change
-    r = lite.put(BASE, headers=lite.h, json={"public_url": "http://10.0.0.5:4000/"})
+    r = lite.put(BASE, headers=lite.h, json={"public_url": "http://198.51.100.5:4000/"})
     assert r.status_code == 200 and lite.ctx.settings_store.get(LITELLM_PUBLIC_URL) is None
     assert "litellm_settings_update" not in [a for a, _, _ in audit_rows(lite)]
     # a stored value wins over the config default
@@ -437,9 +437,9 @@ def test_public_url_seeded_from_config(lite):
     assert r.json()["public_url"] == "" and r.json()["endpoint"] == "http://litellm-proxy:4000/v1"
     assert lite.get(BASE).json()["public_url"] == ""
     # setting it back to the config default unsets the stored override
-    lite.put(BASE, headers=lite.h, json={"public_url": "http://10.0.0.5:4000"})
+    lite.put(BASE, headers=lite.h, json={"public_url": "http://198.51.100.5:4000"})
     assert lite.ctx.settings_store.get(LITELLM_PUBLIC_URL) is None
-    assert lite.get(BASE).json()["public_url"] == "http://10.0.0.5:4000"
+    assert lite.get(BASE).json()["public_url"] == "http://198.51.100.5:4000"
 
 
 def test_models_list_is_cached(lite):

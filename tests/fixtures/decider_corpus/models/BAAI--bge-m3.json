@@ -1,0 +1,45 @@
+{
+ "ref": "BAAI/bge-m3",
+ "architecture": "XLMRobertaModel",
+ "model_type": "xlm-roberta",
+ "config": {
+  "architectures": [
+   "XLMRobertaModel"
+  ],
+  "model_type": "xlm-roberta",
+  "num_hidden_layers": 24,
+  "hidden_size": 1024,
+  "vocab_size": 250002,
+  "max_position_embeddings": 8194
+ },
+ "files": [
+  ".gitattributes",
+  "1_Pooling/config.json",
+  "README.md",
+  "config.json",
+  "config_sentence_transformers.json",
+  "imgs/.DS_Store",
+  "imgs/bm25.jpg",
+  "imgs/long.jpg",
+  "imgs/miracl.jpg",
+  "imgs/mkqa.jpg",
+  "imgs/nqa.jpg",
+  "imgs/others.webp",
+  "long.jpg",
+  "modules.json",
+  "onnx/Constant_7_attr__value",
+  "onnx/config.json",
+  "onnx/model.onnx_data",
+  "onnx/sentencepiece.bpe.model",
+  "onnx/special_tokens_map.json",
+  "onnx/tokenizer.json",
+  "onnx/tokenizer_config.json",
+  "sentence_bert_config.json",
+  "sentencepiece.bpe.model",
+  "special_tokens_map.json",
+  "tokenizer.json",
+  "tokenizer_config.json"
+ ],
+ "weight_files": 4,
+ "template": null
+}

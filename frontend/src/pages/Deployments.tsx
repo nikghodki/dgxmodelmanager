@@ -16,7 +16,7 @@ const FACETS = [
   { key: "all", label: "All", match: () => true },
   { key: "ready", label: "Ready", match: (s: string) => s === "ready" },
   { key: "sleeping", label: "Sleeping", match: (s: string) => s === "sleeping" },
-  { key: "starting", label: "Starting", match: (s: string) => ["planned", "starting", "loading"].includes(s) },
+  { key: "starting", label: "Starting", match: (s: string) => ["planned", "queued", "starting", "loading"].includes(s) },
   { key: "failed", label: "Failed", match: (s: string) => s === "failed" },
   { key: "stopped", label: "Stopped", match: (s: string) => ["stopped", "unknown", "stopping"].includes(s) },
 ];
@@ -39,7 +39,7 @@ export function Deployments() {
           <button key={f.key} role="tab" aria-selected={facet === f.key} onClick={() => setFacet(f.key)}
             className={cn("inline-flex h-8 items-center gap-1.5 rounded-full border px-3 text-xs font-medium transition-colors",
               facet === f.key ? "border-primary bg-primary text-primary-foreground" : "bg-card text-muted-foreground hover:text-foreground")}>
-            {f.label}<span className="tabular-nums opacity-70">{counts[f.key] ?? 0}</span>
+            {f.label}<span className="tabular-nums">{counts[f.key] ?? 0}</span>
           </button>
         ))}
       </div>

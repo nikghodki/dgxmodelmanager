@@ -1,0 +1,93 @@
+{
+ "ref": "OpenGVLab/InternVL3-2B",
+ "architecture": "InternVLChatModel",
+ "model_type": "internvl_chat",
+ "config": {
+  "architectures": [
+   "InternVLChatModel"
+  ],
+  "model_type": "internvl_chat",
+  "hidden_size": 1536,
+  "vision_config": {
+   "_attn_implementation_autoset": true,
+   "_name_or_path": "OpenGVLab/InternViT-6B-448px-V1-5",
+   "add_cross_attention": false,
+   "architectures": [
+    "InternVisionModel"
+   ],
+   "attention_dropout": 0.0,
+   "auto_map": [
+    "AutoConfig",
+    "AutoModel"
+   ],
+   "bad_words_ids": null,
+   "begin_suppress_tokens": null,
+   "bos_token_id": null,
+   "capacity_factor": 1.2,
+   "chunk_size_feed_forward": 0,
+   "cross_attention_hidden_size": null,
+   "decoder_start_token_id": null,
+   "diversity_penalty": 0.0,
+   "do_sample": false,
+   "drop_path_rate": 0.1,
+   "dropout": 0.0,
+   "early_stopping": false,
+   "encoder_no_repeat_ngram_size": 0,
+   "eos_token_id": null,
+   "eval_capacity_factor": 1.4,
+   "exponential_decay_length_penalty": null,
+   "finetuning_task": null,
+   "forced_bos_token_id": null,
+   "forced_eos_token_id": null,
+   "hidden_act": "gelu",
+   "hidden_size": 1024,
+   "id2label": [
+    "0",
+    "1"
+   ],
+   "image_size": 448,
+   "initializer_factor": 0.1,
+   "initializer_range": 1e-10,
+   "intermediate_size": 4096,
+   "is_decoder": false,
+   "is_encoder_decoder": false,
+   "label2id": [
+    "LABEL_0",
+    "LABEL_1"
+   ],
+   "laux_allreduce": "all_nodes",
+   "layer_norm_eps": 1e-06,
+   "length_penalty": 1.0,
+   "max_length": 20,
+   "min_length": 0
+  },
+  "auto_map": {
+   "AutoConfig": "configuration_internvl_chat.InternVLChatConfig",
+   "AutoModel": "modeling_internvl_chat.InternVLChatModel",
+   "AutoModelForCausalLM": "modeling_internvl_chat.InternVLChatModel"
+  }
+ },
+ "files": [
+  ".gitattributes",
+  "README.md",
+  "added_tokens.json",
+  "config.json",
+  "configuration_intern_vit.py",
+  "configuration_internvl_chat.py",
+  "conversation.py",
+  "examples/image1.jpg",
+  "examples/image2.jpg",
+  "examples/red-panda.mp4",
+  "generation_config.json",
+  "merges.txt",
+  "modeling_intern_vit.py",
+  "modeling_internvl_chat.py",
+  "preprocessor_config.json",
+  "special_tokens_map.json",
+  "tokenizer.json",
+  "tokenizer_config.json",
+  "vocab.json"
+ ],
+ "weight_files": 1,
+ "template": "{%- if messages[0]['role'] == 'system' %}{{- '<|im_start|>system\n' + messages[0]['content'] + '<|im_end|>\n' }}{%- else %}{{- '<|im_start|>system\n你是书生·万象，英文名是InternVL，是由上海人工智能实验室、清华大学及多家合作单位联合开发的多模态大语言模型。<|im_end|>\n' }}{%- endif %}{% for message in messages %}{%- if messages[0]['role'] != 'system' or not loop.first %}{{'<|im_start|>' + message['role'] + '\n'}}{% if message['content'] is string %}{{ message['content'] }}{% else %}{% for content in message['content'] %}{% if content['type'] == 'image' %}{{ '<image>\n' }}{% elif content['type'] == 'video' %}{{ '<video>\n' }}{% elif content['type'] == 'text' %}{{ content['text'] }}{% endif %}{% endfor %}{% endif %}{{'<|im_end|>\n'}}{%- endif %}{% endfor %}{% if add_generation_prompt %}{{'<|im_start|>assistant\n' }}{% endif %}"
+}

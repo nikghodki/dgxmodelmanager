@@ -2,7 +2,7 @@ import { useMemo, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 import type { ColumnDef } from "@tanstack/react-table";
-import { AlertTriangle, CheckCircle2, Eraser, HardDrive, RefreshCw, Rocket, Trash2 } from "lucide-react";
+import { AlertTriangle, CheckCircle2, Eraser, HardDrive, RefreshCw, Rocket, Sparkles, Trash2 } from "lucide-react";
 import { api } from "@/api";
 import { useIsAdmin } from "@/auth";
 import { DataTable } from "@/components/app/data-table";
@@ -11,13 +11,31 @@ import { EmptyState, ErrorState } from "@/components/app/states";
 import { CleanupIncompleteDialog, DeleteWeightsDialog, modelShortName } from "@/components/app/weights-dialogs";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { fmtBytes, shortRef } from "@/format";
 import { useActionMutation } from "@/hooks/use-action-mutation";
+import { fmtConfidence, kindLabel } from "@/lib/decider";
 import { cn } from "@/lib/utils";
 import type { Artifact, CleanupPreview } from "@/types";
 
-const KIND_LABEL: Record<string, string> = { llm: "LLM", draft: "Draft", other: "Other" };
-const KINDS = [{ key: "all", label: "All" }, { key: "llm", label: "LLM" }, { key: "draft", label: "Draft" }, { key: "other", label: "Other" }];
+const BASE_KINDS = ["llm", "draft", "other"];
+
+/** Kind badge; a model-derived kind carries an "AI" marker with the decision model's confidence. */
+function KindBadge({ a }: { a: Artifact }) {
+  const badge = <Badge variant={a.kind === "llm" ? "default" : "secondary"}>{kindLabel(a.kind)}</Badge>;
+  if (a.kind_source !== "model") return badge;
+  const tip = `Classified by the decision model${a.kind_confidence != null ? ` (${fmtConfidence(a.kind_confidence)})` : ""}`;
+  return (
+    <span className="inline-flex items-center gap-1">
+      {badge}
+      <TooltipProvider delayDuration={200}><Tooltip><TooltipTrigger asChild>
+        <span tabIndex={0} aria-label={tip}
+          className="inline-flex items-center gap-0.5 rounded-full border border-primary/30 bg-primary/10 px-1.5 py-0.5 text-[10px] font-semibold text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+          <Sparkles aria-hidden className="h-2.5 w-2.5" />AI</span>
+      </TooltipTrigger><TooltipContent>{tip}</TooltipContent></Tooltip></TooltipProvider>
+    </span>
+  );
+}
 
 export function Models() {
   const admin = useIsAdmin();
@@ -37,12 +55,14 @@ export function Models() {
   const [bulk, setBulk] = useState(false);
   const eligibleCount = admin && incomplete > 0 ? cleanup.data?.count ?? 0 : 0; // server-side eligibility
   const rows = kind === "all" ? all : all.filter((a) => a.kind === kind);
+  // Kinds beyond the usual three (embedding, reranker, …) get a filter chip only when such models exist.
+  const kinds = [{ key: "all", label: "All" }, ...[...BASE_KINDS, ...new Set(all.map((a) => a.kind).filter((k) => !BASE_KINDS.includes(k)))].map((k) => ({ key: k, label: kindLabel(k) }))];
   const total = all.reduce((s, a) => s + a.size_bytes, 0);
   const columns = useMemo<ColumnDef<Artifact, any>[]>(() => [
     { accessorKey: "ref", header: "Model", cell: ({ row }) => (
       <div className="min-w-0"><div className="max-w-[40ch] truncate font-medium" title={row.original.ref}>{shortRef(row.original.ref)}</div>
         {row.original.revision && <div className="font-mono text-[11px] text-muted-foreground">{row.original.revision.slice(0, 8)}</div>}</div>) },
-    { accessorKey: "kind", header: "Kind", cell: ({ getValue }) => <Badge variant={getValue() === "llm" ? "default" : "secondary"}>{KIND_LABEL[getValue() as string] ?? getValue()}</Badge> },
+    { accessorKey: "kind", header: "Kind", cell: ({ row }) => <KindBadge a={row.original} /> },
     { id: "format", header: "Format", accessorFn: (a) => `${a.format} ${a.quant ?? ""}`, cell: ({ row }) => (
       <div className="flex flex-wrap gap-1"><Badge variant="outline">{row.original.format}</Badge>{row.original.quant && <Badge variant="outline">{row.original.quant}</Badge>}
         {row.original.has_mtp && <Badge variant="outline">MTP</Badge>}{row.original.is_moe && <Badge variant="outline">MoE</Badge>}</div>) },
@@ -66,7 +86,7 @@ export function Models() {
       <ErrorState error={inv.error} onRetry={() => inv.refetch()} />
       <DataTable columns={columns} data={rows} loading={inv.isLoading} getRowId={(a) => a.ref}
         searchPlaceholder="Search models" searchText={(a) => `${a.ref} ${a.architecture ?? ""} ${a.quant ?? ""}`}
-        toolbar={<div className="flex gap-1" role="tablist" aria-label="Filter by kind">{KINDS.map((k) => (
+        toolbar={<div className="flex gap-1" role="tablist" aria-label="Filter by kind">{kinds.map((k) => (
           <button key={k.key} role="tab" aria-selected={kind === k.key} onClick={() => setKind(k.key)}
             className={cn("h-8 rounded-full border px-3 text-xs font-medium", kind === k.key ? "border-primary bg-primary text-primary-foreground" : "bg-card text-muted-foreground hover:text-foreground")}>{k.label}</button>))}</div>}
         renderDetail={(a) => a.problems.length ? <ul className="space-y-1 text-xs text-status-warning">{a.problems.map((p) => <li key={p}>• {p}</li>)}</ul> : null}

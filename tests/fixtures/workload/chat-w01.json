@@ -1,0 +1,48 @@
+{
+ "name": "chat-w01",
+ "label": "single_user_chat",
+ "window_minutes": 10,
+ "summary": {
+  "minutes": 10,
+  "idle_fraction": 0.0,
+  "mean_running": 0.175,
+  "peak_running": 0.3333333333333333,
+  "mean_waiting": 0.0,
+  "peak_waiting": 0.0,
+  "queued_fraction": 0.0,
+  "prompt_tps": 5.6545,
+  "gen_tps": 7.6945,
+  "prompt_gen_ratio": 0.73,
+  "prefix_hit_rate": 0.4855,
+  "spec_accept_rate": null,
+  "kv_usage_mean": 0.001,
+  "kv_usage_peak": 0.001642692239389093,
+  "ttft_p50": 0.0373,
+  "e2e_p50": 6.3125,
+  "running_min": 0.08,
+  "running_max": 0.33,
+  "running_cv": 0.4,
+  "requests_per_min": 1.7,
+  "prompt_tokens_per_request": 204,
+  "output_tokens_per_request": 278
+ },
+ "engine": "vllm",
+ "model_ref": "Qwen/Qwen3-0.6B",
+ "config": {
+  "max_model_len": 16384,
+  "max_num_seqs": 8,
+  "max_num_batched_tokens": 4096,
+  "kv_tokens": 16384,
+  "tool_call_parser": "hermes",
+  "reasoning_parser": "qwen3",
+  "enable_prefix_caching": true
+ },
+ "traffic": {
+  "ok": 33,
+  "err": 0,
+  "tool_calls": 0,
+  "prompt_tokens": 5477,
+  "completion_tokens": 8682
+ },
+ "source": "real minute rollups of a DGXMM test deployment on the DGX Spark, traffic from scripts/decider_eval/traffic.py"
+}

@@ -1,0 +1,100 @@
+# label: tokenizer_or_template
+# engine: vllm
+# model_ref: /models/qwen3-broken-tokenizer
+# exit_code: 1
+# message: container exited with code 1
+# induced: a local checkpoint whose tokenizer.json is truncated (an interrupted copy); without tokenizer files at all vLLM still starts (it falls back), so a corrupt file is the realistic failure
+# source: induced on the DGX Spark (GB10) with scripts/decider_eval/induce_failures.py
+---
+WARNING 10-17 01:44:47 [argparse_utils.py:276] With `vllm serve`, you should provide the model as a positional argument or in a config file instead of via the `--model` option. The `--model` option will be removed in a future version.
+(APIServer pid=1) INFO 10-17 01:44:47 [api_utils.py:347] 
+(APIServer pid=1) INFO 10-17 01:44:47 [api_utils.py:347]        █     █     █▄   ▄█
+(APIServer pid=1) INFO 10-17 01:44:47 [api_utils.py:347]  ▄▄ ▄█ █     █     █ ▀▄▀ █  version 0.26.1rc1.dev1219+g46638857f
+(APIServer pid=1) INFO 10-17 01:44:47 [api_utils.py:347]   █▄█▀ █     █     █     █  model   /models/qwen3-broken-tokenizer
+(APIServer pid=1) INFO 10-17 01:44:47 [api_utils.py:347]    ▀▀  ▀▀▀▀▀ ▀▀▀▀▀ ▀     ▀
+(APIServer pid=1) INFO 10-17 01:44:47 [api_utils.py:347] 
+(APIServer pid=1) INFO 10-17 01:44:47 [api_utils.py:286] non-default args: {'model_tag': '/models/qwen3-broken-tokenizer', 'host': '0.0.0.0', 'model': '/models/qwen3-broken-tokenizer', 'max_model_len': 4096, 'served_model_name': ['qwen3-broken-tokenizer'], 'gpu_memory_utilization': 0.05, 'enable_prefix_caching': True, 'max_num_batched_tokens': 2048, 'max_num_seqs': 2, 'enable_chunked_prefill': True}
+(APIServer pid=1) INFO 10-17 01:44:47 [model.py:684] Resolved architecture: Qwen3ForCausalLM
+(APIServer pid=1) INFO 10-17 01:44:47 [model.py:2021] Using max model len 4096
+(APIServer pid=1) INFO 10-17 01:44:47 [kernel.py:365] Final IR op priority after setting platform defaults: IrOpPriorityConfig(rms_norm=['native'], fused_add_rms_norm=['native'])
+(APIServer pid=1) Traceback (most recent call last):
+(APIServer pid=1)   File "/usr/local/bin/vllm", line 10, in <module>
+(APIServer pid=1)     sys.exit(main())
+(APIServer pid=1)              ^^^^^^
+(APIServer pid=1)   File "/usr/local/lib/python3.12/dist-packages/vllm/entrypoints/cli/main.py", line 97, in main
+(APIServer pid=1)     args.dispatch_function(args)
+(APIServer pid=1)   File "/usr/local/lib/python3.12/dist-packages/vllm/entrypoints/cli/serve.py", line 153, in cmd
+(APIServer pid=1)     uvloop.run(run_server(args))
+(APIServer pid=1)   File "/usr/local/lib/python3.12/dist-packages/uvloop/__init__.py", line 96, in run
+(APIServer pid=1)     return __asyncio.run(
+(APIServer pid=1)            ^^^^^^^^^^^^^^
+(APIServer pid=1)   File "/usr/lib/python3.12/asyncio/runners.py", line 194, in run
+(APIServer pid=1)     return runner.run(main)
+(APIServer pid=1)            ^^^^^^^^^^^^^^^^
+(APIServer pid=1)   File "/usr/lib/python3.12/asyncio/runners.py", line 118, in run
+(APIServer pid=1)     return self._loop.run_until_complete(task)
+(APIServer pid=1)            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(APIServer pid=1)   File "uvloop/loop.pyx", line 1518, in uvloop.loop.Loop.run_until_complete
+(APIServer pid=1)   File "/usr/local/lib/python3.12/dist-packages/uvloop/__init__.py", line 48, in wrapper
+(APIServer pid=1)     return await main
+(APIServer pid=1)            ^^^^^^^^^^
+(APIServer pid=1)   File "/usr/local/lib/python3.12/dist-packages/vllm/entrypoints/launchers/api_server/entry.py", line 176, in run_server
+(APIServer pid=1)     await run_server_worker(listen_address, sock, args, **uvicorn_kwargs)
+(APIServer pid=1)   File "/usr/local/lib/python3.12/dist-packages/vllm/entrypoints/launchers/api_server/entry.py", line 190, in run_server_worker
+(APIServer pid=1)     async with build_async_engine_client(
+(APIServer pid=1)   File "/usr/lib/python3.12/contextlib.py", line 210, in __aenter__
+(APIServer pid=1)     return await anext(self.gen)
+(APIServer pid=1)            ^^^^^^^^^^^^^^^^^^^^^
+(APIServer pid=1)   File "/usr/local/lib/python3.12/dist-packages/vllm/entrypoints/launchers/api_server/entry.py", line 58, in build_async_engine_client
+(APIServer pid=1)     async with build_async_engine_client_from_engine_args(
+(APIServer pid=1)   File "/usr/lib/python3.12/contextlib.py", line 210, in __aenter__
+(APIServer pid=1)     return await anext(self.gen)
+(APIServer pid=1)            ^^^^^^^^^^^^^^^^^^^^^
+(APIServer pid=1)   File "/usr/local/lib/python3.12/dist-packages/vllm/entrypoints/launchers/api_server/entry.py", line 94, in build_async_engine_client_from_engine_args
+(APIServer pid=1)     async_llm = AsyncLLM.from_vllm_config(
+(APIServer pid=1)                 ^^^^^^^^^^^^^^^^^^^^^^^^^^
+(APIServer pid=1)   File "/usr/local/lib/python3.12/dist-packages/vllm/v1/engine/async_llm.py", line 220, in from_vllm_config
+(APIServer pid=1)     return cls(
+(APIServer pid=1)            ^^^^
+(APIServer pid=1)   File "/usr/local/lib/python3.12/dist-packages/vllm/v1/engine/async_llm.py", line 135, in __init__
+(APIServer pid=1)     self.renderer = renderer = renderer_from_config(self.vllm_config)
+(APIServer pid=1)                                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(APIServer pid=1)   File "/usr/local/lib/python3.12/dist-packages/vllm/renderers/registry.py", line 85, in renderer_from_config
+(APIServer pid=1)     tokenizer = cached_tokenizer_from_config(model_config, **kwargs)
+(APIServer pid=1)                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(APIServer pid=1)   File "/usr/local/lib/python3.12/dist-packages/vllm/tokenizers/registry.py", line 276, in cached_tokenizer_from_config
+(APIServer pid=1)     return cached_get_tokenizer(
+(APIServer pid=1)            ^^^^^^^^^^^^^^^^^^^^^
+(APIServer pid=1)   File "/usr/local/lib/python3.12/dist-packages/vllm/tokenizers/registry.py", line 253, in get_tokenizer
+(APIServer pid=1)     tokenizer = tokenizer_cls_.from_pretrained(tokenizer_name, *args, **kwargs)
+(APIServer pid=1)                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(APIServer pid=1)   File "/usr/local/lib/python3.12/dist-packages/vllm/tokenizers/hf.py", line 238, in from_pretrained
+(APIServer pid=1)     raise e
+(APIServer pid=1)   File "/usr/local/lib/python3.12/dist-packages/vllm/tokenizers/hf.py", line 210, in from_pretrained
+(APIServer pid=1)     tokenizer = AutoTokenizer.from_pretrained(
+(APIServer pid=1)                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(APIServer pid=1)   File "/usr/local/lib/python3.12/dist-packages/transformers/models/auto/tokenization_auto.py", line 925, in from_pretrained
+(APIServer pid=1)     return tokenizer_class.from_pretrained(pretrained_model_name_or_path, *inputs, **kwargs)
+(APIServer pid=1)            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(APIServer pid=1)   File "/usr/local/lib/python3.12/dist-packages/transformers/tokenization_utils_base.py", line 1736, in from_pretrained
+(APIServer pid=1)     return cls._from_pretrained(
+(APIServer pid=1)            ^^^^^^^^^^^^^^^^^^^^^
+(APIServer pid=1)   File "/usr/local/lib/python3.12/dist-packages/transformers/tokenization_utils_base.py", line 1929, in _from_pretrained
+(APIServer pid=1)     init_kwargs = cls.convert_to_native_format(**init_kwargs)
+(APIServer pid=1)                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(APIServer pid=1)   File "/usr/local/lib/python3.12/dist-packages/transformers/tokenization_utils_tokenizers.py", line 123, in convert_to_native_format
+(APIServer pid=1)     tokenizer_json = json.load(tokenizer_handle)
+(APIServer pid=1)                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(APIServer pid=1)   File "/usr/lib/python3.12/json/__init__.py", line 293, in load
+(APIServer pid=1)     return loads(fp.read(),
+(APIServer pid=1)            ^^^^^^^^^^^^^^^^
+(APIServer pid=1)   File "/usr/lib/python3.12/json/__init__.py", line 346, in loads
+(APIServer pid=1)     return _default_decoder.decode(s)
+(APIServer pid=1)            ^^^^^^^^^^^^^^^^^^^^^^^^^^
+(APIServer pid=1)   File "/usr/lib/python3.12/json/decoder.py", line 337, in decode
+(APIServer pid=1)     obj, end = self.raw_decode(s, idx=_w(s, 0).end())
+(APIServer pid=1)                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(APIServer pid=1)   File "/usr/lib/python3.12/json/decoder.py", line 353, in raw_decode
+(APIServer pid=1)     obj, end = self.scan_once(s, idx)
+(APIServer pid=1)                ^^^^^^^^^^^^^^^^^^^^^^
+(APIServer pid=1) json.decoder.JSONDecodeError: Expecting property name enclosed in double quotes: line 196 column 2 (char 4096)

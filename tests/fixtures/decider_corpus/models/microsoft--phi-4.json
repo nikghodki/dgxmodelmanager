@@ -1,0 +1,34 @@
+{
+ "ref": "microsoft/phi-4",
+ "architecture": "Phi3ForCausalLM",
+ "model_type": "phi3",
+ "config": {
+  "architectures": [
+   "Phi3ForCausalLM"
+  ],
+  "model_type": "phi3",
+  "num_hidden_layers": 40,
+  "hidden_size": 5120,
+  "vocab_size": 100352,
+  "max_position_embeddings": 16384
+ },
+ "files": [
+  ".gitattributes",
+  "CODE_OF_CONDUCT.md",
+  "LICENSE",
+  "README.md",
+  "SECURITY.md",
+  "added_tokens.json",
+  "config.json",
+  "data_summary_card.md",
+  "generation_config.json",
+  "merges.txt",
+  "model.safetensors.index.json",
+  "special_tokens_map.json",
+  "tokenizer.json",
+  "tokenizer_config.json",
+  "vocab.json"
+ ],
+ "weight_files": 6,
+ "template": "{% for message in messages %}{% if (message['role'] == 'system') %}{{'<|im_start|>system<|im_sep|>' + message['content'] + '<|im_end|>'}}{% elif (message['role'] == 'user') %}{{'<|im_start|>user<|im_sep|>' + message['content'] + '<|im_end|>'}}{% elif (message['role'] == 'assistant') %}{{'<|im_start|>assistant<|im_sep|>' + message['content'] + '<|im_end|>'}}{% endif %}{% endfor %}{% if add_generation_prompt %}{{ '<|im_start|>assistant<|im_sep|>' }}{% endif %}"
+}

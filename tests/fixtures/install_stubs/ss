@@ -8,5 +8,5 @@ if [ -n "${FAKE_PORT_BUSY:-}" ]; then
     echo "LISTEN 0 4096 0.0.0.0:${FAKE_PORT_BUSY} 0.0.0.0:*"
   fi
 fi
-for ((i = 0; i < ${FAKE_SS_FILLER:-0}; i++)); do echo "LISTEN 0 4096 10.0.0.1:$((20000 + i % 10000)) 0.0.0.0:*"; done
+for ((i = 0; i < ${FAKE_SS_FILLER:-0}; i++)); do echo "LISTEN 0 4096 198.51.100.1:$((20000 + i % 10000)) 0.0.0.0:*"; done
 exit 0

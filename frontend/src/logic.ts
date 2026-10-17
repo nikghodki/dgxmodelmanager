@@ -29,21 +29,40 @@ export function finiteSeries<T extends Record<string, any>>(data: T[], keys: str
   });
 }
 
-export type DeploymentAction = "open" | "sleep" | "wake" | "switch" | "reconfigure" | "stop" | "start" | "remove";
+/** One-line summary of why a deployment waits for a start-up slot (the full reason goes in a tooltip). */
+export function queueShort(q: { waiting_for: string[]; position: number | null }): string {
+  const who = q.waiting_for.length ? `Waiting for ${q.waiting_for.join(", ")}` : "Waiting for a start-up slot";
+  return q.position && q.position > 1 ? `${who} (#${q.position} in queue)` : who;
+}
 
-/** Which row/header actions a user may take on a deployment in its current state. */
-export function deploymentActions(d: { state: string; sleep_capable: boolean }, isAdmin: boolean): DeploymentAction[] {
+export type DeploymentAction = "open" | "manage" | "sleep" | "wake" | "switch" | "reconfigure" | "stop" | "start" | "remove";
+
+/**
+ * Which row/header actions a user may take on a deployment in its current state. A system deployment (the decision
+ * model) is managed on the Decision model page ("manage"): it is never switched or reconfigured, it starts only by
+ * enabling the decision model there, and removing it also turns the decision model off (the backend enforces all three).
+ */
+export function deploymentActions(d: { state: string; sleep_capable: boolean; system?: boolean }, isAdmin: boolean): DeploymentAction[] {
   const out: DeploymentAction[] = ["open"];
   if (!isAdmin) return out;
+  if (d.system) {
+    out.push("manage");
+    if (["ready", "sleeping", "queued", "starting", "loading", "unknown"].includes(d.state)) out.push("stop");
+    if (canRemove(d.state)) out.push("remove");
+    return out;
+  }
   if (d.state === "ready" && d.sleep_capable) out.push("sleep");
   if (d.state === "sleeping") out.push("wake");
   if (d.state === "ready" || d.state === "sleeping") out.push("switch");
   if (["ready", "sleeping", "stopped", "failed"].includes(d.state)) out.push("reconfigure");
-  if (["ready", "sleeping", "starting", "loading", "unknown"].includes(d.state)) out.push("stop");
+  if (["ready", "sleeping", "queued", "starting", "loading", "unknown"].includes(d.state)) out.push("stop");
   if (d.state === "stopped" || d.state === "failed") out.push("start");
   if (canRemove(d.state)) out.push("remove");
   return out;
 }
+
+/** What Remove does to a system deployment, for its confirmation. */
+export const SYSTEM_REMOVE_TEXT = "This also turns the decision model off: every feature falls back to rules until you enable it again on the Decision model page.";
 
 export function submitState(preview: Preview | null, actions: PlanAction[], pending: boolean, mode: "deploy" | "switch" | "reconfigure") {
   if (pending) return { disabled: true, label: mode === "deploy" ? "Deploying…" : "Working… this can take minutes" };

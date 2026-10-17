@@ -1,0 +1,72 @@
+# label: trust_remote_code_required
+# engine: vllm
+# model_ref: internlm/internlm2-chat-1_8b
+# exit_code: 1
+# message: container exited with code 1
+# induced: model_type internlm2 needs the repository's configuration code; only config files downloaded
+# source: induced on the DGX Spark (GB10) with scripts/decider_eval/induce_failures.py
+---
+WARNING 10-17 01:21:10 [argparse_utils.py:276] With `vllm serve`, you should provide the model as a positional argument or in a config file instead of via the `--model` option. The `--model` option will be removed in a future version.
+(APIServer pid=1) INFO 10-17 01:21:10 [api_utils.py:347] 
+(APIServer pid=1) INFO 10-17 01:21:10 [api_utils.py:347]        █     █     █▄   ▄█
+(APIServer pid=1) INFO 10-17 01:21:10 [api_utils.py:347]  ▄▄ ▄█ █     █     █ ▀▄▀ █  version 0.26.1rc1.dev1219+g46638857f
+(APIServer pid=1) INFO 10-17 01:21:10 [api_utils.py:347]   █▄█▀ █     █     █     █  model   internlm/internlm2-chat-1_8b
+(APIServer pid=1) INFO 10-17 01:21:10 [api_utils.py:347]    ▀▀  ▀▀▀▀▀ ▀▀▀▀▀ ▀     ▀
+(APIServer pid=1) INFO 10-17 01:21:10 [api_utils.py:347] 
+(APIServer pid=1) INFO 10-17 01:21:10 [api_utils.py:286] non-default args: {'model_tag': 'internlm/internlm2-chat-1_8b', 'host': '0.0.0.0', 'model': 'internlm/internlm2-chat-1_8b', 'max_model_len': 4096, 'served_model_name': ['internlm2-chat-1_8b'], 'gpu_memory_utilization': 0.03, 'enable_prefix_caching': True, 'max_num_batched_tokens': 2048, 'max_num_seqs': 2, 'enable_chunked_prefill': True}
+(APIServer pid=1) INFO 10-17 01:21:10 [arg_utils.py:824] HF_HUB_OFFLINE is True, replace model_id [internlm/internlm2-chat-1_8b] to model_path [/root/.cache/huggingface/hub/models--internlm--internlm2-chat-1_8b/snapshots/21ccc6447f57c3c6dd2a78e2248bd6afbe0133e1]
+(APIServer pid=1) ERROR 10-17 01:21:10 [repo_utils.py:119] Error parsing config for /root/.cache/huggingface/hub/models--internlm--internlm2-chat-1_8b/snapshots/21ccc6447f57c3c6dd2a78e2248bd6afbe0133e1: The repository /root/.cache/huggingface/hub/models--internlm--internlm2-chat-1_8b/snapshots/21ccc6447f57c3c6dd2a78e2248bd6afbe0133e1 contains custom code which must be executed to correctly load the model. You can inspect the repository content at /root/.cache/huggingface/hub/models--internlm--internlm2-chat-1_8b/snapshots/21ccc6447f57c3c6dd2a78e2248bd6afbe0133e1 .
+(APIServer pid=1) ERROR 10-17 01:21:10 [repo_utils.py:119]  You can inspect the repository content at https://hf.co//root/.cache/huggingface/hub/models--internlm--internlm2-chat-1_8b/snapshots/21ccc6447f57c3c6dd2a78e2248bd6afbe0133e1.
+(APIServer pid=1) ERROR 10-17 01:21:10 [repo_utils.py:119] Please pass the argument `trust_remote_code=True` to allow custom code to be run., retrying 1 of 2
+(APIServer pid=1) ERROR 10-17 01:21:12 [repo_utils.py:117] Error parsing config for /root/.cache/huggingface/hub/models--internlm--internlm2-chat-1_8b/snapshots/21ccc6447f57c3c6dd2a78e2248bd6afbe0133e1: The repository /root/.cache/huggingface/hub/models--internlm--internlm2-chat-1_8b/snapshots/21ccc6447f57c3c6dd2a78e2248bd6afbe0133e1 contains custom code which must be executed to correctly load the model. You can inspect the repository content at /root/.cache/huggingface/hub/models--internlm--internlm2-chat-1_8b/snapshots/21ccc6447f57c3c6dd2a78e2248bd6afbe0133e1 .
+(APIServer pid=1) ERROR 10-17 01:21:12 [repo_utils.py:117]  You can inspect the repository content at https://hf.co//root/.cache/huggingface/hub/models--internlm--internlm2-chat-1_8b/snapshots/21ccc6447f57c3c6dd2a78e2248bd6afbe0133e1.
+(APIServer pid=1) ERROR 10-17 01:21:12 [repo_utils.py:117] Please pass the argument `trust_remote_code=True` to allow custom code to be run.
+(APIServer pid=1) Traceback (most recent call last):
+(APIServer pid=1)   File "/usr/local/bin/vllm", line 10, in <module>
+(APIServer pid=1)     sys.exit(main())
+(APIServer pid=1)              ^^^^^^
+(APIServer pid=1)   File "/usr/local/lib/python3.12/dist-packages/vllm/entrypoints/cli/main.py", line 97, in main
+(APIServer pid=1)     args.dispatch_function(args)
+(APIServer pid=1)   File "/usr/local/lib/python3.12/dist-packages/vllm/entrypoints/cli/serve.py", line 153, in cmd
+(APIServer pid=1)     uvloop.run(run_server(args))
+(APIServer pid=1)   File "/usr/local/lib/python3.12/dist-packages/uvloop/__init__.py", line 96, in run
+(APIServer pid=1)     return __asyncio.run(
+(APIServer pid=1)            ^^^^^^^^^^^^^^
+(APIServer pid=1)   File "/usr/lib/python3.12/asyncio/runners.py", line 194, in run
+(APIServer pid=1)     return runner.run(main)
+(APIServer pid=1)            ^^^^^^^^^^^^^^^^
+(APIServer pid=1)   File "/usr/lib/python3.12/asyncio/runners.py", line 118, in run
+(APIServer pid=1)     return self._loop.run_until_complete(task)
+(APIServer pid=1)            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(APIServer pid=1)   File "uvloop/loop.pyx", line 1518, in uvloop.loop.Loop.run_until_complete
+(APIServer pid=1)   File "/usr/local/lib/python3.12/dist-packages/uvloop/__init__.py", line 48, in wrapper
+(APIServer pid=1)     return await main
+(APIServer pid=1)            ^^^^^^^^^^
+(APIServer pid=1)   File "/usr/local/lib/python3.12/dist-packages/vllm/entrypoints/launchers/api_server/entry.py", line 176, in run_server
+(APIServer pid=1)     await run_server_worker(listen_address, sock, args, **uvicorn_kwargs)
+(APIServer pid=1)   File "/usr/local/lib/python3.12/dist-packages/vllm/entrypoints/launchers/api_server/entry.py", line 190, in run_server_worker
+(APIServer pid=1)     async with build_async_engine_client(
+(APIServer pid=1)   File "/usr/lib/python3.12/contextlib.py", line 210, in __aenter__
+(APIServer pid=1)     return await anext(self.gen)
+(APIServer pid=1)            ^^^^^^^^^^^^^^^^^^^^^
+(APIServer pid=1)   File "/usr/local/lib/python3.12/dist-packages/vllm/entrypoints/launchers/api_server/entry.py", line 58, in build_async_engine_client
+(APIServer pid=1)     async with build_async_engine_client_from_engine_args(
+(APIServer pid=1)   File "/usr/lib/python3.12/contextlib.py", line 210, in __aenter__
+(APIServer pid=1)     return await anext(self.gen)
+(APIServer pid=1)            ^^^^^^^^^^^^^^^^^^^^^
+(APIServer pid=1)   File "/usr/local/lib/python3.12/dist-packages/vllm/entrypoints/launchers/api_server/entry.py", line 82, in build_async_engine_client_from_engine_args
+(APIServer pid=1)     vllm_config = engine_args.create_engine_config(usage_context=usage_context)
+(APIServer pid=1)                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(APIServer pid=1)   File "/usr/local/lib/python3.12/dist-packages/vllm/engine/arg_utils.py", line 2001, in create_engine_config
+(APIServer pid=1)     model_config = self.create_model_config()
+(APIServer pid=1)                    ^^^^^^^^^^^^^^^^^^^^^^^^^^
+(APIServer pid=1)   File "/usr/local/lib/python3.12/dist-packages/vllm/engine/arg_utils.py", line 1757, in create_model_config
+(APIServer pid=1)     return ModelConfig(
+(APIServer pid=1)            ^^^^^^^^^^^^
+(APIServer pid=1)   File "/usr/local/lib/python3.12/dist-packages/pydantic/_internal/_dataclasses.py", line 121, in __init__
+(APIServer pid=1)     s.__pydantic_validator__.validate_python(ArgsKwargs(args, kwargs), self_instance=s)
+(APIServer pid=1) pydantic_core._pydantic_core.ValidationError: 1 validation error for ModelConfig
+(APIServer pid=1)   Value error, The repository /root/.cache/huggingface/hub/models--internlm--internlm2-chat-1_8b/snapshots/21ccc6447f57c3c6dd2a78e2248bd6afbe0133e1 contains custom code which must be executed to correctly load the model. You can inspect the repository content at /root/.cache/huggingface/hub/models--internlm--internlm2-chat-1_8b/snapshots/21ccc6447f57c3c6dd2a78e2248bd6afbe0133e1 .
+(APIServer pid=1)  You can inspect the repository content at https://hf.co//root/.cache/huggingface/hub/models--internlm--internlm2-chat-1_8b/snapshots/21ccc6447f57c3c6dd2a78e2248bd6afbe0133e1.
+(APIServer pid=1) Please pass the argument `trust_remote_code=True` to allow custom code to be run. [type=value_error, input_value=ArgsKwargs((), {'model': ...nderer_num_workers': 1}), input_type=ArgsKwargs]
+(APIServer pid=1)     For further information visit https://errors.pydantic.dev/2.13/v/value_error

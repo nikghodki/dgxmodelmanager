@@ -7,6 +7,7 @@ import logging
 from sqlalchemy import select
 
 from dgxmm.db import Deployment, DeploymentEvent
+from dgxmm.engines.decision import DECIDER_MODELS, DECIDER_REPO, MODEL_LABEL, SYSTEM_LABEL
 
 log = logging.getLogger(__name__)
 
@@ -27,8 +28,15 @@ async def reconcile(deployer) -> list[str]:
     with deployer.db.session() as s:
         rows = list(s.scalars(select(Deployment)))
     known = {r.container_id for r in rows if r.container_id}
+    for d in rows:  # start-ups still running hold their start-up slots before anything queued resumes
+        if d.state in ("starting", "loading") and d.container_id in containers:
+            deployer.gate.hold(d.id, "resumed", d.name)
     for d in rows:
         if d.state in ("stopped", "failed", "planned"):
+            continue
+        if d.state == "queued":  # no container yet: back in the start-up queue (fit is checked at launch)
+            deployer.resume_queued(d.id)
+            notes.append(f"{d.name}: queued → back in the start-up queue")
             continue
         try:
             c = containers.get(d.container_id) if d.container_id else None
@@ -37,7 +45,7 @@ async def reconcile(deployer) -> list[str]:
                                      last_error="container missing after dgxmm restart", container_id=None)
                 notes.append(f"{d.name}: container missing → failed")
             elif c.status in ("exited", "dead"):
-                await deployer._fail_exited(d, c.exit_code)
+                await deployer._fail_exited(d, c.exit_code, c.oom_killed)
                 notes.append(f"{d.name}: container exited ({c.exit_code}) → failed")
             elif d.state in ("starting", "loading"):
                 deployer.resume_monitor(d.id)
@@ -60,11 +68,16 @@ async def reconcile(deployer) -> list[str]:
             taken.add(name)
             port = _flag(c.command, "--port")
             port_i = int(port) if port and port.isdigit() else (min(c.host_ports) if c.host_ports else None)
+            engine = c.labels.get("dgxmm.engine", "vllm")
+            system = c.labels.get(SYSTEM_LABEL) == "true" or engine == "decision"
+            labelled = c.labels.get(MODEL_LABEL)
+            decider_ref = labelled if labelled in DECIDER_MODELS else DECIDER_REPO
+            model_ref = _flag(c.command, "--model") or _flag(c.command, "-m") or (decider_ref if system else "unknown")
             with deployer.db.session() as s:
-                row = Deployment(name=name, engine=c.labels.get("dgxmm.engine", "vllm"),
-                                 model_ref=_flag(c.command, "--model") or _flag(c.command, "-m") or "unknown",
+                row = Deployment(name=name, engine=engine, model_ref=model_ref,
                                  config={}, state="unknown", container_id=cid, port=port_i, reserved_bytes=0,
-                                 estimate={}, last_error="found running without a database record")
+                                 estimate={}, last_error="found running without a database record",
+                                 system=system or None)
                 s.add(row)
                 s.flush()
                 s.add(DeploymentEvent(deployment_id=row.id, from_state="unknown", to_state="unknown",

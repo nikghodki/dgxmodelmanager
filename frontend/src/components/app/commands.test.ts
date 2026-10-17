@@ -25,6 +25,8 @@ describe("buildCommands", () => {
     const l = labels(c);
     expect(l).toEqual(expect.arrayContaining(["Users", "Audit log", "LiteLLM", "Deploy a model", "Sleep qwen", "Stop qwen", "Wake coder", "Stop coder"]));
     expect(c.find((x) => x.label === "LiteLLM")!.keywords).toMatch(/virtual keys/);
+    expect(c.find((x) => x.label === "Decision model")!.keywords).toMatch(/AI/);
+    expect(c.find((x) => x.label === "Decision model")!.action).toEqual({ type: "navigate", to: "/decision-model" });
     expect(l).not.toContain("Wake qwen");
     expect(l).not.toContain("Stop old");
     expect(c.find((x) => x.label === "Stop qwen")!.destructive).toBe(true);

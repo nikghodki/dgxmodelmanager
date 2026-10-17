@@ -19,6 +19,7 @@ async def deploy(stack, name):
 
 async def test_reconcile_handles_interrupted_stop_and_continues(stack):
     """Defect 1: reconcile must handle a row in 'stopping' state and continue processing later rows."""
+    stack.settings.max_concurrent_startups = 0  # two containers at once (the start-up gate is tested elsewhere)
     a = await deploy(stack, "a")
     b = await deploy(stack, "b")
     await stack.deployer.aclose()

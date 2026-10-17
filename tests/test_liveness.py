@@ -26,7 +26,7 @@ async def test_container_exit_after_ready_fails_and_records_oom(stack):
     stack.deployer.state_hooks.append(hook)
     d = await ready(stack, "a")
     c = stack.sdk.container(d["container_id"])
-    c.status, c.exit_code = "exited", 137  # runtime OOM kill
+    c.status, c.exit_code, c.oom_killed = "exited", 137, True  # runtime OOM kill
     await stack.deployer.check_liveness()
     v = stack.deployer.view(d["id"])
     assert v["state"] == "failed" and v["exit_code"] == 137 and "out of memory" in v["last_error"]

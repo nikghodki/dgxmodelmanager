@@ -40,9 +40,9 @@ def test_reductions_and_evictions(settings):
     assert by["context"].patch == {"max_model_len": 32768} and by["context"].fits
     assert by["seqs"].patch == {"max_num_seqs": 4}
     assert by["variant:Qwen/Model-FP8"].model_ref == "Qwen/Model-FP8"
-    stop = by["stop"]
+    stop = by["stop:2"]  # ids name the deployments: one plan per eligible deployment / minimal combination
     assert [a.deployment_id for a in stop.actions] == [2] and stop.fits  # lowest priority first, 25 GiB >= 20
-    sleep = by["sleep"]
+    sleep = by["sleep:1"]
     assert [a.deployment_id for a in sleep.actions] == [1] and not sleep.fits  # sleeping frees only 12 GiB
     assert [p.fits for p in plans] == sorted([p.fits for p in plans], reverse=True)  # fitting options first
 
@@ -52,6 +52,17 @@ def test_no_plans_when_nothing_helps(settings):
     plans = build_plans(fit=fit, cfg=CFG, context_key="max_model_len", seqs_key="max_num_seqs", kv_patches=[],
                         estimate_with=lambda p: 199 * GIB, active=[], variants=[], estimate_ref=lambda r: None)
     assert all(not p.fits for p in plans)
+
+
+def test_base_model_name_strips_real_gguf_quant_names():
+    """Real file on the DGX: unsloth/Qwen3-0.6B-GGUF/Qwen3-0.6B-Q8_0.gguf. Q8_0 was not stripped, so the GGUF
+    variant never matched its base model (no try_llamacpp advice, no variant plans)."""
+    for f in ("/data/hf/hub/models--unsloth--Qwen3-0.6B-GGUF/snapshots/5096/Qwen3-0.6B-Q8_0.gguf",
+              "Qwen3-0.6B-Q4_0.gguf", "Qwen3-0.6B-Q4_K_M.gguf", "Qwen3-0.6B-UD-Q4_K_XL.gguf", "Qwen3-0.6B-IQ4_XS.gguf",
+              "Qwen3-0.6B-Q6_K.gguf", "Qwen3-0.6B-Q5_1.gguf", "Qwen3-0.6B-BF16.gguf"):
+        assert base_model_name(f) == "qwen3-0.6b", f
+    assert base_model_name("Qwen/Qwen2.5-7B-Instruct") == "qwen2.5-7b-instruct"
+    assert base_model_name("acme/model-q") == "model-q"
 
 
 def test_base_model_name():
@@ -70,5 +81,5 @@ async def test_preview_includes_plans_when_short(stack):
     stack.probe.available -= a["reserved_bytes"]  # GB10: the ready model's memory is part of `used`
     p = await stack.deployer.preview("vllm", "org/big-model", small)
     assert not p["fit"]["fits"]
-    stop = next(x for x in p["plans"] if x["id"] == "stop")
+    stop = next(x for x in p["plans"] if x["id"] == f"stop:{a['id']}")
     assert stop["fits"] and stop["actions"] == [{"type": "stop", "deployment_id": a["id"]}]

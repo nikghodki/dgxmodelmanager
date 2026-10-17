@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 import { ENGINE_FIELDS } from "@/engineFields";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -6,8 +7,12 @@ import { Switch } from "@/components/ui/switch";
 
 export const DEFAULT_SENTINEL = "__default__";
 
-export function ConfigForm({ engine, value, onChange, showAdvanced }: {
+export function ConfigForm({ engine, value, onChange, showAdvanced, hints, alwaysShow }: {
   engine: string; value: Record<string, any>; onChange: (v: Record<string, any>) => void; showAdvanced: boolean;
+  /** Extra content under a field (e.g. a decision-model suggestion); a hinted advanced field is shown anyway. */
+  hints?: Record<string, ReactNode>;
+  /** Fields shown even when advanced settings are hidden (e.g. ones an applied fix changes). */
+  alwaysShow?: string[];
 }) {
   const set = (k: string, v: unknown) => {
     const next = { ...value };
@@ -15,7 +20,7 @@ export function ConfigForm({ engine, value, onChange, showAdvanced }: {
     else next[k] = v;
     onChange(next);
   };
-  const fields = (ENGINE_FIELDS[engine] ?? []).filter((f) => showAdvanced || !f.advanced);
+  const fields = (ENGINE_FIELDS[engine] ?? []).filter((f) => showAdvanced || !f.advanced || !!hints?.[f.key] || !!alwaysShow?.includes(f.key));
   return (
     <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
       {fields.map((f) => {
@@ -44,6 +49,7 @@ export function ConfigForm({ engine, value, onChange, showAdvanced }: {
               <Input id={id} value={value[f.key] ?? ""} onChange={(e) => set(f.key, e.target.value)} />
             )}
             {f.help && <p className="text-xs text-muted-foreground">{f.help}</p>}
+            {hints?.[f.key]}
           </div>
         );
       })}

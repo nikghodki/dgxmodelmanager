@@ -5,13 +5,25 @@ configured roots are never deleted, models used (by path) by a non-terminal depl
 download are refused, and while a deletion runs the affected refs/paths are published in ``deleting`` so the
 deployer and download service refuse to start anything on them. Root-owned files are removed by a short-lived
 helper container (see DockerController.run_helper); when that is unavailable we fall back to in-process deletion.
+
+Shared blob store (huggingface_hub >= 2): repo blobs ``models--org--name/blobs/<etag>`` may be symlinks into the
+cache-wide store ``hub/blobs/<xx>/<xet hash>``, which deduplicates identical files across repos. A delete also
+removes the store entries that ONLY the deleted files link to. Which entries those are is computed read-only
+before anything is removed, by scanning every symlink in the cache (and the GGUF roots) — the store's own
+``<hash>.refs`` manifest is only a hint and is never trusted to allow a removal. Right before an entry is removed
+the deleter takes the entry's ``<hash>.lock`` (the lock huggingface_hub holds while it links an entry into a repo
+and records the link in the manifest) and re-reads the manifest, so an entry a concurrent download has just
+reused is kept.
 """
 from __future__ import annotations
 
+import errno
+import fcntl
 import logging
 import os
 import re
 import shutil
+import stat
 import threading
 import time
 from collections import defaultdict
@@ -30,6 +42,9 @@ TERMINAL_STATES = frozenset({"stopped", "failed", "exited", "removed"})
 DEFAULT_HELPER_IMAGE = "dgxmm:latest"
 RECENT_PARTIAL_S = 600  # a .incomplete blob written this recently may belong to an untracked download
 _PATH_ERRORS = (OSError, RuntimeError, ValueError)  # RuntimeError: symlink loop in Path.resolve()
+STORE_DIR = "blobs"                       # hub/blobs: huggingface_hub's shared blob store
+_XET_HASH = re.compile(r"[0-9a-f]{64}")   # store entry names
+STORE_LOCK_TIMEOUT_S = 10.0
 
 
 class DeleteError(Exception):
@@ -43,6 +58,7 @@ class Target:
     path: Path        # where it lives (parent resolved, final component not followed)
     is_dir: bool
     bytes: int        # bytes actually freed by removing it (0 for a symlink)
+    store: bool = False  # an entry of the shared blob store (removed last, under its lock, if still unreferenced)
 
 
 @dataclass
@@ -96,6 +112,50 @@ def _tree_bytes(p: Path) -> int:
     return total
 
 
+def _hop(link: Path) -> Path:
+    """Where a symlink points, one level only (normalised, not resolved further)."""
+    t = os.readlink(link)
+    return Path(os.path.normpath(t if os.path.isabs(t) else link.parent / t))
+
+
+class _StoreLock:
+    """flock on a store entry's ``<hash>.lock`` — the lock huggingface_hub (filelock) takes while it links an
+    entry into a repo. Never follows a planted symlink. ``held`` is False when the lock could not be taken (a
+    root-owned prefix dir we cannot create the file in, or a timeout)."""
+
+    def __init__(self, entry: Path, timeout: float | None = None):
+        self.path, self.fd, self.held = entry.with_name(entry.name + ".lock"), None, False
+        self.timeout = STORE_LOCK_TIMEOUT_S if timeout is None else timeout
+
+    def __enter__(self):
+        try:
+            self.fd = os.open(self.path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o666)
+            if not stat.S_ISREG(os.fstat(self.fd).st_mode):
+                return self
+            deadline = time.monotonic() + self.timeout
+            while True:
+                try:
+                    fcntl.flock(self.fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    self.held = True
+                    break
+                except OSError as e:
+                    if e.errno not in (errno.EAGAIN, errno.EACCES) or time.monotonic() > deadline:
+                        break
+                    time.sleep(0.05)
+        except OSError as e:
+            log.info("cannot lock store entry %s (%s)", self.path, e)
+        return self
+
+    def __exit__(self, *exc):
+        if self.fd is not None:
+            try:
+                if self.held:
+                    fcntl.flock(self.fd, fcntl.LOCK_UN)
+            finally:
+                os.close(self.fd)
+        return False
+
+
 class WeightsDeleter:
     def __init__(self, settings, db: Database, inventory, docker=None, deployer=None, downloads=None):
         self.settings, self.db, self.inventory, self.docker = settings, db, inventory, docker
@@ -118,7 +178,7 @@ class WeightsDeleter:
     def _protected(self) -> list[Path]:
         """Directories that must never be deleted (nor any of their ancestors)."""
         hub = _resolve(self.hub)
-        return self._roots() + [_resolve(Path(self.settings.hf_cache.local)), hub / ".locks"]
+        return self._roots() + [_resolve(Path(self.settings.hf_cache.local)), hub / ".locks", hub / STORE_DIR]
 
     def _check(self, p: Path) -> Path:
         """Return p with its parent resolved; refuse anything outside the roots or a root itself."""
@@ -236,6 +296,113 @@ class WeightsDeleter:
                     continue
         return False
 
+    # ------------------------------------------------------------ shared blob store
+    def _store(self) -> Path | None:
+        """hub/blobs when it is a real directory inside the hub (never a symlink out of it)."""
+        s = _resolve(self.hub) / STORE_DIR
+        return s if os.path.isdir(s) and not os.path.islink(s) else None
+
+    def _store_entry(self, link: Path, store: Path | None) -> Path | None:
+        """The store entry a symlink finally resolves to, if it is a well-formed one: a regular file
+        ``<store>/<xx>/<64 hex>`` whose real path stays inside the store (a prefix dir that is a symlink out of
+        the store resolves elsewhere and is ignored)."""
+        if store is None:
+            return None
+        try:
+            real = Path(os.path.realpath(link, strict=True))
+            st = real.lstat()
+        except _PATH_ERRORS:
+            return None
+        if real.parent.parent != store or not _XET_HASH.fullmatch(real.name) or real.parent.name != real.name[:2]:
+            return None
+        return real if stat.S_ISREG(st.st_mode) else None
+
+    def _store_links_in(self, top: Path, store: Path | None) -> dict[Path, int]:
+        """Store entries that symlinks under `top` (a repo dir) resolve to, with the bytes removing them frees."""
+        out: dict[Path, int] = {}
+        if store is None:
+            return out
+        for root, dirs, files in os.walk(top):
+            for n in files + dirs:
+                p = Path(root) / n
+                if p.is_symlink():
+                    e = self._store_entry(p, store)
+                    if e is not None and e not in out:
+                        st = e.lstat()
+                        out[e] = st.st_size if st.st_nlink == 1 else 0  # a hard link elsewhere keeps the data
+        return out
+
+    def _drop_referenced(self, candidates: dict[Path, int], skip_dirs: set[Path], skip_links: set[Path],
+                         store: Path) -> tuple[dict[Path, int], bool]:
+        """Remove from `candidates` every entry that a symlink outside the deletion still resolves to: every repo
+        in the cache (models, datasets, spaces) and the GGUF roots. Read-only. Returns (exclusive, complete);
+        when part of the tree could not be read the scan is incomplete and nothing may be removed."""
+        left = dict(candidates)
+        ok = [True]
+
+        def failed(_e):
+            ok[0] = False
+
+        hub = _resolve(self.hub)
+        tops = [c for c in sorted(hub.iterdir()) if c.name not in (STORE_DIR, ".locks")]
+        tops += [r for r in self._roots()[1:] if not r.is_relative_to(hub)]
+        for top in tops:
+            if not left:
+                break
+            if top in skip_dirs:
+                continue
+            if top.is_symlink():  # a repo dir that is itself a link
+                if top not in skip_links:
+                    left.pop(self._store_entry(top, store), None)
+                continue
+            for root, dirs, files in os.walk(top, onerror=failed):
+                r = Path(root)
+                dirs[:] = [d for d in dirs if (r / d) not in skip_dirs and (r / d) != store]
+                for n in files + dirs:
+                    p = r / n
+                    if p in skip_links or not p.is_symlink():
+                        continue
+                    e = self._store_entry(p, store)
+                    if e is not None:
+                        left.pop(e, None)
+                if not left:
+                    break
+        return left, ok[0]
+
+    def _store_targets(self, candidates: dict[Path, int], skip_dirs: set[Path], skip_links: set[Path],
+                       notes: list[str]) -> list[Target]:
+        store = self._store()
+        if not candidates or store is None:
+            return []
+        exclusive, complete = self._drop_referenced(candidates, skip_dirs, skip_links, store)
+        if not complete:
+            notes.append("part of the model cache could not be read, so no shared-store data is removed")
+            return []
+        kept = len(candidates) - len(exclusive)
+        if kept:
+            notes.append(f"{kept} file(s) in the shared blob store are also used by other models and are kept")
+        return [Target(self._check(e), False, b, store=True) for e, b in sorted(exclusive.items())]
+
+    def _manifest_refs(self, entry: Path) -> bool:
+        """Does the entry's ``<hash>.refs`` manifest name a repo blob that still links to it?"""
+        hub = _resolve(self.hub)
+        man = entry.with_name(entry.name + ".refs")
+        try:
+            if not stat.S_ISREG(man.lstat().st_mode):
+                return False
+            lines = man.read_text(errors="replace").splitlines()
+        except OSError:
+            return False
+        store = self._store()
+        for line in lines:
+            rel = Path(line.strip())
+            if not line.strip() or rel.is_absolute() or ".." in rel.parts:
+                continue
+            p = hub / rel
+            if p.is_symlink() and self._store_entry(p, store) == entry:
+                return True
+        return False
+
     def plan(self, ref: str) -> DeletePlan:
         art = self.inventory.get(ref)
         if art is None:
@@ -263,9 +430,13 @@ class WeightsDeleter:
             if is_link:
                 notes.append("the repo folder is a symlink; only the link is removed")
             locks = self.hub / ".locks" / dirname
+            lloc = None
             if os.path.lexists(locks):
                 lloc = self._check(locks)
                 targets.append(Target(lloc, lloc.is_dir() and not lloc.is_symlink(), _tree_bytes(lloc)))
+            if not is_link:
+                cands = self._store_links_in(loc, self._store())
+                targets += self._store_targets(cands, {loc} | ({lloc} if lloc else set()), set(), notes)
             recent = not is_link and self._recent_partial(loc)
             repo, name = ref, ref.split("/")[-1]
         else:
@@ -284,6 +455,8 @@ class WeightsDeleter:
                 if loc.is_dir() and not loc.is_symlink():
                     raise _unsafe(sh, "not a file")
                 locs.append(loc)
+            store = self._store()
+            cands: dict[Path, int] = {}
             for loc in locs:
                 if not loc.is_symlink():
                     targets.append(Target(loc, False, _tree_bytes(loc)))
@@ -291,15 +464,28 @@ class WeightsDeleter:
                 targets.append(Target(loc, False, 0))
                 real = loc.resolve()
                 repo_of = self._repo_of(loc)
-                # HF cache snapshot entry: the blob it points at holds the bytes — delete it unless shared
-                if real.is_file() and real.is_relative_to(hub) and real.parent.name == "blobs" \
-                        and repo_of is not None and self._repo_of(real) == repo_of:
-                    repo_dir = hub / ("models--" + repo_of.replace("/", "--"))
-                    if self._blob_shared(real, repo_dir, set(locs)):
-                        notes.append(f"{loc.name}: its data is shared with other files in this repo, "
-                                     "so only the link is removed (0 bytes freed)")
-                    else:
-                        targets.append(Target(self._check(real), False, real.stat().st_size))
+                if repo_of is None or not real.is_file():
+                    continue
+                repo_dir = hub / ("models--" + repo_of.replace("/", "--"))
+                # HF cache snapshot entry: the repo blob it points at holds the bytes, either itself or (shared
+                # store) through one more link into hub/blobs — delete them unless other files use them
+                blob = _hop(loc)
+                if blob.parent != repo_dir / "blobs":
+                    continue
+                if self._blob_shared(real, repo_dir, set(locs)):
+                    notes.append(f"{loc.name}: its data is shared with other files in this repo, "
+                                 "so only the link is removed (0 bytes freed)")
+                    continue
+                bloc = self._check(blob)
+                if not bloc.is_symlink():
+                    targets.append(Target(bloc, False, bloc.stat().st_size))
+                    continue
+                targets.append(Target(bloc, False, 0))
+                e = self._store_entry(bloc, store)
+                if e is not None:
+                    st = e.lstat()
+                    cands.setdefault(e, st.st_size if st.st_nlink == 1 else 0)
+            targets += self._store_targets(cands, set(), {t.path for t in targets}, notes)
             parent = _resolve(first.parent)
             if not parent.is_relative_to(hub):
                 rmdir = parent
@@ -351,9 +537,11 @@ class WeightsDeleter:
                 log.warning("delete helper unavailable for %s (%s); deleting in-process", host, e)
         return ran
 
-    def _execute(self, plan: DeletePlan) -> str:
-        ran = self._run_helpers(plan.targets)
-        remaining = [t for t in plan.targets if os.path.lexists(t.path)]
+    def _execute(self, plan: DeletePlan) -> tuple[str, list[Target]]:
+        """Remove the plan's targets; shared-store entries last. Returns (method, store entries kept)."""
+        files = [t for t in plan.targets if not t.store]
+        ran = self._run_helpers(files)
+        remaining = [t for t in files if os.path.lexists(t.path)]
         errors: list[tuple[Path, OSError]] = []
         for t in remaining:
             try:
@@ -365,6 +553,15 @@ class WeightsDeleter:
                 pass
             except OSError as e:
                 errors.append((t.path, e))
+        kept: list[Target] = []
+        if not errors:  # the repo's own files are gone: now its store entries are unreferenced (unless reused)
+            for t in plan.targets:
+                if t.store:
+                    try:
+                        if not self._remove_store_entry(t):
+                            kept.append(t)
+                    except OSError as e:
+                        errors.append((t.path, e))
         if errors:
             p, e = errors[0]
             host = self._host_or_local(p)
@@ -383,8 +580,40 @@ class WeightsDeleter:
             except (OSError, DeleteError):
                 pass
         if not remaining:
-            return "helper"
-        return "helper+in_process" if ran else "in_process"
+            return "helper", kept
+        return ("helper+in_process" if ran else "in_process"), kept
+
+    def _remove_store_entry(self, t: Target) -> bool:
+        """Remove one shared-store entry (and its manifest) if nothing links to it any more. Under the entry's
+        lock the manifest is re-read: a download that reused the entry since the plan recorded its link there
+        first. Returns False when the entry is kept."""
+        try:
+            if self._check(t.path) != t.path or not stat.S_ISREG(t.path.lstat().st_mode):
+                return False  # replaced since the plan (a prefix dir swapped for a link, the entry for a link…)
+        except (DeleteError, FileNotFoundError):
+            return not os.path.lexists(t.path)
+        with _StoreLock(t.path) as lock:
+            if lock.fd is not None and not lock.held:
+                log.warning("store entry %s is locked by another process; keeping it", t.path)
+                return False
+            if self._manifest_refs(t.path):
+                return False
+            man = t.path.with_name(t.path.name + ".refs")
+            doomed = [t.path] + ([man] if os.path.lexists(man) else [])
+            denied = []
+            for p in doomed:
+                try:
+                    os.unlink(p)
+                except FileNotFoundError:
+                    pass
+                except PermissionError:
+                    denied.append(p)
+            if denied:  # root-owned prefix dir: the helper removes them while we still hold the lock
+                self._run_helpers([Target(p, False, 0) for p in denied])
+                left = [p for p in denied if os.path.lexists(p)]
+                if left:
+                    raise PermissionError(errno.EACCES, "Permission denied", str(left[0]))
+        return True
 
     def _delete_one(self, ref: str, cleanup: bool = False) -> dict:
         """Plan, publish the in-progress markers, re-plan (fresh DB view), then delete. Caller holds the lock."""
@@ -403,9 +632,15 @@ class WeightsDeleter:
                 raise DeleteError("recently_active", f"{ref} has partial files written in the last "
                                   f"{RECENT_PARTIAL_S // 60} minutes; a download may still be running", 409)
             view = self._view(plan)
-            method = self._execute(plan)
-            return {"ref": ref, "freed_bytes": plan.bytes, "paths": view["paths"], "method": method,
-                    "warnings": plan.affected, "notes": plan.notes}
+            method, kept = self._execute(plan)
+            notes = list(plan.notes)
+            if kept:
+                notes.append(f"{len(kept)} file(s) in the shared blob store were kept: another model started "
+                             "using them while this one was being deleted")
+            gone = {t.path for t in kept}
+            return {"ref": ref, "freed_bytes": plan.bytes - sum(t.bytes for t in kept),
+                    "paths": [p for p, t in zip(view["paths"], plan.targets) if t.path not in gone],
+                    "method": method, "warnings": plan.affected, "notes": notes}
         finally:
             self.deleting -= marks
 

@@ -1,0 +1,137 @@
+{
+ "ref": "HuggingFaceTB/SmolVLM-Instruct",
+ "architecture": "Idefics3ForConditionalGeneration",
+ "model_type": "idefics3",
+ "config": {
+  "architectures": [
+   "Idefics3ForConditionalGeneration"
+  ],
+  "model_type": "idefics3",
+  "vocab_size": 49155,
+  "vision_config": {
+   "size": [
+    "longest_edge"
+   ],
+   "max_image_size": [
+    "longest_edge"
+   ],
+   "_attn_implementation_autoset": false,
+   "_name_or_path": "",
+   "add_cross_attention": false,
+   "architectures": null,
+   "attention_dropout": 0.0,
+   "bad_words_ids": null,
+   "begin_suppress_tokens": null,
+   "bos_token_id": null,
+   "chunk_size_feed_forward": 0,
+   "cross_attention_hidden_size": null,
+   "decoder_start_token_id": null,
+   "diversity_penalty": 0.0,
+   "do_sample": false,
+   "early_stopping": false,
+   "encoder_no_repeat_ngram_size": 0,
+   "eos_token_id": null,
+   "exponential_decay_length_penalty": null,
+   "finetuning_task": null,
+   "forced_bos_token_id": null,
+   "forced_eos_token_id": null,
+   "hidden_act": "gelu_pytorch_tanh",
+   "hidden_size": 1152,
+   "id2label": [
+    "0",
+    "1"
+   ],
+   "image_size": 384,
+   "initializer_range": 0.02,
+   "intermediate_size": 4304,
+   "is_decoder": false,
+   "is_encoder_decoder": false,
+   "label2id": [
+    "LABEL_0",
+    "LABEL_1"
+   ],
+   "layer_norm_eps": 1e-06,
+   "length_penalty": 1.0,
+   "max_length": 20,
+   "min_length": 0,
+   "model_type": "idefics3",
+   "no_repeat_ngram_size": 0,
+   "num_attention_heads": 16,
+   "num_beam_groups": 1,
+   "num_beams": 1
+  },
+  "text_config": {
+   "_attn_implementation_autoset": false,
+   "_flash_attn_2_enabled": true,
+   "_name_or_path": "/fsx/m4/experiments/local_experiment_dir/s3_async_temporary_checkpoint_folder/tr_324_opt_400/unwrapped_model",
+   "add_cross_attention": false,
+   "architectures": [
+    "VLlama3ForCausalLM"
+   ],
+   "attention_bias": false,
+   "attention_dropout": 0.0,
+   "bad_words_ids": null,
+   "begin_suppress_tokens": null,
+   "bos_token_id": 0,
+   "chunk_size_feed_forward": 0,
+   "cross_attention_hidden_size": null,
+   "decoder_start_token_id": null,
+   "diversity_penalty": 0.0,
+   "do_sample": false,
+   "early_stopping": false,
+   "encoder_no_repeat_ngram_size": 0,
+   "eos_token_id": 0,
+   "exponential_decay_length_penalty": null,
+   "finetuning_task": null,
+   "forced_bos_token_id": null,
+   "forced_eos_token_id": null,
+   "head_dim": 64,
+   "hidden_act": "silu",
+   "hidden_size": 2048,
+   "id2label": [
+    "0",
+    "1"
+   ],
+   "initializer_range": 0.02,
+   "intermediate_size": 8192,
+   "is_decoder": false,
+   "is_encoder_decoder": false,
+   "label2id": [
+    "LABEL_0",
+    "LABEL_1"
+   ],
+   "length_penalty": 1.0,
+   "max_length": 20,
+   "max_position_embeddings": 16384,
+   "min_length": 0,
+   "mlp_bias": false,
+   "model_type": "llama",
+   "neftune_noise_alpha": 0.0,
+   "no_repeat_ngram_size": 0,
+   "num_attention_heads": 32
+  },
+  "image_token_id": 49153
+ },
+ "files": [
+  ".gitattributes",
+  "README.md",
+  "SmolVLM.png",
+  "added_tokens.json",
+  "chat_template.json",
+  "config.json",
+  "generation_config.json",
+  "merges.txt",
+  "mixture_the_cauldron.png",
+  "onnx/decoder_model_merged.onnx_data",
+  "onnx/decoder_model_merged_fp16.onnx_data",
+  "preprocessor_config.json",
+  "processor_config.json",
+  "smolvlm-data.pdf",
+  "special_tokens_map.json",
+  "tokenizer.json",
+  "tokenizer_config.json",
+  "vocab.json"
+ ],
+ "weight_files": 25,
+ "template": "<|im_start|>{% for message in messages %}{{message['role'] | capitalize}}{% if message['content'][0]['type'] == 'image' %}{{':'}}{% else %}{{': '}}{% endif %}{% for line in message['content'] %}{% if line['type'] == 'text' %}{{line['text']}}{% elif line['type'] == 'image' %}{{ '<image>' }}{% endif %}{% endfor %}<end_of_utterance>\n{% endfor %}{% if add_generation_prompt %}{{ 'Assistant:' }}{% endif %}"
+}

@@ -181,3 +181,133 @@ describe("DeployWizard", () => {
     expect(screen.getByLabelText("Model name (LiteLLM)")).toHaveFocus();
   });
 });
+
+describe("DeployWizard — parser suggestions", () => {
+  const sug = (over: Record<string, any> = {}) => ({ value: "hermes", source: "model", confidence: 0.92, auto_apply: true, alternatives: [], ...over });
+  function mock(suggest: () => Promise<any>, previews: any[] = []) {
+    vi.mocked(auth.useIsAdmin).mockReturnValue(true);
+    vi.mocked(apiModule.api).mockImplementation((url: string, opts?: any) => {
+      if (url === "/inventory") return Promise.resolve([artifact]);
+      if (url === "/engines") return Promise.resolve(engines);
+      if (url === "/deployments/preview") { previews.push(opts.body); return Promise.resolve(fitsPreview); }
+      if (url === "/decider/suggest-config") return suggest();
+      return new Promise(() => undefined);
+    });
+  }
+  const sugCalls = () => vi.mocked(apiModule.api).mock.calls.filter(([u]) => u === "/decider/suggest-config");
+
+  it("asks for suggestions for the chosen model and engine, auto-fills an empty field and can undo", async () => {
+    const previews: any[] = [];
+    mock(() => Promise.resolve({ tool_call_parser: sug(), reasoning_parser: null }), previews);
+    renderWizard();
+    expect(await screen.findByText("Suggested: hermes · 92% · AI")).toBeInTheDocument();
+    expect(sugCalls()[0][1]).toEqual({ method: "POST", body: { model_ref: "org/model-a", engine: "vllm" } });
+    expect(screen.getByLabelText("Tool-call parser")).toHaveValue("hermes");
+    expect(screen.getByText(/Filled automatically/)).toBeInTheDocument();
+    await waitFor(() => expect(previews.some((b) => b.config.tool_call_parser === "hermes")).toBe(true));
+    // no reasoning-parser suggestion → no chip for it
+    expect(screen.queryByLabelText("Reasoning parser")).toBeNull();
+    await userEvent.click(screen.getByRole("button", { name: /Undo: clear the automatic Tool-call parser/ }));
+    expect(screen.getByLabelText("Tool-call parser")).toHaveValue("");
+    await new Promise((r) => setTimeout(r, 20));
+    expect(screen.getByLabelText("Tool-call parser")).toHaveValue(""); // not re-filled after undo
+    expect(screen.getByRole("button", { name: /Apply suggested Tool-call parser: hermes/ })).toBeInTheDocument();
+  });
+
+  it("offers Apply instead of auto-filling below the auto-apply bar", async () => {
+    mock(() => Promise.resolve({ tool_call_parser: null, reasoning_parser: sug({ value: "qwen3", confidence: 0.72, auto_apply: false }) }));
+    renderWizard();
+    expect(await screen.findByText("Suggested: qwen3 · 72% · AI")).toBeInTheDocument();
+    expect(screen.getByLabelText("Reasoning parser")).toHaveValue("");
+    await userEvent.click(screen.getByRole("button", { name: /Apply suggested Reasoning parser: qwen3/ }));
+    expect(screen.getByLabelText("Reasoning parser")).toHaveValue("qwen3");
+    expect(screen.queryByRole("button", { name: /Apply suggested Reasoning parser/ })).toBeNull();
+  });
+
+  it("never overwrites a value the user typed", async () => {
+    let resolve: (v: any) => void = () => undefined;
+    mock(() => new Promise((r) => { resolve = r; }));
+    renderWizard();
+    await userEvent.click(await screen.findByRole("button", { name: "Show advanced settings" }));
+    const input = await screen.findByLabelText("Tool-call parser");
+    await userEvent.type(input, "llama3_json");
+    resolve({ tool_call_parser: sug({ source: "rules", confidence: 1 }), reasoning_parser: null });
+    expect(await screen.findByText("Suggested: hermes · Rules")).toBeInTheDocument();
+    expect(screen.getByLabelText("Tool-call parser")).toHaveValue("llama3_json");
+    expect(screen.getByRole("button", { name: /Apply suggested Tool-call parser: hermes/ })).toBeInTheDocument();
+  });
+
+  it("shows nothing when the endpoint errors or has no suggestion", async () => {
+    mock(() => Promise.reject(new apiModule.ApiError(503, { code: "decider_unavailable", message: "off" })));
+    const { unmount } = renderWizard();
+    await waitFor(() => expect(sugCalls().length).toBe(1));
+    await new Promise((r) => setTimeout(r, 20));
+    expect(screen.queryByText(/Suggested:/)).toBeNull();
+    expect(screen.queryByRole("alert")).toBeNull();
+    unmount();
+    mock(() => Promise.resolve(null));
+    renderWizard();
+    await waitFor(() => expect(sugCalls().length).toBe(2));
+    await new Promise((r) => setTimeout(r, 20));
+    expect(screen.queryByText(/Suggested:/)).toBeNull();
+  });
+});
+
+describe("DeployWizard — parser suggestions (review fixes)", () => {
+  const sug = (over: Record<string, any> = {}) => ({ value: "hermes", source: "model", confidence: 0.92, auto_apply: true, alternatives: [], ...over });
+  it("announces an auto-fill politely and skips a 'none' suggestion that already matches", async () => {
+    vi.mocked(auth.useIsAdmin).mockReturnValue(true);
+    vi.mocked(apiModule.api).mockImplementation((url: string) => {
+      if (url === "/inventory") return Promise.resolve([artifact]);
+      if (url === "/engines") return Promise.resolve(engines);
+      if (url === "/deployments/preview") return Promise.resolve(fitsPreview);
+      if (url === "/decider/suggest-config") return Promise.resolve({ tool_call_parser: sug(), reasoning_parser: sug({ value: null, auto_apply: false }) });
+      return new Promise(() => undefined);
+    });
+    renderWizard();
+    expect(await screen.findByText(/Filled automatically/)).toBeInTheDocument();
+    expect(screen.getByText(/Filled automatically/).closest("[aria-live='polite']")).not.toBeNull();
+    expect(screen.queryByText(/Suggested: none/)).toBeNull();
+    expect(screen.queryByLabelText("Reasoning parser")).toBeNull(); // stays hidden with advanced settings
+  });
+
+  it("keeps a chosen plan when a suggestion auto-fills later", async () => {
+    vi.mocked(auth.useIsAdmin).mockReturnValue(true);
+    let resolve: (v: any) => void = () => undefined;
+    const plans = [{ id: "p1", title: "Stop other", detail: "Frees 1 GiB", new_required: 1e9, frees: 1e9, fits: true, actions: [{ type: "stop", deployment_id: 7 }], patch: null }];
+    vi.mocked(apiModule.api).mockImplementation((url: string) => {
+      if (url === "/inventory") return Promise.resolve([artifact]);
+      if (url === "/engines") return Promise.resolve(engines);
+      if (url === "/deployments/preview") return Promise.resolve({ ...shortPreview, plans });
+      if (url === "/decider/suggest-config") return new Promise((r) => { resolve = r; });
+      return new Promise(() => undefined);
+    });
+    renderWizard();
+    const radio = (await screen.findAllByRole("radio", { name: /Stop other/ }))[0];
+    await userEvent.click(radio);
+    expect(screen.getAllByRole("radio", { name: /Stop other/ })[0]).toHaveAttribute("aria-checked", "true");
+    resolve({ tool_call_parser: sug(), reasoning_parser: null });
+    expect(await screen.findByText(/Filled automatically/)).toBeInTheDocument();
+    await new Promise((r) => setTimeout(r, 400)); // the debounced preview re-runs
+    expect(screen.getAllByRole("radio", { name: /Stop other/ })[0]).toHaveAttribute("aria-checked", "true");
+  });
+});
+
+describe("DeployWizard preview priority", () => {
+  it("sends the chosen priority with every preview so plan safety compares against it", async () => {
+    vi.mocked(auth.useIsAdmin).mockReturnValue(true);
+    const previews: any[] = [];
+    vi.mocked(apiModule.api).mockImplementation((url: string, opts?: any) => {
+      if (url === "/inventory") return Promise.resolve([artifact]);
+      if (url === "/engines") return Promise.resolve(engines);
+      if (url === "/deployments/preview") { previews.push(opts.body); return Promise.resolve(fitsPreview); }
+      if (url === "/decider/suggest-config") return Promise.resolve({ tool_call_parser: null, reasoning_parser: null });
+      return Promise.reject(new Error(`unexpected ${url}`));
+    });
+    renderWizard();
+    await waitFor(() => expect(previews.length).toBeGreaterThan(0));
+    expect(previews[0].priority).toBe(0);
+    fireEvent.change(screen.getByLabelText("Priority"), { target: { value: "40" } });
+    await waitFor(() => expect(previews.some((b) => b.priority === 40)).toBe(true));
+  });
+});

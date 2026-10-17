@@ -86,13 +86,13 @@ def test_stored_key_bound_to_its_url(settings, db):
 def test_public_url_default_from_config(settings, db):
     """config.yaml litellm_public_url (written by the installer for the bundled LiteLLM) is the default;
     a stored value wins, and an explicitly cleared value stays cleared."""
-    s = settings.model_copy(update={"litellm_public_url": "http://10.0.0.5:4000"})
+    s = settings.model_copy(update={"litellm_public_url": "http://198.51.100.5:4000"})
     st = SettingsStore(db, s)
     c = st.litellm()
-    assert c.public_url == "http://10.0.0.5:4000" and c.endpoint == "http://10.0.0.5:4000/v1"
+    assert c.public_url == "http://198.51.100.5:4000" and c.endpoint == "http://198.51.100.5:4000/v1"
     st.set("litellm.public_url", "https://llm.example.com")
     assert st.litellm().public_url == "https://llm.example.com"
     st.set("litellm.public_url", "")
     assert st.litellm().public_url == "" and st.litellm().endpoint == s.litellm_url + "/v1"
     st.set("litellm.public_url", None)
-    assert st.litellm().public_url == "http://10.0.0.5:4000"
+    assert st.litellm().public_url == "http://198.51.100.5:4000"

@@ -1,0 +1,29 @@
+{
+ "ref": "microsoft/speecht5_tts",
+ "architecture": "SpeechT5ForTextToSpeech",
+ "model_type": "speecht5",
+ "config": {
+  "architectures": [
+   "SpeechT5ForTextToSpeech"
+  ],
+  "model_type": "speecht5",
+  "hidden_size": 768,
+  "vocab_size": 81,
+  "num_mel_bins": 80,
+  "encoder_layers": 12,
+  "decoder_layers": 6,
+  "is_encoder_decoder": true
+ },
+ "files": [
+  ".gitattributes",
+  "README.md",
+  "added_tokens.json",
+  "config.json",
+  "preprocessor_config.json",
+  "special_tokens_map.json",
+  "spm_char.model",
+  "tokenizer_config.json"
+ ],
+ "weight_files": 1,
+ "template": null
+}

@@ -1,0 +1,35 @@
+{
+ "ref": "incoai/Qwen3.8-27B-DFlash2",
+ "architecture": "DFlash2DraftModel",
+ "model_type": "qwen3",
+ "config": {
+  "architectures": [
+   "DFlash2DraftModel"
+  ],
+  "model_type": "qwen3",
+  "num_hidden_layers": 5,
+  "hidden_size": 5120,
+  "vocab_size": 248320,
+  "dflash_config": {
+   "block_size": 8,
+   "conv_group_size": 16,
+   "conv_kernel_size": 2,
+   "mask_token_id": 248070,
+   "selector_rank": 256,
+   "selector_top_k": 16,
+   "target_layer_ids": [
+    5,
+    19,
+    33,
+    47,
+    61
+   ]
+  },
+  "max_position_embeddings": 262144
+ },
+ "files": [
+  "config.json"
+ ],
+ "weight_files": 1,
+ "template": null
+}

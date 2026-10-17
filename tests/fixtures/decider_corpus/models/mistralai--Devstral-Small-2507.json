@@ -1,0 +1,41 @@
+{
+ "ref": "mistralai/Devstral-Small-2507",
+ "architecture": "MistralForCausalLM",
+ "model_type": "mistral",
+ "config": {
+  "architectures": [
+   "MistralForCausalLM"
+  ],
+  "model_type": "mistral",
+  "num_hidden_layers": 40,
+  "hidden_size": 5120,
+  "vocab_size": 131072,
+  "max_position_embeddings": 131072
+ },
+ "files": [
+  ".gitattributes",
+  "README.md",
+  "SYSTEM_PROMPT.txt",
+  "assets/cline_config.png",
+  "assets/mistral_common_coverage/coverage_distribution.png",
+  "assets/mistral_common_coverage/coverage_pie.png",
+  "assets/mistral_common_coverage/coverage_summary.png",
+  "assets/mistral_common_coverage/dependencies.png",
+  "assets/mistral_common_coverage/navigate.png",
+  "assets/mistral_common_coverage/prompt.png",
+  "assets/mistral_common_coverage/visualization.png",
+  "assets/open_hands_config.png",
+  "assets/space_invaders_pong/base_structure.png",
+  "assets/space_invaders_pong/game.png",
+  "assets/space_invaders_pong/prompt.png",
+  "assets/space_invaders_pong/task completed.png",
+  "assets/swe_benchmark.png",
+  "config.json",
+  "generation_config.json",
+  "model.safetensors.index.json",
+  "params.json",
+  "tekken.json"
+ ],
+ "weight_files": 11,
+ "template": null
+}

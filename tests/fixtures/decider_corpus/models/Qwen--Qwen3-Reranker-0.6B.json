@@ -1,0 +1,32 @@
+{
+ "ref": "Qwen/Qwen3-Reranker-0.6B",
+ "architecture": "Qwen3ForCausalLM",
+ "model_type": "qwen3",
+ "config": {
+  "architectures": [
+   "Qwen3ForCausalLM"
+  ],
+  "model_type": "qwen3",
+  "num_hidden_layers": 28,
+  "hidden_size": 1024,
+  "vocab_size": 151669,
+  "max_position_embeddings": 40960
+ },
+ "files": [
+  ".gitattributes",
+  "1_LogitScore/config.json",
+  "README.md",
+  "chat_template.jinja",
+  "config.json",
+  "config_sentence_transformers.json",
+  "generation_config.json",
+  "merges.txt",
+  "modules.json",
+  "sentence_bert_config.json",
+  "tokenizer.json",
+  "tokenizer_config.json",
+  "vocab.json"
+ ],
+ "weight_files": 1,
+ "template": "{%- set instruction = messages | selectattr(\"role\", \"eq\", \"system\") | map(attribute=\"content\") | first | default(\"Given a web search query, retrieve relevant passages that answer the query\") -%}\n{%- set query_text = messages | selectattr(\"role\", \"eq\", \"query\") | map(attribute=\"content\") | first -%}\n{%- set document_text = messages | selectattr(\"role\", \"eq\", \"document\") | map(attribute=\"content\") | first -%}\n<|im_start|>system\nJudge whether the Document meets the requirements based on the Query and the Instruct provided. Note that the answer can only be \"yes\" or \"no\".<|im_end|>\n<|im_start|>user\n<Instruct>: {{ instruction }}\n<Query>: {{ query_text }}\n<Document>: {{ document_text }}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n\n"
+}

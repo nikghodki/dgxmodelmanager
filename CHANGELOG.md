@@ -2,13 +2,161 @@
 
 All notable changes to DGXMM are documented in this file. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). DGXMM does not publish tagged releases yet
-(the package version is `0.1.0`), so each section below is identified by its date and the commits it
-covers. Upgrade notes for existing installs are in
+(the package version is `0.1.0`), so each section below is identified by its date. Upgrade notes for existing installs are in
 [operations](docs/operations.md#upgrading-an-existing-install).
 
-## [Unreleased] - 2026-10-16
+## [2026-10-17] — Decision model
 
-Weights management, the single LiteLLM endpoint and the processes view (commits `d1b2c2d`…`5c25e6f`).
+An optional local decision model that helps with failure diagnosis, parser choice, plan selection, model
+kinds and workload-aware advice, plus a start-up queue, finer memory plans and fixes for weight deletion,
+download cancellation and out-of-memory reporting.
+
+### Added
+
+- **Decision model** ("decider", off by default): a small local model (`vllm-sr/d3-mini`, Apache-2.0,
+  pinned revision `97dd054d`; `vllm-sr/d3-nano` selectable) that answers typed questions with
+  calibrated probabilities. Rules first, the model second, abstain below a per-feature threshold,
+  advisory only, fail open: when it is off, unhealthy, slow or wrong, every feature behaves as with its
+  rules alone. See [usage](docs/usage.md#decision-model).
+- **Failure diagnosis**: when a deployment fails, rules (14 causes, such as GPU out of memory, KV cache
+  too small, context longer than the model supports, gated repo, bad parser flag, port in use, disk full,
+  and the decider's own integrity and key refusals) or the model explain why, with a fix hint and, where
+  possible, **Apply fix…**, which prefills Reconfigure. Diagnosis card on the deployment page.
+- **Parser suggestions** in the deploy wizard: tool-call and reasoning parser from rules for known model
+  families and chat templates, else the model; filled in automatically only for a strong rule or a
+  confident model answer, never over a value you typed.
+- **Plan safety and recommendations**: a deterministic safety filter marks plans that would stop or
+  sleep an active, recently used, depended-on, higher-priority or system deployment, or lower a value you
+  set, as **Unsafe** with the reason; one safe plan is **Recommended** by rules, or by the model when
+  several are safe.
+- **Model kinds**: a new kind `decision` (classifiers, guard models, decision heads); models no rule
+  recognises get a model-derived kind, marked **AI** in the Models table.
+- **Workload-aware advice**: ready deployments with 30 minutes or more of metrics get a workload label
+  (single-user chat, agent / tool use, batch throughput, long-context RAG, idle, mixed) that orders the
+  tuning advice.
+- **Decision model page** (Integrations > Decision model, admins): status, enable and disable through
+  the normal memory check (with plans when it does not fit), in-app image build with live progress, model
+  choice (d3-mini or d3-nano, 13 or 9 GiB), per-feature switches and thresholds, the decision log with
+  feedback, key rotation, and a banner when a running decider needs a restart after an upgrade. Its
+  **Download** uses the installer's verified, resumable snapshot downloader (pinned files only, each
+  hash-checked before it is linked), with progress on the Model card and the Downloads page; any download
+  of a decision model, including `POST /api/downloads`, takes that path. A **Decision model** status chip
+  in the top bar (a read-only status popup for viewers).
+- The decider runs as a *system* deployment of the new `decision` engine: fixed reservation, never a
+  plan stop/sleep candidate (the plan chooser notes how much memory it holds and where to disable it),
+  never registered in LiteLLM (no endpoint, snippets or registration badge for it), **System** badge,
+  stopped by the memory watchdog before any user deployment and restarted by a supervisor (probes every
+  30 s, backoff from 30 s to 15 minutes, at most 5 attempts an hour, failed ones included, never under
+  memory pressure; when it gives up the page shows why and offers **Retry**). It is managed on the
+  Decision model page: no Switch or Reconfigure, Start only while the decision model is enabled, and
+  Remove also disables it. Its image `dgxmm-decider:3` is built locally from `deploy/decider`.
+- **`./install.sh --with-decider`** (or `DGXMM_WITH_DECIDER=1`, remembered in `.env`): checks memory and
+  disk, builds the decider image, downloads and verifies the pinned snapshot, enables the decider and
+  waits until it is healthy (`DGXMM_DECIDER_TIMEOUT`, default 900 s). When only remembered in `.env`,
+  decider problems are warnings that never fail an upgrade, and a decider an admin disabled stays
+  disabled. `uninstall --purge` also removes this install's decider container, image and internal
+  network; `--purge-decider-model` also deletes the model snapshots.
+- **Admin CLI**: `docker exec dgxmm python -m dgxmm.admin decider status|build|download|enable|disable`
+  and `rotate-decider-key`, over a new admin unix socket (`data/run/admin.sock`) with short-lived, scoped
+  tokens; audited with `"via": "cli"`.
+- **Per-install labels**: `DGXMM_INSTALL_ID` (generated once in `.env`) labels the containers DGXMM
+  creates and the images it builds (`dgxmm.install`), so uninstall touches only this install's.
+- **Start-up queue**: at most `max_concurrent_startups` engines (default 1) start or load at once,
+  because vLLM's start-up memory profile fails when another engine starts or stops at the same moment on
+  unified memory. Others wait in the new state **Queued** (position and reason shown) with their memory
+  reserved; the fit is checked again at their turn, and they fail after `startup_queue_timeout_s`
+  (30 minutes). A wake-up waits for the slot too: the request answers `202` after `wake_sync_wait_s`
+  (50 s) and the wake-up continues in the background.
+- **Per-deployment plans**: one sleep or stop plan per deployment that could make room, plus minimal
+  combinations of up to three, least disruptive first (not busy, lower priority, longest idle).
+- **Versioned database migrations** (`schema_version`), run once each in a transaction at start.
+- API: `/api/decider/status|settings|enable|disable|models/download|image|image/build|decisions|
+  decisions/{id}/feedback|suggest-config|rotate-key`, `GET /api/deployments/{id}/diagnosis`,
+  `GET /api/deployments/{id}/workload`; plan options gain `recommended`, `recommendation` and
+  `unsafe_reason`; inventory artifacts gain `kind_source` and `kind_confidence`; advice items gain
+  `relevance` and `workload_fit`; deployment views gain `system` and `startup_queue`.
+- Documentation: the decision model in [usage](docs/usage.md#decision-model), its settings in
+  [configuration](docs/configuration.md#decision-model-decider), a [threat model](docs/security.md) and
+  an [evaluation on real data](docs/decider-evaluation.md) (real failure logs, 140 real model repos, real
+  traffic, performance under load), with the corpora as regression fixtures under `tests/fixtures/`.
+
+### Changed
+
+- Plan ids are `stop:<ids>` / `sleep:<ids>` instead of `stop` / `sleep` (API clients that matched them
+  need updating), and there can be several sleep and stop plans.
+- The log tail stored with a failed deployment keeps the last 200 lines plus the distinct error lines
+  above them, so a root cause printed hundreds of lines earlier is no longer lost. Every stored tail is
+  redacted, and tails stored by older versions are redacted when read.
+- Removing a deployment also drops its metric rollups, cached workload label and diagnoses.
+- GGUF quantization suffixes (`Q8_0`, `Q4_K_M`, `UD-Q4_K_XL`) are recognised in model names, so variant
+  plans and the llama.cpp advice apply to them.
+
+### Fixed
+
+- Deleting a model also removes the files of the shared Hugging Face blob store (`hub/blobs`,
+  huggingface_hub 2 and later) that only it uses, keeps those another model uses, and reports the space
+  really freed.
+- Cancelling a download stops the file in flight at once and removes its partial file; a cancelled or
+  failed download is listed as incomplete instead of complete.
+- Exit code 137 is reported as out of memory (and raises the next estimate) only when Docker reports an
+  OOM kill or the log has the kernel OOM killer's line; a plain SIGKILL is reported as such.
+- `docker stop` of DGXMM no longer ends in SIGKILL (exit 137): open event streams end on SIGTERM and it
+  exits well within the stop timeout.
+- A failed container start no longer leaves a container in state "Created" behind.
+- When a host process holds a deployment's port, the start retries on the next free port (up to 4
+  times).
+- Redaction no longer masks ordinary exception messages such as `KeyError: 'model'` (parser errors were
+  unreadable).
+- Decision and classifier models were classified as vision-llm, Qwen3-Embedding and EAGLE heads as llm.
+- Two DGXMM processes starting at once (the app and an admin command) no longer fail with "database is
+  locked".
+- The Catalog page fits a 390 px phone; text contrast is at least 4.5:1 in both themes.
+
+### Security
+
+- The decider container runs as uid 10001 with a read-only root filesystem, no capabilities,
+  `no-new-privileges`, private IPC, a pids limit (512), a memory limit (16 GiB, host side) and `/tmp` as
+  a 0.75 GiB tmpfs; it has no published port and joins only the internal network `dgxmm-decider` (no
+  egress). Its only mounts are its own model files, read-only, never the whole HF cache.
+- The decider runs only a private copy of its hash-pinned files, verified on its tmpfs and imported from
+  there under `python3 -I`, so files planted next to the snapshot are never imported; it refuses to
+  start (exit 3) on any mismatch. Its image uses a digest-pinned base and hash-pinned wheels.
+- The decider's bearer key (`data/secrets/decider_api_key`, mode 600) is delivered as a 0400 file on a
+  tmpfs after the container starts, never in the environment, the command line or `docker inspect`;
+  it can be rotated from the UI, the API or the CLI.
+- Untrusted text (engine logs, chat templates, model names, `config.json`) reaches the decider only
+  quoted, capped and redacted; answers are validated (offered options only, finite probabilities,
+  64 KiB reply cap) and are advisory: every change still needs an admin's confirmation.
+  `trust_remote_code: true` is suggested only when a rule matched, with a warning.
+- Untrusted log text is bounded (2 KiB per line, 512 KiB per diagnosis) before any rule runs, every
+  regex over it is bounded, and matching runs off the event loop (an echoed architecture name could
+  otherwise freeze the app).
+- Decider API: per-user rate limits (`429 rate_limited`), a 64 KiB body limit, strict request schemas,
+  every change audited. `POST /api/deployments/preview` is admin-only.
+- Redaction also masks PEM private keys (also a key body whose first line a tail cut off), and the live
+  log view of a deployment is redacted.
+- The decider's network is never a trusted proxy, its image build log goes to admins only over SSE, and
+  the decision log keeps 30 days / 50 000 rows (diagnoses: 20 per deployment).
+- CI actions are pinned by commit SHA with a read-only token.
+
+### Upgrade notes
+
+- `./install.sh upgrade` migrates `data/dgxmm.sqlite3` in place at start (new tables and columns, then
+  versioned migrations). Rolling back to the previous release keeps working; disable and remove the
+  decision model first if you enabled it. See
+  [upgrading an existing install](docs/operations.md#upgrading-an-existing-install).
+- The decision model stays off until you enable it on the Decision model page or with
+  `./install.sh --with-decider`. It needs about 13 GiB of free memory (9 GiB for d3-nano), about 21 GB
+  of Docker disk for its image's base and 8.5 GiB in the HF cache for d3-mini.
+- Engine start-ups are now queued one at a time. Set `max_concurrent_startups: 0` in `config.yaml` for
+  the old behaviour (not recommended on unified memory).
+- Backups: the decider's settings, the decision log and diagnoses are in `data/dgxmm.sqlite3`, its key
+  in `data/secrets/decider_api_key`; the model snapshot and image are re-created with
+  `decider download` / `decider build` (see [backup and restore](docs/operations.md#backup-and-restore)).
+
+## [2026-10-16]
+
+Weights management, the single LiteLLM endpoint and the processes view.
 
 ### Added
 
@@ -84,7 +232,7 @@ Weights management, the single LiteLLM endpoint and the processes view (commits 
 
 ## 2026-10-16 - UI revamp, installer and documentation
 
-Commits `69e026a`…`fef8cf7`.
+The redesigned UI, the installer and the first documentation set.
 
 ### Added
 
@@ -125,7 +273,7 @@ Commits `69e026a`…`fef8cf7`.
 
 ## 2026-10-15 - Initial release
 
-Commits `37e1708`…`00bc53a`.
+The first version: deployments, memory planning, LiteLLM registration and the web UI.
 
 ### Added
 

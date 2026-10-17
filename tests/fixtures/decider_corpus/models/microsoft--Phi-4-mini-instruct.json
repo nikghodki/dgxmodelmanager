@@ -1,0 +1,43 @@
+{
+ "ref": "microsoft/Phi-4-mini-instruct",
+ "architecture": "Phi3ForCausalLM",
+ "model_type": "phi3",
+ "config": {
+  "architectures": [
+   "Phi3ForCausalLM"
+  ],
+  "model_type": "phi3",
+  "num_hidden_layers": 32,
+  "hidden_size": 3072,
+  "vocab_size": 200064,
+  "max_position_embeddings": 131072,
+  "auto_map": {
+   "AutoConfig": "configuration_phi3.Phi3Config",
+   "AutoModelForCausalLM": "modeling_phi3.Phi3ForCausalLM",
+   "AutoTokenizer": "Xenova/gpt-4o"
+  }
+ },
+ "files": [
+  ".gitattributes",
+  "CODE_OF_CONDUCT.md",
+  "LICENSE",
+  "NOTICE.md",
+  "README.md",
+  "SECURITY.md",
+  "added_tokens.json",
+  "config.json",
+  "configuration_phi3.py",
+  "data_summary_card.md",
+  "generation_config.json",
+  "merges.txt",
+  "model.safetensors.index.json",
+  "modeling_phi3.py",
+  "sample_finetune.py",
+  "special_tokens_map.json",
+  "tokenizer.json",
+  "tokenizer_config.json",
+  "vocab.json"
+ ],
+ "weight_files": 2,
+ "template": "{% for message in messages %}{% if message['role'] == 'system' and 'tools' in message and message['tools'] is not none %}{{ '<|' + message['role'] + '|>' + message['content'] + '<|tool|>' + message['tools'] + '<|/tool|>' + '<|end|>' }}{% else %}{{ '<|' + message['role'] + '|>' + message['content'] + '<|end|>' }}{% endif %}{% endfor %}{% if add_generation_prompt %}{{ '<|assistant|>' }}{% else %}{{ eos_token }}{% endif %}"
+}

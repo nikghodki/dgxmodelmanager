@@ -1,0 +1,49 @@
+# label: port_in_use
+# engine: vllm
+# model_ref: Qwen/Qwen3-0.6B
+# exit_code: 1
+# message: container exited with code 1
+# induced: another process in the same network namespace already listens on the server port
+# source: induced on the DGX Spark (GB10) with scripts/decider_eval/induce_failures.py
+---
+WARNING 10-17 01:31:13 [argparse_utils.py:276] With `vllm serve`, you should provide the model as a positional argument or in a config file instead of via the `--model` option. The `--model` option will be removed in a future version.
+(APIServer pid=1) INFO 10-17 01:31:13 [api_utils.py:347] 
+(APIServer pid=1) INFO 10-17 01:31:13 [api_utils.py:347]        █     █     █▄   ▄█
+(APIServer pid=1) INFO 10-17 01:31:13 [api_utils.py:347]  ▄▄ ▄█ █     █     █ ▀▄▀ █  version 0.26.1rc1.dev1219+g46638857f
+(APIServer pid=1) INFO 10-17 01:31:13 [api_utils.py:347]   █▄█▀ █     █     █     █  model   Qwen/Qwen3-0.6B
+(APIServer pid=1) INFO 10-17 01:31:13 [api_utils.py:347]    ▀▀  ▀▀▀▀▀ ▀▀▀▀▀ ▀     ▀
+(APIServer pid=1) INFO 10-17 01:31:13 [api_utils.py:347] 
+(APIServer pid=1) INFO 10-17 01:31:13 [api_utils.py:286] non-default args: {'model_tag': 'Qwen/Qwen3-0.6B', 'host': '0.0.0.0', 'revision': 'c1899de289a04d12100db370d81485cdf75e47ca', 'max_model_len': 4096, 'served_model_name': ['qwen3-0.6b'], 'gpu_memory_utilization': 0.04, 'enable_prefix_caching': True, 'max_num_batched_tokens': 2048, 'max_num_seqs': 2, 'enable_chunked_prefill': True}
+(APIServer pid=1) Traceback (most recent call last):
+(APIServer pid=1)   File "/usr/local/bin/vllm", line 10, in <module>
+(APIServer pid=1)     sys.exit(main())
+(APIServer pid=1)              ^^^^^^
+(APIServer pid=1)   File "/usr/local/lib/python3.12/dist-packages/vllm/entrypoints/cli/main.py", line 97, in main
+(APIServer pid=1)     args.dispatch_function(args)
+(APIServer pid=1)   File "/usr/local/lib/python3.12/dist-packages/vllm/entrypoints/cli/serve.py", line 153, in cmd
+(APIServer pid=1)     uvloop.run(run_server(args))
+(APIServer pid=1)   File "/usr/local/lib/python3.12/dist-packages/uvloop/__init__.py", line 96, in run
+(APIServer pid=1)     return __asyncio.run(
+(APIServer pid=1)            ^^^^^^^^^^^^^^
+(APIServer pid=1)   File "/usr/lib/python3.12/asyncio/runners.py", line 194, in run
+(APIServer pid=1)     return runner.run(main)
+(APIServer pid=1)            ^^^^^^^^^^^^^^^^
+(APIServer pid=1)   File "/usr/lib/python3.12/asyncio/runners.py", line 118, in run
+(APIServer pid=1)     return self._loop.run_until_complete(task)
+(APIServer pid=1)            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(APIServer pid=1)   File "uvloop/loop.pyx", line 1518, in uvloop.loop.Loop.run_until_complete
+(APIServer pid=1)   File "/usr/local/lib/python3.12/dist-packages/uvloop/__init__.py", line 48, in wrapper
+(APIServer pid=1)     return await main
+(APIServer pid=1)            ^^^^^^^^^^
+(APIServer pid=1)   File "/usr/local/lib/python3.12/dist-packages/vllm/entrypoints/launchers/api_server/entry.py", line 175, in run_server
+(APIServer pid=1)     listen_address, sock = setup_server(args, reuse_port=False)
+(APIServer pid=1)                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(APIServer pid=1)   File "/usr/local/lib/python3.12/dist-packages/vllm/tracing/otel.py", line 178, in sync_wrapper
+(APIServer pid=1)     return func(*args, **kwargs)
+(APIServer pid=1)            ^^^^^^^^^^^^^^^^^^^^^
+(APIServer pid=1)   File "/usr/local/lib/python3.12/dist-packages/vllm/entrypoints/launchers/launcher.py", line 269, in setup_server
+(APIServer pid=1)     sock = create_server_socket(sock_addr, reuse_port=reuse_port)
+(APIServer pid=1)            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(APIServer pid=1)   File "/usr/local/lib/python3.12/dist-packages/vllm/entrypoints/launchers/launcher.py", line 218, in create_server_socket
+(APIServer pid=1)     sock.bind(addr)
+(APIServer pid=1) OSError: [Errno 98] Address already in use

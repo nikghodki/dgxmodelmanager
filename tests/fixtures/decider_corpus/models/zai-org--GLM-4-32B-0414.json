@@ -1,0 +1,29 @@
+{
+ "ref": "zai-org/GLM-4-32B-0414",
+ "architecture": "Glm4ForCausalLM",
+ "model_type": "glm4",
+ "config": {
+  "architectures": [
+   "Glm4ForCausalLM"
+  ],
+  "model_type": "glm4",
+  "num_hidden_layers": 61,
+  "hidden_size": 6144,
+  "vocab_size": 151552,
+  "max_position_embeddings": 32768
+ },
+ "files": [
+  ".gitattributes",
+  "LICENSE",
+  "README.md",
+  "chat_template.jinja",
+  "config.json",
+  "generation_config.json",
+  "model.safetensors.index.json",
+  "special_tokens_map.json",
+  "tokenizer.json",
+  "tokenizer_config.json"
+ ],
+ "weight_files": 14,
+ "template": "[gMASK]<sop>\n{%- if tools -%}\n<|system|>\n# 可用工具\n{% for tool in tools %}\n    {%- set function = tool.function if tool.get(\"function\") else tool %}\n\n## {{ function.name }}\n\n{{ function | tojson(indent=4, ensure_ascii=False) }}\n在调用上述函数时，请使用 Json 格式表示调用的参数。\n{%- endfor %}\n{%- endif -%}\n\n{%- for msg in messages %}\n    {%- if msg.role == 'system' %}\n<|system|>\n{{ msg.content }}\n    {%- endif %}\n{%- endfor %}\n\n{%- for message in messages if message.role != 'system' %}\n    {%- set role = message['role'] %}\n    {%- set content = message['content'] %}\n    {%- set meta = message.get(\"metadata\", \"\") %}\n\n    {%- if role == 'user' %}\n<|user|>\n{{ content }}\n    {%- elif role == 'assistant' and not meta %}\n<|assistant|>\n{{ content }}\n    {%- elif role == 'assistant' and meta %}\n<|assistant|>{{ meta }}\n{{ content }}\n    {%- elif role == 'observation' %}\n<|observation|>\n{{ content }}\n    {%- endif %}\n{%- endfor %}\n{% if add_generation_prompt %}<|assistant|>{% endif %}"
+}

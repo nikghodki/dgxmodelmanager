@@ -1,0 +1,69 @@
+# label: offline_missing_files
+# engine: vllm
+# model_ref: Qwen/Qwen2.5-0.5B-Instruct
+# exit_code: 1
+# message: container exited with code 1
+# induced: repository not downloaded, HF_HUB_OFFLINE=1 (DGXMM's default)
+# source: induced on the DGX Spark (GB10) with scripts/decider_eval/induce_failures.py
+---
+WARNING 10-17 01:22:03 [argparse_utils.py:276] With `vllm serve`, you should provide the model as a positional argument or in a config file instead of via the `--model` option. The `--model` option will be removed in a future version.
+(APIServer pid=1) INFO 10-17 01:22:03 [api_utils.py:347] 
+(APIServer pid=1) INFO 10-17 01:22:03 [api_utils.py:347]        █     █     █▄   ▄█
+(APIServer pid=1) INFO 10-17 01:22:03 [api_utils.py:347]  ▄▄ ▄█ █     █     █ ▀▄▀ █  version 0.26.1rc1.dev1219+g46638857f
+(APIServer pid=1) INFO 10-17 01:22:03 [api_utils.py:347]   █▄█▀ █     █     █     █  model   Qwen/Qwen2.5-0.5B-Instruct
+(APIServer pid=1) INFO 10-17 01:22:03 [api_utils.py:347]    ▀▀  ▀▀▀▀▀ ▀▀▀▀▀ ▀     ▀
+(APIServer pid=1) INFO 10-17 01:22:03 [api_utils.py:347] 
+(APIServer pid=1) INFO 10-17 01:22:03 [api_utils.py:286] non-default args: {'model_tag': 'Qwen/Qwen2.5-0.5B-Instruct', 'host': '0.0.0.0', 'model': 'Qwen/Qwen2.5-0.5B-Instruct', 'max_model_len': 4096, 'served_model_name': ['qwen2.5-0.5b-instruct'], 'gpu_memory_utilization': 0.03, 'enable_prefix_caching': True, 'max_num_batched_tokens': 2048, 'max_num_seqs': 2, 'enable_chunked_prefill': True}
+(APIServer pid=1) Traceback (most recent call last):
+(APIServer pid=1)   File "/usr/local/bin/vllm", line 10, in <module>
+(APIServer pid=1)     sys.exit(main())
+(APIServer pid=1)              ^^^^^^
+(APIServer pid=1)   File "/usr/local/lib/python3.12/dist-packages/vllm/entrypoints/cli/main.py", line 97, in main
+(APIServer pid=1)     args.dispatch_function(args)
+(APIServer pid=1)   File "/usr/local/lib/python3.12/dist-packages/vllm/entrypoints/cli/serve.py", line 153, in cmd
+(APIServer pid=1)     uvloop.run(run_server(args))
+(APIServer pid=1)   File "/usr/local/lib/python3.12/dist-packages/uvloop/__init__.py", line 96, in run
+(APIServer pid=1)     return __asyncio.run(
+(APIServer pid=1)            ^^^^^^^^^^^^^^
+(APIServer pid=1)   File "/usr/lib/python3.12/asyncio/runners.py", line 194, in run
+(APIServer pid=1)     return runner.run(main)
+(APIServer pid=1)            ^^^^^^^^^^^^^^^^
+(APIServer pid=1)   File "/usr/lib/python3.12/asyncio/runners.py", line 118, in run
+(APIServer pid=1)     return self._loop.run_until_complete(task)
+(APIServer pid=1)            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(APIServer pid=1)   File "uvloop/loop.pyx", line 1518, in uvloop.loop.Loop.run_until_complete
+(APIServer pid=1)   File "/usr/local/lib/python3.12/dist-packages/uvloop/__init__.py", line 48, in wrapper
+(APIServer pid=1)     return await main
+(APIServer pid=1)            ^^^^^^^^^^
+(APIServer pid=1)   File "/usr/local/lib/python3.12/dist-packages/vllm/entrypoints/launchers/api_server/entry.py", line 176, in run_server
+(APIServer pid=1)     await run_server_worker(listen_address, sock, args, **uvicorn_kwargs)
+(APIServer pid=1)   File "/usr/local/lib/python3.12/dist-packages/vllm/entrypoints/launchers/api_server/entry.py", line 190, in run_server_worker
+(APIServer pid=1)     async with build_async_engine_client(
+(APIServer pid=1)   File "/usr/lib/python3.12/contextlib.py", line 210, in __aenter__
+(APIServer pid=1)     return await anext(self.gen)
+(APIServer pid=1)            ^^^^^^^^^^^^^^^^^^^^^
+(APIServer pid=1)   File "/usr/local/lib/python3.12/dist-packages/vllm/entrypoints/launchers/api_server/entry.py", line 53, in build_async_engine_client
+(APIServer pid=1)     engine_args = AsyncEngineArgs.from_cli_args(args)
+(APIServer pid=1)                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(APIServer pid=1)   File "/usr/local/lib/python3.12/dist-packages/vllm/engine/arg_utils.py", line 1742, in from_cli_args
+(APIServer pid=1)     engine_args = cls(
+(APIServer pid=1)                   ^^^^
+(APIServer pid=1)   File "<string>", line 238, in __init__
+(APIServer pid=1)   File "/usr/local/lib/python3.12/dist-packages/vllm/engine/arg_utils.py", line 822, in __post_init__
+(APIServer pid=1)     self.model = get_model_path(self.model, self.revision)
+(APIServer pid=1)                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(APIServer pid=1)   File "/usr/local/lib/python3.12/dist-packages/vllm/transformers_utils/repo_utils.py", line 294, in get_model_path
+(APIServer pid=1)     return hf_api().snapshot_download(
+(APIServer pid=1)            ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(APIServer pid=1)   File "/usr/local/lib/python3.12/dist-packages/huggingface_hub/utils/_validators.py", line 88, in _inner_fn
+(APIServer pid=1)     return fn(*args, **kwargs)
+(APIServer pid=1)            ^^^^^^^^^^^^^^^^^^^
+(APIServer pid=1)   File "/usr/local/lib/python3.12/dist-packages/huggingface_hub/hf_api.py", line 6814, in snapshot_download
+(APIServer pid=1)     return snapshot_download(
+(APIServer pid=1)            ^^^^^^^^^^^^^^^^^^
+(APIServer pid=1)   File "/usr/local/lib/python3.12/dist-packages/huggingface_hub/utils/_validators.py", line 88, in _inner_fn
+(APIServer pid=1)     return fn(*args, **kwargs)
+(APIServer pid=1)            ^^^^^^^^^^^^^^^^^^^
+(APIServer pid=1)   File "/usr/local/lib/python3.12/dist-packages/huggingface_hub/_snapshot_download.py", line 354, in snapshot_download
+(APIServer pid=1)     raise LocalEntryNotFoundError(
+(APIServer pid=1) huggingface_hub.errors.LocalEntryNotFoundError: Cannot find an appropriate cached snapshot folder for the specified revision on the local disk and outgoing traffic has been disabled. To enable repo look-ups and downloads online, pass 'local_files_only=False' as input.

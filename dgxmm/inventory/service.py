@@ -24,6 +24,8 @@ class InventoryService:
             lambda: scan_gguf_roots(gguf_roots)
         ]
         self._items: dict[str, ModelArtifact] = {}
+        # fn(artifacts) run on every scan result before it is published (e.g. cached model-derived kinds)
+        self.post_scan: list[Callable[[list[ModelArtifact]], None]] = []
         self._lock = threading.Lock()
 
     def refresh(self) -> list[ModelArtifact]:
@@ -34,6 +36,11 @@ class InventoryService:
                     found[a.ref] = a
             except Exception:
                 log.exception("inventory scanner failed")
+        for hook in self.post_scan:
+            try:
+                hook(list(found.values()))
+            except Exception:
+                log.exception("inventory post-scan hook failed")
         with self._lock:
             self._items = found
         return list(found.values())

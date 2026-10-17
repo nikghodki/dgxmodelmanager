@@ -9,7 +9,7 @@ export interface MemorySegment {
   kind: "deployment" | "sleeping" | "external" | "reserve" | "free";
 }
 
-const ACTIVE = ["starting", "loading", "ready", "sleeping", "unknown", "stopping"];
+const ACTIVE = ["queued", "starting", "loading", "ready", "sleeping", "unknown", "stopping"];
 
 /** Segments for the unified-memory bar. Deployment colour = chart slot by deployment id (follows the entity). */
 export function memorySegments(b: Budget): { segments: MemorySegment[]; overcommitted: number } {

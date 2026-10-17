@@ -1,0 +1,36 @@
+{
+ "ref": "internlm/internlm2-chat-7b",
+ "architecture": "InternLM2ForCausalLM",
+ "model_type": "internlm2",
+ "config": {
+  "architectures": [
+   "InternLM2ForCausalLM"
+  ],
+  "model_type": "internlm2",
+  "num_hidden_layers": 32,
+  "hidden_size": 4096,
+  "vocab_size": 92544,
+  "max_position_embeddings": 32768,
+  "auto_map": {
+   "AutoConfig": "configuration_internlm2.InternLM2Config",
+   "AutoModelForCausalLM": "modeling_internlm2.InternLM2ForCausalLM",
+   "AutoModel": "modeling_internlm2.InternLM2ForCausalLM"
+  }
+ },
+ "files": [
+  ".gitattributes",
+  "README.md",
+  "config.json",
+  "configuration_internlm2.py",
+  "generation_config.json",
+  "model.safetensors.index.json",
+  "modeling_internlm2.py",
+  "special_tokens_map.json",
+  "tokenization_internlm2.py",
+  "tokenization_internlm2_fast.py",
+  "tokenizer.model",
+  "tokenizer_config.json"
+ ],
+ "weight_files": 8,
+ "template": "{{ bos_token }}{% for message in messages %}{{'<|im_start|>' + message['role'] + '\n' + message['content'] + '<|im_end|>' + '\n'}}{% endfor %}{% if add_generation_prompt %}{{ '<|im_start|>assistant\n' }}{% endif %}"
+}

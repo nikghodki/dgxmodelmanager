@@ -86,6 +86,15 @@ class MetricsStore:
     def series(self, key: int | str) -> list[dict]:
         return list(self._rings.get(key, ()))
 
+    def forget(self, dep_id: int) -> None:
+        """Drop a removed deployment's live samples and rollups (SQLite reuses deployment ids, so a later
+        deployment must not inherit them)."""
+        for d in (self._rings, self._prev, self._rolled):
+            d.pop(dep_id, None)
+        with self.db.session() as sess:
+            sess.execute(delete(MetricRollup).where(MetricRollup.deployment_id == int(dep_id)))
+            sess.commit()
+
     def rollup(self, now: float | None = None) -> int:
         now = self.clock() if now is None else now
         current_minute = int(now // 60) * 60

@@ -18,20 +18,23 @@ class ModelArtifact:
     weights_bytes: int
     size_bytes: int
     complete: bool
-    kind: Literal["llm", "draft", "other"]
+    kind: Literal["llm", "draft", "embedding", "reranker", "vision-llm", "speech", "decision", "other"]
     arch: ArchSpec | None
     architecture: str | None
     quant: str | None
     problems: list[str] = field(default_factory=list)
     config: dict[str, Any] | None = None
     files: list[str] = field(default_factory=list)
+    kind_source: Literal["rules", "model"] = "rules"  # "model": kind set by the decision model (dgxmm/decider/kind.py)
+    kind_confidence: float | None = None              # model probability when kind_source == "model"
 
     def as_dict(self) -> dict:
         a = self.arch
         return {
             "ref": self.ref, "source": self.source, "revision": self.revision, "format": self.format,
             "weights_bytes": self.weights_bytes, "size_bytes": self.size_bytes, "complete": self.complete,
-            "kind": self.kind, "architecture": self.architecture, "quant": self.quant, "problems": self.problems,
+            "kind": self.kind, "kind_source": self.kind_source, "kind_confidence": self.kind_confidence,
+            "architecture": self.architecture, "quant": self.quant, "problems": self.problems,
             "max_context": a.max_context if a else None, "is_moe": a.is_moe if a else None,
             "num_layers": a.num_layers if a else None, "confident": a.confident if a else None,
             "has_mtp": any("mtp" in f for f in self.files),

@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parent.parent
 STUBS = Path(__file__).resolve().parent / "fixtures" / "install_stubs"
 TOOLS = ["bash", "env", "sed", "awk", "grep", "cat", "mkdir", "chmod", "cp", "mv", "rm", "rmdir",
          "dirname", "basename", "df", "cut", "tr", "head", "tail", "sort", "date", "sleep", "wc",
-         "mktemp", "readlink", "realpath", "tee", "touch", "ls", "seq", "printf", "true", "false", "uniq"]
+         "mktemp", "readlink", "realpath", "tee", "touch", "ls", "seq", "printf", "true", "false", "uniq", "find"]
 PW = "Zx9_fake-Admin-pw-123"
 FIRST_RUN = f"2026-10-16 WARNING dgxmm.bootstrap: DGXMM first run: created user 'admin' with password {PW} (change it at first login)"
 
@@ -262,7 +262,7 @@ def test_install_generates_files_and_prints_password_once(box, monkeypatch):
 
     assert p.out.count(PW) == 1
     assert "hf_secret_token_value" not in p.out
-    assert "http://192.168.10.20:8090/dgxmm/" in p.out and "http://100.64.1.2:8090/dgxmm/" in p.out
+    assert "http://192.0.2.20:8090/dgxmm/" in p.out and "http://198.51.100.2:8090/dgxmm/" in p.out
     assert "http://spark-test:8090/dgxmm/" in p.out
     assert "172.17.0.1" not in p.out and "172.23.0.1" not in p.out
     calls = box.calls()
@@ -322,7 +322,7 @@ def test_pull_engines(box):
 def test_loopback_bind_prints_loopback_url(box):
     p = box.run(DGXMM_BIND="127.0.0.1")
     assert p.returncode == 0, p.out
-    assert "http://127.0.0.1:8090/dgxmm/" in p.out and "192.168.10.20" not in p.out
+    assert "http://127.0.0.1:8090/dgxmm/" in p.out and "192.0.2.20" not in p.out
 
 
 # --- status / logs / upgrade / uninstall --------------------------------------------------------------
@@ -380,11 +380,13 @@ def test_uninstall_keeps_data_and_engines(box):
 
 def test_uninstall_purge_removes_state_and_managed_engines_only(box):
     fake = _installed(box)
-    p = box.run("uninstall", "--purge", **fake, FAKE_NETWORK_LABEL="true")
+    (box.repo / ".env").write_text("DGXMM_NETWORK=dgxmm\nDGXMM_INSTALL_ID=zz99yy88xx77\n")
+    p = box.run("uninstall", "--purge", **fake, FAKE_NETWORK_LABEL="true", FAKE_OWN_MANAGED_IDS="c1 c2")
     assert p.returncode == 0, p.out
     for f in ("data", "secrets", "config.yaml", ".env"):
         assert not (box.repo / f).exists()
     calls = box.calls()
+    assert "ps -aq --filter label=dgxmm.managed=true --filter label=dgxmm.install=zz99yy88xx77" in calls
     assert "docker rm -f c1 c2" in calls
     assert "docker network rm dgxmm" in calls
     assert (box.home / ".cache" / "huggingface" / "model.bin").exists()
@@ -396,6 +398,74 @@ def test_uninstall_purge_keeps_network_it_did_not_create(box):
     p = box.run("uninstall", "--purge", **fake, FAKE_NETWORK_LABEL="")
     assert p.returncode == 0, p.out
     assert "network rm" not in box.calls()
+
+
+def _installed_with_decider_net(box):
+    fake = _installed(box)
+    (box.repo / ".env").write_text("DGXMM_NETWORK=dgxmm\nDGXMM_INSTALL_ID=zz99yy88xx77\n")
+    return {**fake, "FAKE_OWN_MANAGED_IDS": "c1 c2", "FAKE_DECIDER_NET": "exists"}
+
+
+def test_uninstall_purge_removes_the_decider_network(box):
+    fake = _installed_with_decider_net(box)
+    p = box.run("uninstall", "--purge", **fake)
+    assert p.returncode == 0, p.out
+    calls = box.calls()
+    assert "docker network rm dgxmm-decider" in calls
+    # after the managed containers (the decider) are gone
+    assert calls.index("docker rm -f c1 c2") < calls.index("docker network rm dgxmm-decider")
+
+
+def test_uninstall_purge_uses_the_configured_decider_network_and_checks_its_label(box):
+    fake = _installed_with_decider_net(box)
+    (box.repo / "config.yaml").write_text("docker_network: dgxmm\ndecider_network: \"my-dec\"  # internal\n")
+    p = box.run("uninstall", "--purge", **fake)
+    assert p.returncode == 0, p.out
+    assert "docker network rm my-dec" in box.calls()
+
+
+def test_uninstall_purge_keeps_a_same_named_network_dgxmm_did_not_create(box):
+    fake = _installed_with_decider_net(box)
+    p = box.run("uninstall", "--purge", **fake, FAKE_DECIDER_NET_PURPOSE="")
+    assert p.returncode == 0, p.out
+    assert "network rm dgxmm-decider" not in box.calls()
+
+
+def test_uninstall_purge_keeps_the_decider_network_of_another_install(box):
+    # same purpose label, but created by another install (label dgxmm.install differs): reported, kept
+    fake = _installed_with_decider_net(box)
+    p = box.run("uninstall", "--purge", **fake, FAKE_DECIDER_NET_INSTALL="other0install")
+    assert p.returncode == 0, p.out
+    assert "network rm dgxmm-decider" not in box.calls()
+    assert "kept network dgxmm-decider" in p.out
+
+
+def test_uninstall_purge_keeps_an_unlabelled_decider_network(box):
+    # created before install labels (no dgxmm.install label): reported, kept
+    fake = _installed_with_decider_net(box)
+    p = box.run("uninstall", "--purge", **fake, FAKE_DECIDER_NET_INSTALL="")
+    assert p.returncode == 0, p.out
+    assert "network rm dgxmm-decider" not in box.calls() and "kept network dgxmm-decider" in p.out
+
+
+def test_uninstall_purge_without_an_install_id_keeps_the_decider_network(box):
+    fake = _installed(box)  # .env without DGXMM_INSTALL_ID
+    p = box.run("uninstall", "--purge", **fake, FAKE_DECIDER_NET="exists")
+    assert p.returncode == 0, p.out
+    assert "network rm dgxmm-decider" not in box.calls()
+
+
+def test_uninstall_keeps_the_decider_network_without_purge_and_in_dry_run(box):
+    fake = _installed_with_decider_net(box)
+    assert box.run("uninstall", "--purge", "--dry-run", **fake).returncode == 0
+    assert "docker network rm dgxmm-decider" not in box.calls()
+    assert box.run("uninstall", **fake).returncode == 0
+    assert "network rm dgxmm-decider" not in box.calls()
+
+
+def test_uninstall_help_mentions_the_decider_network(box):
+    p = box.run("--help")
+    assert "decider" in p.out and "network" in p.out
 
 
 def test_uninstall_refuses_other_checkouts_container(box):
@@ -517,7 +587,7 @@ def test_mdns_url_printed_after_ip_urls(box):
     p = box.run()
     assert p.returncode == 0, p.out
     assert "http://spark-test.local:8090/dgxmm/" in p.out
-    assert p.out.index("http://192.168.10.20:8090/dgxmm/") < p.out.index("http://spark-test.local:8090/dgxmm/")
+    assert p.out.index("http://192.0.2.20:8090/dgxmm/") < p.out.index("http://spark-test.local:8090/dgxmm/")
 
 
 def test_compose_healthcheck_works_on_old_engines():
@@ -533,9 +603,9 @@ def test_trusted_proxies_env_accepted(box):
 
 def test_trusted_proxies_written_to_env(box):
     """DGXMM_TRUSTED_PROXIES is written to .env when provided."""
-    p = box.run("--dry-run", DGXMM_TRUSTED_PROXIES="10.0.0.1")
+    p = box.run("--dry-run", DGXMM_TRUSTED_PROXIES="198.51.100.1")
     assert p.returncode == 0, p.out
-    assert "DGXMM_TRUSTED_PROXIES=10.0.0.1" in p.out
+    assert "DGXMM_TRUSTED_PROXIES=198.51.100.1" in p.out
 
 
 def test_trusted_proxies_hint_when_bind_loopback(box):
@@ -552,7 +622,7 @@ def test_trusted_proxies_hint_when_bind_loopback(box):
 
 def test_trusted_proxies_hint_not_shown_when_set(box):
     """No hint when DGXMM_TRUSTED_PROXIES is already set."""
-    p = box.run("--dry-run", DGXMM_BIND="127.0.0.1", DGXMM_TRUSTED_PROXIES="10.0.0.1", FAKE_NETWORK="exists")
+    p = box.run("--dry-run", DGXMM_BIND="127.0.0.1", DGXMM_TRUSTED_PROXIES="198.51.100.1", FAKE_NETWORK="exists")
     assert p.returncode == 0, p.out
     assert "Behind a reverse proxy?" not in p.out
 
@@ -576,16 +646,16 @@ def test_trusted_proxies_from_existing_env_file_suppresses_hint(box):
 def test_trusted_proxies_env_appended_when_missing_from_env_file(box):
     """Env value is appended to an existing .env that lacks the key (same rule as other keys)."""
     (box.repo / ".env").write_text("DGXMM_BIND=127.0.0.1\n")
-    p = box.run("--dry-run", DGXMM_TRUSTED_PROXIES="10.0.0.1", FAKE_NETWORK="exists")
+    p = box.run("--dry-run", DGXMM_TRUSTED_PROXIES="198.51.100.1", FAKE_NETWORK="exists")
     assert p.returncode == 0, p.out
-    assert "| DGXMM_TRUSTED_PROXIES=10.0.0.1" in p.out
+    assert "| DGXMM_TRUSTED_PROXIES=198.51.100.1" in p.out
     assert "Behind a reverse proxy?" not in p.out
 
 
 def test_trusted_proxies_existing_env_file_wins_over_environment(box):
     """Like DGXMM_PORT: an existing .env value is kept, with a warning, over a different env value."""
     (box.repo / ".env").write_text("DGXMM_TRUSTED_PROXIES=172.99.0.1\n")
-    p = box.run("--dry-run", DGXMM_TRUSTED_PROXIES="10.0.0.1")
+    p = box.run("--dry-run", DGXMM_TRUSTED_PROXIES="198.51.100.1")
     assert p.returncode == 0, p.out
     assert "keeping .env" in p.out
 
@@ -629,7 +699,7 @@ def test_with_litellm_install_generates_secrets_env_and_uses_profile(box):
     calls = box.calls()
     assert "docker compose --profile litellm up -d --build" in calls
     # LiteLLM health is checked after DGXMM's, and the single endpoint is printed.
-    assert "http://192.168.10.20:4000/v1" in p.out and "LiteLLM is running" in p.out
+    assert "http://192.0.2.20:4000/v1" in p.out and "LiteLLM is running" in p.out
     assert "secrets/litellm_master_key" in p.out and "LiteLLM page" in p.out
     assert p.out.index("DGXMM is running") < p.out.index("LiteLLM is running")
 
@@ -695,7 +765,7 @@ def test_with_litellm_from_env_var_and_custom_port(box):
     assert p.returncode == 0, p.out
     env = (box.repo / ".env").read_text()
     assert "DGXMM_WITH_LITELLM=1" in env and "DGXMM_LITELLM_PORT=4100" in env
-    assert "http://192.168.10.20:4100/v1" in p.out
+    assert "http://192.0.2.20:4100/v1" in p.out
 
 
 def test_without_litellm_nothing_changes(box):
@@ -965,14 +1035,14 @@ def test_with_litellm_fresh_config_seeds_public_url(box):
     _copy_litellm_files(box)
     p = box.run("--with-litellm")
     assert p.returncode == 0, p.out
-    assert _cfg_lines(box, "litellm_public_url") == ["litellm_public_url: http://192.168.10.20:4000"]
+    assert _cfg_lines(box, "litellm_public_url") == ["litellm_public_url: http://192.0.2.20:4000"]
 
 
 def test_with_litellm_public_url_uses_custom_port_and_bind_ip(box):
     _copy_litellm_files(box)
-    p = box.run("--with-litellm", "--bind", "192.168.10.20", DGXMM_LITELLM_PORT="4100")
+    p = box.run("--with-litellm", "--bind", "192.0.2.20", DGXMM_LITELLM_PORT="4100")
     assert p.returncode == 0, p.out
-    assert _cfg_lines(box, "litellm_public_url") == ["litellm_public_url: http://192.168.10.20:4100"]
+    assert _cfg_lines(box, "litellm_public_url") == ["litellm_public_url: http://192.0.2.20:4100"]
 
 
 def test_with_litellm_loopback_bind_does_not_seed_public_url(box):
@@ -996,7 +1066,7 @@ def test_with_litellm_dry_run_shows_public_url_and_writes_nothing(box):
     p = box.run("--with-litellm", "--dry-run")
     assert p.returncode == 0, p.out
     assert box.snapshot() == before
-    assert "litellm_public_url: http://192.168.10.20:4000" in p.out
+    assert "litellm_public_url: http://192.0.2.20:4000" in p.out
 
 
 def test_without_litellm_no_public_url(box):
@@ -1016,3 +1086,429 @@ def test_with_litellm_existing_config_public_url_untouched(box):
 def test_example_config_documents_public_url():
     text = (ROOT / "config.example.yaml").read_text()
     assert "# litellm_public_url:" in text
+
+
+# --- decision model (--with-decider) ------------------------------------------------------------------
+
+DECIDER_SNAP = ".cache/huggingface/hub/models--vllm-sr--d3-mini/snapshots/97dd054df4b3e0b3beb6af23ab8c82b7c0052e0e"
+
+
+def _meminfo(box, gib: float) -> dict[str, str]:
+    path = box.tmp / "meminfo"
+    path.write_text(f"MemTotal:       127000000 kB\nMemAvailable:   {int(gib * 1024 * 1024)} kB\n")
+    return {"DGXMM_MEMINFO": str(path)}
+
+
+def _decider_calls(box) -> list[str]:
+    return [line.split("dgxmm.admin decider ", 1)[1] for line in box.calls().splitlines()
+            if "dgxmm.admin decider " in line]
+
+
+def test_help_documents_decider(box):
+    p = box.run("--help")
+    for word in ("--with-decider", "DGXMM_WITH_DECIDER", "--purge-decider-model", "DGXMM_DECIDER_TIMEOUT"):
+        assert word in p.stdout
+
+
+def test_with_decider_install_builds_downloads_enables_and_remembers(box):
+    p = box.run("--with-decider", **_meminfo(box, 40))
+    assert p.returncode == 0, p.out
+    assert "DGXMM_WITH_DECIDER=1" in (box.repo / ".env").read_text()
+    calls = _decider_calls(box)
+    assert calls == ["build", "download", "enable --wait --timeout 900", "status"]
+    log = box.calls()
+    assert log.index("compose up") < log.index("dgxmm.admin decider build")  # after DGXMM is healthy
+    assert "memory: 40 GiB available" in p.out and "Decision model" in p.out
+    # remembered: a plain re-run keeps it on (each step is idempotent in the CLI), unless an admin disabled it
+    box.log.write_text("")
+    p = box.run(**_meminfo(box, 40))
+    assert p.returncode == 0, p.out
+    assert _decider_calls(box) == ["admin-disabled", "build", "download", "enable --wait --timeout 900", "status"]
+
+
+def test_with_decider_from_env_and_custom_timeout(box):
+    p = box.run(DGXMM_WITH_DECIDER="1", DGXMM_DECIDER_TIMEOUT="120", **_meminfo(box, 40))
+    assert p.returncode == 0, p.out
+    assert "enable --wait --timeout 120" in _decider_calls(box)
+
+
+def test_without_decider_nothing_decider_happens(box):
+    p = box.run(**_meminfo(box, 2))  # low memory does not matter without the decider
+    assert p.returncode == 0, p.out
+    assert _decider_calls(box) == [] and "DGXMM_WITH_DECIDER" not in (box.repo / ".env").read_text()
+
+
+def test_with_decider_dry_run_writes_nothing(box):
+    before = box.snapshot()
+    p = box.run("--with-decider", "--dry-run", **_meminfo(box, 40))
+    assert p.returncode == 0, p.out
+    assert box.snapshot() == before and _decider_calls(box) == []
+    for sub in ("build", "download", "enable --wait --timeout 900"):
+        assert f"would run: docker exec dgxmm python -m dgxmm.admin decider {sub}" in p.out
+
+
+@pytest.mark.parametrize("value", ["maybe", "2"])
+def test_with_decider_value_validated(box, value):
+    p = box.run("--dry-run", DGXMM_WITH_DECIDER=value)
+    assert p.returncode != 0 and "DGXMM_WITH_DECIDER" in p.out
+
+
+@pytest.mark.parametrize("value", ["0", "-5", "abc"])
+def test_decider_timeout_validated(box, value):
+    p = box.run("--dry-run", "--with-decider", DGXMM_DECIDER_TIMEOUT=value, **_meminfo(box, 40))
+    assert p.returncode != 0 and "DGXMM_DECIDER_TIMEOUT" in p.out
+
+
+def test_with_decider_preflight_needs_16_gib_free(box):
+    p = box.run("--with-decider", **_meminfo(box, 12.5))
+    assert p.returncode != 0
+    assert "16 GiB" in p.out and "12 GiB" in p.out
+    assert "compose up" not in box.calls()  # fails before changing anything
+
+
+def test_with_decider_preflight_memory_skipped_when_decider_already_runs(box):
+    p = box.run("--with-decider", FAKE_DECIDER_RUNNING="d1", **_meminfo(box, 3))
+    assert p.returncode == 0, p.out
+    assert "already running" in p.out
+
+
+def _pinned_files() -> list[str]:
+    pins = ROOT / "deploy" / "decider" / "d3-mini-97dd054df4b3e0b3beb6af23ab8c82b7c0052e0e.sha256"
+    return [line.split()[1] for line in pins.read_text().splitlines() if line.strip()]
+
+
+def _with_pins(box) -> None:
+    (box.repo / "deploy" / "decider").mkdir(parents=True, exist_ok=True)
+    name = "d3-mini-97dd054df4b3e0b3beb6af23ab8c82b7c0052e0e.sha256"
+    shutil.copy2(ROOT / "deploy" / "decider" / name, box.repo / "deploy" / "decider" / name)
+
+
+def test_with_decider_preflight_disk_for_the_model(box):
+    _with_pins(box)
+    df = box.bin / "df"
+    df.write_text("#!/usr/bin/env bash\necho 'Filesystem 1024-blocks Used Available Capacity Mounted on'\n"
+                  "echo '/dev/x 100000000 99000000 4194304 99% /'\n")  # 4 GiB free
+    df.chmod(0o755)
+    p = box.run("--with-decider", **_meminfo(box, 40))
+    assert p.returncode != 0 and "model snapshot" in p.out and "4 GiB" in p.out
+    snap = box.home / DECIDER_SNAP
+    snap.mkdir(parents=True)
+    (snap / "MODEL_MANIFEST.json").write_text("{}")  # only the manifest: not a complete snapshot
+    p = box.run("--with-decider", **_meminfo(box, 40))
+    assert p.returncode != 0 and "model snapshot" in p.out
+    for name in _pinned_files():
+        (snap / name).parent.mkdir(parents=True, exist_ok=True)
+        (snap / name).write_text("x")
+    p = box.run("--with-decider", **_meminfo(box, 40))
+    assert p.returncode == 0, p.out  # every pinned file present: no space needed for it
+
+
+def test_with_decider_image_disk_warning(box):
+    df = box.bin / "df"
+    df.write_text("#!/usr/bin/env bash\necho 'Filesystem 1024-blocks Used Available Capacity Mounted on'\n"
+                  "echo '/dev/x 100000000 50000000 20971520 50% /'\n")  # 20 GiB free
+    df.chmod(0o755)
+    p = box.run("--with-decider", **_meminfo(box, 40))
+    assert p.returncode == 0, p.out
+    assert "decider image" in p.out and "30 GiB" in p.out  # warning only: layers may already be cached
+    box.log.write_text("")
+    p = box.run("--with-decider", FAKE_DECIDER_IMAGE="present", **_meminfo(box, 40))
+    assert "30 GiB" not in p.out
+
+
+def test_with_decider_reads_image_tag_from_config(box):
+    (box.repo / "config.yaml").write_text("docker_network: dgxmm\nimages:\n  vllm: vllm/vllm-openai:x\n"
+                                          "  decision: custom-decider:7  # local tag\n")
+    p = box.run("--with-decider", FAKE_DECIDER_IMAGE="present", **_meminfo(box, 40))
+    assert p.returncode == 0, p.out
+    assert "image inspect custom-decider:7" in box.calls()
+
+
+def test_with_decider_not_enough_memory_at_enable_fails_with_hint(box):
+    p = box.run("--with-decider", FAKE_DECIDER_ENABLE_RC="3", **_meminfo(box, 40))
+    assert p.returncode != 0
+    assert "does not fit" in p.out and "DGXMM itself is running" in p.out
+
+
+def test_with_decider_timeout_fails_with_hint(box):
+    p = box.run("--with-decider", FAKE_DECIDER_ENABLE_RC="5", **_meminfo(box, 40))
+    assert p.returncode != 0 and "not healthy" in p.out and "decider status" in p.out
+
+
+def test_with_decider_download_failure_says_rerun_resumes(box):
+    p = box.run("--with-decider", FAKE_DECIDER_DOWNLOAD_RC="1", **_meminfo(box, 40))
+    assert p.returncode != 0 and "resume" in p.out
+    assert "decider enable" not in box.calls()
+
+
+def test_with_decider_build_failure_stops_before_download(box):
+    p = box.run("--with-decider", FAKE_DECIDER_BUILD_RC="1", **_meminfo(box, 40))
+    assert p.returncode != 0 and "decider image" in p.out
+    assert "decider download" not in box.calls()
+
+
+def test_status_shows_decider(box):
+    (box.repo / ".env").write_text("DGXMM_WITH_DECIDER=1\n")
+    p = box.run("status", FAKE_DGXMM_STATE="running", FAKE_DGXMM_WORKDIR=str(box.repo.resolve()))
+    assert p.returncode == 0, p.out
+    assert "Decision model: enabled, healthy" in p.out
+    assert "status --check" in box.calls()
+    p = box.run("status", FAKE_DGXMM_STATE="running", FAKE_DGXMM_WORKDIR=str(box.repo.resolve()),
+                FAKE_DECIDER_STATUS="enabled, not healthy (loading, deployment 3)", FAKE_DECIDER_STATUS_RC="1")
+    assert p.returncode == 1 and "not healthy" in p.out
+
+
+def test_status_decider_not_requested_does_not_fail_status(box):
+    p = box.run("status", FAKE_DGXMM_STATE="running", FAKE_DGXMM_WORKDIR=str(box.repo.resolve()),
+                FAKE_DECIDER_STATUS="disabled", FAKE_DECIDER_STATUS_RC="1")
+    assert p.returncode == 0, p.out
+    assert "Decision model: disabled" in p.out
+
+
+def test_status_lists_decider_container_when_dgxmm_is_down(box):
+    p = box.run("status", FAKE_DGXMM_STATE="exited", FAKE_DGXMM_WORKDIR=str(box.repo.resolve()),
+                FAKE_DECIDER_IDS="d1")
+    assert "dgxmm-decider-d1" in p.out and "decider status" not in box.calls()
+
+
+def _installed_with_id(box, install_id="zz99yy88xx77"):
+    fake = _installed(box)
+    (box.repo / ".env").write_text(f"DGXMM_NETWORK=dgxmm\nDGXMM_INSTALL_ID={install_id}\n")
+    return fake
+
+
+def test_uninstall_removes_only_this_installs_decider_container_and_keeps_its_setting(box):
+    fake = _installed_with_id(box)
+    p = box.run("uninstall", **fake, FAKE_DECIDER_IDS="d1", FAKE_DECIDER_ALL_IDS="d1 dother")
+    assert p.returncode == 0, p.out
+    calls = box.calls()
+    assert "ps -aq --filter label=dgxmm.system=true --filter label=dgxmm.install=zz99yy88xx77" in calls
+    assert "docker rm -f d1" in calls and "dother" not in calls.replace("ps -aq", "")
+    assert "decider disable" not in calls  # decider.enabled is not flipped: a reinstall brings it back
+    assert calls.index("docker rm -f d1") < calls.index("docker stop -t 30 dgxmm")
+    assert "c1" not in calls.replace("ps -aq", "")  # user engines still untouched
+
+
+def test_uninstall_reports_a_decider_container_from_before_install_labels(box):
+    fake = _installed_with_id(box)
+    p = box.run("uninstall", **fake, FAKE_DECIDER_IDS="", FAKE_DECIDER_ALL_IDS="dlegacy")
+    assert p.returncode == 0, p.out
+    assert "rm -f dlegacy" not in box.calls() and "dlegacy" in p.out
+
+
+def test_uninstall_purge_removes_only_this_installs_decider_images_and_keeps_model(box):
+    fake = _installed_with_id(box)
+    snap = box.home / DECIDER_SNAP
+    snap.mkdir(parents=True)
+    (snap / "MODEL_MANIFEST.json").write_text("{}")
+    p = box.run("uninstall", "--purge", **fake, FAKE_DECIDER_IMAGE="present", FAKE_BUILT_REFS="mine-decider:1")
+    assert p.returncode == 0, p.out
+    calls = box.calls()
+    assert "images --filter label=dgxmm.built=true --filter label=dgxmm.install=zz99yy88xx77" in calls
+    assert "docker image rm mine-decider:1" in calls
+    assert "image rm dgxmm-decider:3" not in calls and "dgxmm-decider:3" in p.out  # not ours: kept, reported
+    assert snap.exists() and "--purge-decider-model" in p.out
+
+
+def test_install_id_generated_once_and_kept(box):
+    p = box.run(**_meminfo(box, 40))
+    assert p.returncode == 0, p.out
+    line = [x for x in (box.repo / ".env").read_text().splitlines() if x.startswith("DGXMM_INSTALL_ID=")]
+    assert len(line) == 1 and len(line[0].split("=", 1)[1]) == 12
+    p = box.run(**_meminfo(box, 40))
+    assert [x for x in (box.repo / ".env").read_text().splitlines() if x.startswith("DGXMM_INSTALL_ID=")] == line
+
+
+def test_compose_passes_the_install_id():
+    assert "DGXMM_INSTALL_ID: \"${DGXMM_INSTALL_ID:-}\"" in (ROOT / "docker-compose.yaml").read_text()
+
+
+def test_persisted_decider_low_memory_only_warns_and_lets_the_app_decide(box):
+    (box.repo / ".env").write_text("DGXMM_WITH_DECIDER=1\n")
+    p = box.run(**_meminfo(box, 3))
+    assert p.returncode == 0, p.out
+    assert "WARN" in p.out and "16 GiB" in p.out
+    assert "compose up" in box.calls() and "enable --wait --timeout 900" in _decider_calls(box)
+
+
+def test_persisted_decider_failures_do_not_fail_the_upgrade(box):
+    (box.repo / ".env").write_text("DGXMM_WITH_DECIDER=1\n")
+    p = box.run(FAKE_DECIDER_ENABLE_RC="3", **_meminfo(box, 40))
+    assert p.returncode == 0, p.out
+    assert "does not fit" in p.out and "WARN" in p.out
+
+
+def test_persisted_decider_respects_an_admin_disable(box):
+    (box.repo / ".env").write_text("DGXMM_WITH_DECIDER=1\n")
+    p = box.run(FAKE_DECIDER_ADMIN_DISABLED="0", **_meminfo(box, 40))
+    assert p.returncode == 0, p.out
+    assert _decider_calls(box) == ["admin-disabled"] and "--with-decider" in p.out
+
+
+def test_explicit_with_decider_re_enables_after_an_admin_disable(box):
+    (box.repo / ".env").write_text("DGXMM_WITH_DECIDER=1\n")
+    p = box.run("--with-decider", FAKE_DECIDER_ADMIN_DISABLED="0", **_meminfo(box, 40))
+    assert p.returncode == 0, p.out
+    assert _decider_calls(box) == ["build", "download", "enable --wait --timeout 900", "status"]
+
+
+def test_decider_timeout_capped_by_the_cli_token_lifetime(box):
+    p = box.run("--dry-run", "--with-decider", DGXMM_DECIDER_TIMEOUT="10201", **_meminfo(box, 40))
+    assert p.returncode != 0 and "10200" in p.out
+    assert box.run("--dry-run", "--with-decider", DGXMM_DECIDER_TIMEOUT="10200", **_meminfo(box, 40)).returncode == 0
+
+
+def test_uninstall_purge_decider_model(box):
+    fake = _installed(box)
+    snap = box.home / DECIDER_SNAP
+    snap.mkdir(parents=True)
+    (snap / "MODEL_MANIFEST.json").write_text("{}")
+    other = box.home / ".cache" / "huggingface" / "hub" / "models--Qwen--Qwen3-8B"
+    other.mkdir(parents=True)
+    p = box.run("uninstall", "--purge", "--dry-run", "--purge-decider-model", **fake)
+    assert p.returncode == 0 and snap.exists()
+    p = box.run("uninstall", "--purge", "--purge-decider-model", **fake)
+    assert p.returncode == 0, p.out
+    assert not (box.home / ".cache/huggingface/hub/models--vllm-sr--d3-mini").exists()
+    assert other.exists() and (box.home / ".cache" / "huggingface" / "model.bin").exists()
+
+
+def _hf_repo(hub, repo_dir, rev, files):
+    """A repo dir in the huggingface_hub >= 2 layout: snapshot links -> repo blobs -> shared store hub/blobs/<xx>/."""
+    snap = hub / repo_dir / "snapshots" / rev
+    snap.mkdir(parents=True)
+    (hub / repo_dir / "blobs").mkdir(exist_ok=True)
+    for name, digest in files.items():
+        store = hub / "blobs" / digest[:2] / digest
+        store.parent.mkdir(parents=True, exist_ok=True)
+        if not store.exists():
+            store.write_text(name)
+        blob = hub / repo_dir / "blobs" / ("b" + digest[:39])
+        if not blob.is_symlink():
+            blob.symlink_to(f"../../blobs/{digest[:2]}/{digest}")
+        (snap / name).symlink_to(f"../../blobs/{blob.name}")
+    return snap
+
+
+def test_purge_decider_model_removes_every_decider_and_only_their_exclusive_blobs(box):
+    fake = _installed(box)
+    hub = box.home / ".cache" / "huggingface" / "hub"
+    mini = _hf_repo(hub, "models--vllm-sr--d3-mini", "97dd054df4b3e0b3beb6af23ab8c82b7c0052e0e",
+                    {"config.json": "a1" * 32, "shared.json": "c3" * 32})
+    nano = _hf_repo(hub, "models--vllm-sr--d3-nano", "aeb70d4dd53ed25b855c3b0a66394b8fe265db7f",
+                    {"model.safetensors": "b2" * 32, "tokenizer.json": "d4" * 32})
+    other = _hf_repo(hub, "models--Qwen--Qwen3-8B", "e" * 40, {"tokenizer.json": "d4" * 32, "w.bin": "f5" * 32})
+    p = box.run("uninstall", "--purge", "--dry-run", "--purge-decider-model", **fake)
+    assert p.returncode == 0, p.out
+    assert mini.exists() and nano.exists() and (hub / "blobs" / "b2" / ("b2" * 32)).exists()
+    assert f"rm -f -- {hub}/blobs/b2/{'b2' * 32}" in p.out and f"blobs/d4/{'d4' * 32}" not in p.out
+    p = box.run("uninstall", "--purge", "--purge-decider-model", **fake)
+    assert p.returncode == 0, p.out
+    assert not (hub / "models--vllm-sr--d3-mini").exists() and not (hub / "models--vllm-sr--d3-nano").exists()
+    for d in ("a1", "c3", "b2"):  # used only by the decision models
+        assert not (hub / "blobs" / d / (d * 32)).exists(), d
+    for d in ("d4", "f5"):  # also (or only) used by another model
+        assert (hub / "blobs" / d / (d * 32)).exists(), d
+    assert (other / "tokenizer.json").read_text() == "tokenizer.json"
+    assert "removed 2 decision model snapshot(s) and 3 shared blob(s)" in p.out
+
+
+def test_installer_purges_every_supported_decision_model():
+    from dgxmm.engines.decision import DECIDER_MODELS, repo_dir
+    text = (ROOT / "install.sh").read_text()
+    dirs = " ".join(repo_dir(r).removeprefix("hub/") for r in DECIDER_MODELS)
+    assert f"DECIDER_REPO_DIRS=({dirs})" in text
+
+
+def test_purge_decider_model_needs_purge(box):
+    p = box.run("uninstall", "--purge-decider-model")
+    assert p.returncode == 2 and "--purge" in p.out
+
+
+def test_installer_pins_the_same_decider_revision_as_the_engine():
+    from dgxmm.engines.decision import DECIDER_REPO, DECIDER_REVISION, repo_dir
+    text = (ROOT / "install.sh").read_text()
+    assert f"DECIDER_REVISION={DECIDER_REVISION}\n" in text
+    assert f"DECIDER_REPO_DIR={repo_dir(DECIDER_REPO).removeprefix('hub/')}\n" in text
+    from dgxmm.config import Images
+    assert f"DECIDER_DEFAULT_IMAGE={Images().decision} " in text
+
+
+def test_docs_cover_decider_install_upgrade_and_backup():
+    ops = (ROOT / "docs" / "operations.md").read_text()
+    for needle in ("--with-decider", "decider download", "decider enable --wait", "schema_version",
+                   "decider_api_key", "--purge-decider-model", "Rolling back"):
+        assert needle in ops, needle
+    conf = (ROOT / "docs" / "configuration.md").read_text()
+    assert "DGXMM_WITH_DECIDER" in conf and "DGXMM_DECIDER_TIMEOUT" in conf
+    changelog = (ROOT / "CHANGELOG.md").read_text()
+    # the decision-model release entry (the newest section) documents --with-decider
+    assert changelog.index("## [2026-10-17]") < changelog.index("--with-decider") < changelog.index("## [2026-10-16]")
+
+
+
+def test_uninstall_purge_keeps_managed_containers_of_other_installs(box):
+    fake = _installed(box)
+    (box.repo / ".env").write_text("DGXMM_NETWORK=dgxmm\nDGXMM_INSTALL_ID=zz99yy88xx77\n")
+    fake["FAKE_MANAGED_IDS"] = "c1 c2 legacy9"
+    p = box.run("uninstall", "--purge", **fake, FAKE_OWN_MANAGED_IDS="c1")
+    assert p.returncode == 0, p.out
+    calls = box.calls()
+    assert "docker rm -f c1\n" in calls + "\n" and "rm -f c1 c2" not in calls and "legacy9" not in calls.split("ps -aq")[0]
+    assert "c2 legacy9" in p.out and "kept" in p.out
+
+
+def test_uninstall_purge_without_install_id_removes_no_engine_containers(box):
+    fake = _installed(box)
+    p = box.run("uninstall", "--purge", **fake)
+    assert p.returncode == 0, p.out
+    assert "docker rm -f c1" not in box.calls() and "c1 c2" in p.out
+
+
+def test_purged_images_are_removed_by_tag_without_force(box):
+    fake = _installed(box)
+    (box.repo / ".env").write_text("DGXMM_NETWORK=dgxmm\nDGXMM_INSTALL_ID=zz99yy88xx77\n")
+    p = box.run("uninstall", "--purge", **fake, FAKE_BUILT_REFS="dgxmm-decider:3 other-tag:1 <none>:<none>@sha256:dd")
+    assert p.returncode == 0, p.out
+    calls = box.calls()
+    assert "image rm -f" not in calls
+    assert "docker image rm dgxmm-decider:3" in calls and "docker image rm other-tag:1" in calls
+    assert "docker image rm sha256:dd" in calls  # untagged: by id
+
+
+def test_remembered_decider_with_unreadable_meminfo_only_warns(box):
+    (box.repo / ".env").write_text("DGXMM_WITH_DECIDER=1\n")
+    p = box.run(DGXMM_MEMINFO=str(box.tmp / "missing"))
+    assert p.returncode == 0, p.out
+    assert "MemAvailable" in p.out and "WARN" in p.out
+
+
+def test_explicit_decider_with_unreadable_meminfo_dies(box):
+    p = box.run("--with-decider", DGXMM_MEMINFO=str(box.tmp / "missing"))
+    assert p.returncode != 0 and "MemAvailable" in p.out
+
+
+def test_remembered_decider_with_bad_timeout_only_warns_and_uses_the_default(box):
+    (box.repo / ".env").write_text("DGXMM_WITH_DECIDER=1\n")
+    p = box.run(DGXMM_DECIDER_TIMEOUT="99999", **_meminfo(box, 40))
+    assert p.returncode == 0, p.out
+    assert "DGXMM_DECIDER_TIMEOUT" in p.out and "enable --wait --timeout 900" in _decider_calls(box)
+
+
+def test_unreadable_source_files_are_refused_before_anything_runs(box):
+    (box.repo / "config.example.yaml").chmod(0o600)
+    p = box.run("--dry-run")
+    assert p.returncode != 0
+    assert "not readable by the container user" in p.out
+    assert "config.example.yaml" in p.out and "chmod -R o+rX" in p.out
+    assert "docker" not in box.calls()
+
+
+def test_private_data_and_secrets_dirs_are_not_flagged(box):
+    for d in ("data", "secrets"):
+        (box.repo / d).mkdir()
+        f = box.repo / d / "x"
+        f.write_text("x")
+        f.chmod(0o600)
+    p = box.run("--dry-run")
+    assert "not readable by the container user" not in p.out

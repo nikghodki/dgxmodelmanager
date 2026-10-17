@@ -72,7 +72,7 @@ def test_viewer_cannot_deploy(api_stack):
                        json={"name": "tiny", "engine": "vllm", "model_ref": "Qwen/Qwen3-Tiny", "config": SMALL})
     assert r.status_code == 403
     assert api_stack.post("/dgxmm/api/deployments/preview", headers=h,
-                          json={"engine": "vllm", "model_ref": "Qwen/Qwen3-Tiny", "config": SMALL}).status_code == 200
+                          json={"engine": "vllm", "model_ref": "Qwen/Qwen3-Tiny", "config": SMALL}).status_code == 403  # admin-only (tests/test_preview_security.py)
 
 
 def test_unknown_api_route_is_json_404(api_stack):

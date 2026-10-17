@@ -16,10 +16,10 @@ describe("CopyButton", () => {
     let copied = "";
     const exec = vi.fn(() => { copied = document.querySelector("textarea")!.value; return true; });
     (document as any).execCommand = exec;
-    render(<CopyButton value="http://10.0.0.5:8000/v1" label="Copy endpoint" />);
+    render(<CopyButton value="http://198.51.100.5:8000/v1" label="Copy endpoint" />);
     await user.click(screen.getByRole("button", { name: "Copy endpoint" }));
     await waitFor(() => expect(exec).toHaveBeenCalledWith("copy"));
-    expect(copied).toBe("http://10.0.0.5:8000/v1");
+    expect(copied).toBe("http://198.51.100.5:8000/v1");
     expect(document.querySelector("textarea")).toBeNull();
   });
 });

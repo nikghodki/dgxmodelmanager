@@ -1,0 +1,20 @@
+# label: bad_parser_flag
+# engine: vllm
+# model_ref: Qwen/Qwen3-0.6B
+# exit_code: 1
+# message: container exited with code 1
+# induced: --enable-auto-tool-choice without --tool-call-parser
+# source: induced on the DGX Spark (GB10) with scripts/decider_eval/induce_failures.py
+---
+WARNING 10-17 01:47:58 [argparse_utils.py:276] With `vllm serve`, you should provide the model as a positional argument or in a config file instead of via the `--model` option. The `--model` option will be removed in a future version.
+Traceback (most recent call last):
+  File "/usr/local/bin/vllm", line 10, in <module>
+    sys.exit(main())
+             ^^^^^^
+  File "/usr/local/lib/python3.12/dist-packages/vllm/entrypoints/cli/main.py", line 94, in main
+    cmds[args.subparser].validate(args)
+  File "/usr/local/lib/python3.12/dist-packages/vllm/entrypoints/cli/serve.py", line 156, in validate
+    validate_parsed_serve_args(args)
+  File "/usr/local/lib/python3.12/dist-packages/vllm/entrypoints/launchers/cli_args.py", line 432, in validate_parsed_serve_args
+    raise TypeError("Error: --enable-auto-tool-choice requires --tool-call-parser")
+TypeError: Error: --enable-auto-tool-choice requires --tool-call-parser

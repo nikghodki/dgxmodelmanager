@@ -32,6 +32,19 @@ publish_bind: 127.0.0.1       # host interface engine ports are published on (ke
 # engine_base_host: null      # null = DGXMM reaches engines by container name on docker_network;
                               # set a hostname/IP to reach them via published ports instead
 startup_timeout_s: 900        # seconds an engine may take to become ready before it is failed
+max_concurrent_startups: 1    # engines starting/loading at once; others wait in state "queued" (vLLM's start-up
+                              # memory profile breaks if another engine allocates/frees memory meanwhile). 0 = no limit
+startup_queue_timeout_s: 1800 # a queued deployment fails after waiting this long for its turn
+wake_queue_timeout_s: 300     # a wake-up waits this long for a running start-up, then answers 409 startup_busy
+
+# --- Decision model ("decider") container (docs/security.md) ------------------------------------
+# images: {decision: dgxmm-decider:3}   # built locally from deploy/decider (Decision model page or API)
+# decider_network: dgxmm-decider        # internal docker network (no published port, no egress) that only DGXMM
+                                        # joins; '' = share docker_network (then only the bearer key protects it)
+# decider_user: "10001:10001"           # unprivileged uid:gid inside the container
+# decider_memory_limit_gib: 16          # cgroup limit (host-side memory, page cache, tmpfs; GPU memory is budgeted separately)
+# decider_pids_limit: 512               # processes + threads
+# decider_tmp_gib: 0.75                 # tmpfs /tmp (kernel caches, ~0.23 GiB used); inside the 13 GiB reservation
 
 # Hugging Face cache: `host` is the path on the host (mounted into engine containers),
 # `local` is the same directory inside the dgxmm container (see docker-compose.yaml volumes).

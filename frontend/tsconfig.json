@@ -9,6 +9,7 @@
     "noUnusedLocals": true,
     "noUnusedParameters": true,
     "skipLibCheck": true,
+    "noEmit": true,
     "resolveJsonModule": true,
     "allowSyntheticDefaultImports": true,
     "types": ["vite/client", "node"],

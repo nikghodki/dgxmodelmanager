@@ -71,7 +71,7 @@ function ScopeRadios({ scope, counts, onChange }: { scope: ProcessScope; counts:
             className={cn("inline-flex h-8 items-center gap-1.5 rounded-full border px-3 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
               on ? "border-primary bg-primary text-primary-foreground" : "bg-card text-muted-foreground hover:text-foreground")}>
             {on && <Check className="h-3.5 w-3.5" aria-hidden />}
-            {s.label}<span className="tabular-nums opacity-70">{counts[s.key] ?? 0}</span>
+            {s.label}<span className="tabular-nums">{counts[s.key] ?? 0}</span>
           </button>
         );
       })}

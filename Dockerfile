@@ -10,6 +10,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 HF_HOME=/data/hf HF_HUB_DISABLE
 WORKDIR /app
 COPY pyproject.toml ./
 COPY dgxmm ./dgxmm
+COPY deploy/decider ./deploy/decider
 RUN pip install --no-cache-dir . && useradd -u 1000 -m dgxmm && mkdir -p /app/data && chown 1000:1000 /app/data
 COPY --from=ui /ui/dist /app/static
 USER 1000:1000

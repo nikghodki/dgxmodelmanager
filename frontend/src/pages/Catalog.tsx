@@ -46,7 +46,7 @@ export function Catalog() {
     { accessorKey: "repo_id", header: "Model", cell: ({ row }) => {
       const m = row.original;
       // A real button so details are reachable from the keyboard; the row click stays as a pointer shortcut.
-      return <div className="min-w-0"><button type="button" className="block max-w-[44ch] truncate rounded-sm text-left font-medium hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+      return <div className="min-w-0"><button type="button" className="block max-w-full truncate rounded-sm md:max-w-[44ch] text-left font-medium hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
         title={m.repo_id} aria-haspopup="dialog" onClick={(e) => { e.stopPropagation(); setOpen(m.repo_id); }}>{m.repo_id}</button>
         <div className="mt-1 flex flex-wrap gap-1">{m.quant && <Badge variant="outline">{m.quant}</Badge>}{m.gated && <Badge variant="outline" className="text-status-warning">gated</Badge>}{m.downloaded && <Badge variant="secondary">on disk</Badge>}</div></div>;
     } },

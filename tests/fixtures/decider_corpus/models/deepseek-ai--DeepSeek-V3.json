@@ -1,0 +1,47 @@
+{
+ "ref": "deepseek-ai/DeepSeek-V3",
+ "architecture": "DeepseekV3ForCausalLM",
+ "model_type": "deepseek_v3",
+ "config": {
+  "architectures": [
+   "DeepseekV3ForCausalLM"
+  ],
+  "model_type": "deepseek_v3",
+  "num_hidden_layers": 61,
+  "hidden_size": 7168,
+  "vocab_size": 129280,
+  "num_nextn_predict_layers": 1,
+  "max_position_embeddings": 163840,
+  "auto_map": {
+   "AutoConfig": "configuration_deepseek.DeepseekV3Config",
+   "AutoModel": "modeling_deepseek.DeepseekV3Model",
+   "AutoModelForCausalLM": "modeling_deepseek.DeepseekV3ForCausalLM"
+  }
+ },
+ "files": [
+  ".gitattributes",
+  "LICENSE-CODE",
+  "LICENSE-MODEL",
+  "README.md",
+  "README_WEIGHTS.md",
+  "config.json",
+  "configuration_deepseek.py",
+  "figures/benchmark.png",
+  "figures/niah.png",
+  "inference/configs/config_16B.json",
+  "inference/configs/config_236B.json",
+  "inference/configs/config_671B.json",
+  "inference/convert.py",
+  "inference/fp8_cast_bf16.py",
+  "inference/generate.py",
+  "inference/kernel.py",
+  "inference/model.py",
+  "inference/requirements.txt",
+  "model.safetensors.index.json",
+  "modeling_deepseek.py",
+  "tokenizer.json",
+  "tokenizer_config.json"
+ ],
+ "weight_files": 163,
+ "template": "{% if not add_generation_prompt is defined %}{% set add_generation_prompt = false %}{% endif %}{% set ns = namespace(is_first=false, is_tool=false, is_output_first=true, system_prompt='', is_first_sp=true) %}{%- for message in messages %}{%- if message['role'] == 'system' %}{%- if ns.is_first_sp %}{% set ns.system_prompt = ns.system_prompt + message['content'] %}{% set ns.is_first_sp = false %}{%- else %}{% set ns.system_prompt = ns.system_prompt + '\n\n' + message['content'] %}{%- endif %}{%- endif %}{%- endfor %}{{bos_token}}{{ns.system_prompt}}{%- for message in messages %}{%- if message['role'] == 'user' %}{%- set ns.is_tool = false -%}{{'<｜User｜>' + message['content']}}{%- endif %}{%- if message['role'] == 'assistant' and message['content'] is none %}{%- set ns.is_tool = false -%}{%- for tool in message['tool_calls']%}{%- if not ns.is_first %}{{'<｜Assistant｜><｜tool▁calls▁begin｜><｜tool▁call▁begin｜>' + tool['type'] + '<｜tool▁sep｜>' + tool['function']['name'] + '\n' + '```json' + '\n' + tool['function']['arguments'] + '\n' + '```' + '<｜tool▁call▁end｜>'}}{%- set ns.is_first = true -%}{%- else %}{{'\n' + '<｜tool▁call▁begin｜>' + tool['type'] + '<｜tool▁sep｜>' + tool['function']['name'] + '\n' + '```json' + '\n' + tool['function']['arguments'] + '\n' + '```' + '<｜tool▁call▁end｜>'}}{{'<｜tool▁calls▁end｜><｜end▁of▁sentence｜>'}}{%- endif %}{%- endfor %}{%- endif %}{%- if message['role'] == 'assistant' and message['content'] is not none %}{%- if ns.is_tool %}{{'<｜tool▁outputs▁end｜>' + message['content'] + '<｜end▁of▁sentence｜>'}}{%- set ns.is_tool = false -%}{%- else %}{{'<｜Assistant｜>' + message['content'] + '<｜end▁of▁sentence｜>'}}{%- endif %}{%- endif %}{%- if message['role'] == 'tool' %}{%- set ns.is_tool = true -%}{%- if ns.is_output_first %}{{'<｜tool▁outputs▁begin｜><｜tool▁output▁begin｜>' + message['content'] + '<｜tool▁output▁end｜>'}}{%- set ns.is_output_first = false %}{%- else %}{{'\n<｜tool▁output▁begin｜>' + message['content'] + '<｜tool▁output▁end｜>'}}{%- endif %}{%- endif %}{%- endfor -%}{% if ns.is_tool %}{{'<｜tool▁outputs▁end｜>'}}{% endif %}{% if add_generation_prompt and not ns.is_tool %}{{'<｜Assistant｜>'}}{% endif %}"
+}

@@ -1,0 +1,34 @@
+{
+ "ref": "distilbert/distilbert-base-uncased-finetuned-sst-2-english",
+ "architecture": "DistilBertForSequenceClassification",
+ "model_type": "distilbert",
+ "config": {
+  "architectures": [
+   "DistilBertForSequenceClassification"
+  ],
+  "model_type": "distilbert",
+  "id2label": {
+   "0": "NEGATIVE",
+   "1": "POSITIVE"
+  },
+  "vocab_size": 30522,
+  "max_position_embeddings": 512
+ },
+ "files": [
+  ".gitattributes",
+  "README.md",
+  "config.json",
+  "map.jpeg",
+  "onnx/added_tokens.json",
+  "onnx/config.json",
+  "onnx/special_tokens_map.json",
+  "onnx/tokenizer.json",
+  "onnx/tokenizer_config.json",
+  "onnx/vocab.txt",
+  "rust_model.ot",
+  "tokenizer_config.json",
+  "vocab.txt"
+ ],
+ "weight_files": 4,
+ "template": null
+}

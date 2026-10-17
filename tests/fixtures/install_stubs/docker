@@ -44,13 +44,41 @@ case "$*" in
   "inspect --format {{.Name}}"*" id-"*) last=${!#}; echo "/repo-${last#id-}-1  running (healthy)" ;;
   pull\ *) [ "${FAKE_PULL:-ok}" = ok ] || { echo "manifest unknown" >&2; exit 1; } ;;
   network\ inspect\ *\ -f\ *Gateway*) [ "${FAKE_NETWORK:-missing}" = exists ] || { echo "Error: No such network" >&2; exit 1; }; echo "172.99.0.1" ;;
+  network\ inspect\ --format*dgxmm.install*) [ "${FAKE_DECIDER_NET:-missing}" = exists ] || exit 1; echo "${FAKE_DECIDER_NET_INSTALL-zz99yy88xx77}" ;;
+  network\ inspect\ --format*dgxmm.purpose*) [ "${FAKE_DECIDER_NET:-missing}" = exists ] || exit 1; echo "${FAKE_DECIDER_NET_PURPOSE-decider}" ;;
   network\ inspect\ --format*) [ "${FAKE_NETWORK:-missing}" = exists ] || exit 1; echo "${FAKE_NETWORK_LABEL:-}" ;;
   network\ inspect*) [ "${FAKE_NETWORK:-missing}" = exists ] || { echo "Error: No such network" >&2; exit 1; } ;;
   "ps -aq --filter label=dgxmm.managed=true"|"ps -q --filter label=dgxmm.managed=true") printf '%s\n' ${FAKE_MANAGED_IDS:-} ;;
+  ps\ -aq\ --filter\ label=dgxmm.managed=true\ --filter\ label=dgxmm.install=*) printf '%s\n' ${FAKE_OWN_MANAGED_IDS:-} ;;
   ps\ --filter\ label=dgxmm.managed=true*) printf '%s\n' ${FAKE_MANAGED_IDS:-} ;;
   "ps -q --filter name=^litellm-proxy$") [ -n "${FAKE_LITELLM:-}" ] && echo "abc123" ;;
   exec\ litellm-proxy*) echo "${FAKE_LITELLM_KEY:-sk-fake-master}" ;;
   "inspect --format {{json .NetworkSettings.Networks}} litellm-proxy") echo "{\"${FAKE_LITELLM_NET:-gateway}\":{}}" ;;
+  # --- decision model (./install.sh --with-decider) ---
+  exec\ *dgxmm\ python\ -m\ dgxmm.admin\ decider\ *)
+    all="$*"; sub=${all#*dgxmm.admin decider }; sub=${sub%% *}
+    echo "fake-cli decider $sub"
+    case $sub in
+      build) rc=${FAKE_DECIDER_BUILD_RC:-0} ;;
+      download) rc=${FAKE_DECIDER_DOWNLOAD_RC:-0} ;;
+      enable) rc=${FAKE_DECIDER_ENABLE_RC:-0}; [ "$rc" = 3 ] && echo "The decider does not fit: it needs 13.0 GiB" ;;
+      disable) rc=${FAKE_DECIDER_DISABLE_RC:-0} ;;
+      status) echo "Decision model: ${FAKE_DECIDER_STATUS:-enabled, healthy (ready, deployment 3)}"; rc=${FAKE_DECIDER_STATUS_RC:-0} ;;
+      admin-disabled) rc=${FAKE_DECIDER_ADMIN_DISABLED:-1} ;;
+      *) rc=0 ;;
+    esac
+    exit "$rc" ;;
+  "ps -q --filter label=dgxmm.system=true --filter status=running") printf '%s\n' ${FAKE_DECIDER_RUNNING:-} ;;
+  "ps -aq --filter label=dgxmm.system=true") printf '%s\n' ${FAKE_DECIDER_ALL_IDS:-${FAKE_DECIDER_IDS:-}} ;;
+  ps\ -aq\ --filter\ label=dgxmm.system=true\ --filter\ label=dgxmm.install=*) printf '%s\n' ${FAKE_DECIDER_IDS:-} ;;
+  "ps -a --filter label=dgxmm.system=true --format {{.Names}}  {{.Status}}")
+    for i in ${FAKE_DECIDER_IDS:-}; do echo "dgxmm-decider-$i  Up 2 hours"; done ;;
+  image\ inspect\ dgxmm-decider*|image\ inspect\ custom-decider*) [ "${FAKE_DECIDER_IMAGE:-missing}" = present ] || { echo "Error: No such image" >&2; exit 1; } ;;
+  images\ --filter\ label=dgxmm.built=true\ --filter\ label=dgxmm.install=*)
+    for r in ${FAKE_BUILT_REFS:-}; do
+      case $r in "<none>:<none>@"*) echo "<none>:<none> ${r#*@}" ;; *) echo "$r sha256:${#r}" ;; esac
+    done ;;
+  "info --format {{.DockerRootDir}}") echo "${FAKE_DOCKER_ROOT:-/}" ;;
   *) : ;;
 esac
 exit 0

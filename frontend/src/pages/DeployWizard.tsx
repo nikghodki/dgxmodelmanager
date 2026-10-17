@@ -9,6 +9,7 @@ import { EstimatePanel } from "@/components/app/estimate-panel";
 import { ModelSelect } from "@/components/app/model-select";
 import { PageHeader } from "@/components/app/page-header";
 import { PlanChooser } from "@/components/app/plan-chooser";
+import { useParserSuggestions } from "@/components/app/parser-suggestions";
 import { ErrorState } from "@/components/app/states";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -70,7 +71,10 @@ function DeployWizardPage() {
     setEngine(eng); setName(slug(artifact.ref)); setConfig(defaultsFor(eng, artifact)); setPlan(null);
   }, [artifact?.ref, engines.data]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const body = useMemo(() => ({ engine, model_ref: ref, config }), [engine, ref, config]);
+  // Decision-model parser suggestions (declared after the defaults effect so a reset lands before an auto-fill).
+  const parsers = useParserSuggestions({ modelRef: artifact ? ref : "", engine, config, setConfig, onUserEdit: () => setPlan(null) });
+
+  const body = useMemo(() => ({ engine, model_ref: ref, config, priority }), [engine, ref, config, priority]);
   useEffect(() => {
     if (!engine || !ref) return;
     let live = true; // a slower, older preview must not overwrite the current one
@@ -98,8 +102,8 @@ function DeployWizardPage() {
     const e = deploy.error;
     if (!(e instanceof ApiError) || e.code !== "insufficient_memory") return;
     setPlan(null);
-    const { fit, plans } = e.detail ?? {};
-    if (fit && plans) setPreview((p) => p && { ...p, fit, plans });
+    const { fit, plans, notes } = e.detail ?? {};
+    if (fit && plans) setPreview((p) => p && { ...p, fit, plans, notes: notes ?? p.notes });
   }, [deploy.error]);
 
   const aliasErr = aliasProblem(alias);
@@ -112,7 +116,7 @@ function DeployWizardPage() {
       <ErrorState error={previewErr} />
       {preview ? <EstimatePanel preview={preview} /> : <p className="text-sm text-muted-foreground">Choose a model to see the memory check.</p>}
       {preview && !preview.fit.fits && (
-        <PlanChooser plans={preview.plans ?? []} selectedId={plan?.id ?? null}
+        <PlanChooser plans={preview.plans ?? []} notes={preview.notes} selectedId={plan?.id ?? null}
           onSelect={(o) => {
             setPlan({ id: o.id, actions: o.actions.filter((a) => a.type !== "patch") });
             if (o.patch) setConfig({ ...config, ...o.patch });
@@ -157,7 +161,7 @@ function DeployWizardPage() {
                 </div>
               </Section>
               <Section n={3} title="Sizing and features">
-                <ConfigForm engine={engine} value={config} onChange={(c) => { setConfig(c); setPlan(null); }} showAdvanced={advanced} />
+                <ConfigForm engine={engine} value={config} onChange={(c) => { parsers.noteChange(config, c); setConfig(c); setPlan(null); }} showAdvanced={advanced} hints={parsers.hints} />
                 <Button variant="link" className="mt-3 h-auto p-0 text-xs" onClick={() => setAdvanced(!advanced)}>{advanced ? "Hide" : "Show"} advanced settings</Button>
               </Section>
             </>

@@ -269,3 +269,184 @@ describe("DeploymentDetail", () => {
     expect(await screen.findByRole("heading", { name: "API access" })).toBeInTheDocument();
   });
 });
+
+describe("DeploymentDetail — decision model", () => {
+  const failed = { ...dep, state: "failed", last_error: "container exited (1)", exit_code: 1 };
+  const diag = (over: Record<string, any> = {}) => ({
+    cause: "gpu_oom", label: "Out of GPU memory", source: "model", confidence: 0.93, summary: "CUDA ran out of memory while allocating the KV cache.",
+    fix_hint: "Halve the context length.", patch: { max_model_len: 2048 }, decision_id: 55, created_at: "2026-10-16T10:00:00Z", log_excerpt: "torch.OutOfMemoryError: CUDA out of memory", ...over,
+  });
+  const withDiag = (d: any, diagnosis: any, more?: (url: string, opts?: any) => any) => (url: string, opts?: any) => {
+    const r = more?.(url, opts);
+    if (r !== undefined) return r;
+    if (url === "/deployments/1" && !opts?.method) return Promise.resolve(d);
+    if (url === "/deployments/1/diagnosis") return Promise.resolve({ diagnosis });
+    return undefined;
+  };
+
+  it("shows the diagnosis at the top of the overview for a failed deployment, and Apply fix opens Reconfigure with the patch", async () => {
+    renderDetail([], { extra: withDiag(failed, diag()) });
+    const card = (await screen.findByRole("heading", { name: "Diagnosis" })).closest("[data-card]") as HTMLElement;
+    expect(within(card).getByText("Out of GPU memory")).toBeInTheDocument();
+    expect(within(card).getByText("93% · AI")).toBeInTheDocument();
+    expect(within(card).getByText(/CUDA ran out of memory/)).toBeInTheDocument();
+    expect(within(card).getByText("Halve the context length.")).toBeInTheDocument();
+    await userEvent.click(within(card).getByRole("button", { name: "Apply fix…" }));
+    expect(await screen.findByText("Reconfigure qwen")).toBeInTheDocument();
+    expect(screen.getByLabelText("Context length (tokens)")).toHaveValue(2048);
+  });
+
+  it("shows the feedback already given on the diagnosis after a reload", async () => {
+    renderDetail([], { extra: withDiag(failed, diag({ feedback: "rejected" })) });
+    const card = (await screen.findByRole("heading", { name: "Diagnosis" })).closest("[data-card]") as HTMLElement;
+    expect(within(card).getByRole("button", { name: "Not helpful" })).toHaveAttribute("aria-pressed", "true");
+    expect(within(card).getByRole("button", { name: "Helpful" })).toHaveAttribute("aria-pressed", "false");
+  });
+
+  it("records 👍/👎 feedback on the diagnosis", async () => {
+    renderDetail([], { extra: withDiag(failed, diag(), (url) => (url === "/decider/decisions/55/feedback" ? Promise.resolve({ ok: true }) : undefined)) });
+    const card = (await screen.findByRole("heading", { name: "Diagnosis" })).closest("[data-card]") as HTMLElement;
+    await userEvent.click(within(card).getByRole("button", { name: "Helpful" }));
+    await waitFor(() => expect(vi.mocked(apiModule.api)).toHaveBeenCalledWith("/decider/decisions/55/feedback", { method: "POST", body: { accepted: true } }));
+    await waitFor(() => expect(within(card).getByRole("button", { name: "Helpful" })).toHaveAttribute("aria-pressed", "true"));
+  });
+
+  it("hides Apply fix and feedback from viewers", async () => {
+    renderDetail([], { admin: false, extra: withDiag(failed, diag()) });
+    const card = (await screen.findByRole("heading", { name: "Diagnosis" })).closest("[data-card]") as HTMLElement;
+    expect(within(card).queryByRole("button", { name: "Apply fix…" })).toBeNull();
+    expect(within(card).queryByRole("button", { name: "Helpful" })).toBeNull();
+  });
+
+  it("says so when the diagnosis is not confident, with the log excerpt", async () => {
+    renderDetail([], { extra: withDiag(failed, diag({ cause: "other", source: "none", confidence: 0.41, patch: null, summary: "", fix_hint: "" })) });
+    const card = (await screen.findByRole("heading", { name: "Diagnosis" })).closest("[data-card]") as HTMLElement;
+    expect(within(card).getByText(/Couldn't diagnose confidently/)).toBeInTheDocument();
+    expect(within(card).getByText("torch.OutOfMemoryError: CUDA out of memory")).toBeInTheDocument();
+    expect(within(card).queryByRole("button", { name: "Apply fix…" })).toBeNull();
+  });
+
+  it("shows the diagnosis in Events, but not on the overview of a healthy deployment", async () => {
+    renderDetail([], { extra: withDiag(dep, diag()) });
+    expect(await screen.findByRole("heading", { name: "API access" })).toBeInTheDocument();
+    await new Promise((r) => setTimeout(r, 20));
+    expect(screen.queryByRole("heading", { name: "Diagnosis" })).toBeNull();
+    await userEvent.click(screen.getByRole("tab", { name: "Events" }));
+    expect(await screen.findByRole("heading", { name: "Diagnosis" })).toBeInTheDocument();
+  });
+
+  it("shows the workload badge on the Advice tab and a relevance divider", async () => {
+    const advice = [
+      { id: "a1", severity: "info", confidence: "high", title: "Enable speculative decoding", rationale: "r", expected_effect: "e", patch: null, relevance: 1.7, workload_fit: "boost" },
+      { id: "a2", severity: "info", confidence: "high", title: "Raise sequences", rationale: "r", expected_effect: "e", patch: null, relevance: 1, workload_fit: null },
+    ];
+    renderDetail(advice, { extra: (url) => (url === "/deployments/1/workload" ? Promise.resolve({ label: "agent_tool_use", source: "model", confidence: 0.78, summary: null }) : undefined) });
+    await userEvent.click(await screen.findByRole("tab", { name: /Advice/ }));
+    expect(await screen.findByText("Workload: Agent / tool use · 78% · AI")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Most relevant for this workload" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Other suggestions" })).toBeInTheDocument();
+  });
+
+  it("refetches the advice once the workload label is known so the order uses it", async () => {
+    let adviceCalls = 0;
+    renderDetail([], { extra: (url) => {
+      if (url === "/deployments/1/advice") { adviceCalls++; return Promise.resolve([]); }
+      if (url === "/deployments/1/workload") return new Promise((r) => setTimeout(() => r({ label: "idle", source: "rules", confidence: 1, summary: null }), 50));
+      return undefined;
+    } });
+    await userEvent.click(await screen.findByRole("tab", { name: /Advice/ }));
+    expect(await screen.findByText(/Workload: /)).toBeInTheDocument();
+    await waitFor(() => expect(adviceCalls).toBeGreaterThanOrEqual(2));
+  });
+
+  it("shows advice without a workload badge when the workload is unknown", async () => {
+    renderDetail([{ id: "a1", severity: "info", confidence: "high", title: "Raise sequences", rationale: "r", expected_effect: "e", patch: null }],
+      { extra: (url) => (url === "/deployments/1/workload" ? Promise.resolve(null) : undefined) });
+    await userEvent.click(await screen.findByRole("tab", { name: /Advice/ }));
+    expect(await screen.findByText("Raise sequences")).toBeInTheDocument();
+    expect(screen.queryByText(/^Workload:/)).toBeNull();
+    expect(screen.queryByRole("heading", { name: "Most relevant for this workload" })).toBeNull();
+  });
+
+  it("Apply fix shows the change summary for the diagnosis", async () => {
+    renderDetail([], { extra: withDiag(failed, diag({ patch: { trust_remote_code: true } })) });
+    const card = (await screen.findByRole("heading", { name: "Diagnosis" })).closest("[data-card]") as HTMLElement;
+    await userEvent.click(within(card).getByRole("button", { name: "Apply fix…" }));
+    expect(await screen.findByRole("list", { name: "Changes from the diagnosis" })).toHaveTextContent("trust_remote_code: default → true");
+    expect(screen.getByRole("switch", { name: "Trust remote code" })).toBeChecked();
+  });
+
+  it("announces a diagnosis politely", async () => {
+    renderDetail([], { extra: withDiag(failed, diag()) });
+    await screen.findByRole("heading", { name: "Diagnosis" });
+    const live = document.querySelector("[aria-live='polite'][data-diagnosis-live]") as HTMLElement;
+    expect(live).toHaveTextContent("Diagnosis: Out of GPU memory");
+  });
+
+  it("says Diagnosing… while a fresh failure has no diagnosis yet (or only an older one)", async () => {
+    const now = new Date().toISOString();
+    const recent = { ...failed, events: [{ ts: now, from: "starting", to: "failed", message: "exited", log_tail: null }] };
+    renderDetail([], { extra: withDiag(recent, null) });
+    expect(await screen.findByText("Diagnosing…")).toBeInTheDocument();
+  });
+
+  it("treats a diagnosis older than the latest failure as pending", async () => {
+    const now = new Date().toISOString();
+    const recent = { ...failed, events: [{ ts: now, from: "starting", to: "failed", message: "exited", log_tail: null }] };
+    renderDetail([], { extra: withDiag(recent, diag({ created_at: "2026-01-01T00:00:00Z" })) });
+    expect(await screen.findByText("Diagnosing…")).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Diagnosis" })).toBeNull();
+  });
+
+  it("does not claim to be diagnosing an old failure", async () => {
+    const old = { ...failed, events: [{ ts: "2026-01-01T00:00:00Z", from: "starting", to: "failed", message: "exited", log_tail: null }] };
+    renderDetail([], { extra: withDiag(old, null) });
+    expect(await screen.findByRole("heading", { name: "API access" })).toBeInTheDocument();
+    await new Promise((r) => setTimeout(r, 20));
+    expect(screen.queryByText("Diagnosing…")).toBeNull();
+  });
+
+  it("marks a system deployment and explains that the decision model uses it", async () => {
+    renderDetail([], { extra: (url, opts) => (url === "/deployments/1" && !opts?.method ? Promise.resolve({ ...dep, system: true }) : undefined) });
+    expect(await screen.findByText("System")).toBeInTheDocument();
+    const note = screen.getByText(/Used by the decision model/);
+    expect(note).toHaveTextContent(/the watchdog stops it before any of your deployments/);
+    expect(note).toHaveTextContent(/even with auto-protect off/);
+    expect(note).not.toHaveTextContent(/never stops or sleeps/);
+  });
+
+  it("offers no LiteLLM endpoint, snippets or registration warning for a system deployment", async () => {
+    renderDetail([], { litellm: info({ registered: false, model_name: "d3-mini" }),
+      extra: (url, opts) => (url === "/deployments/1" && !opts?.method ? Promise.resolve({ ...dep, state: "ready", system: true, model_name: "d3-mini" }) : undefined) });
+    const card = (await screen.findByRole("heading", { name: "API access" })).closest("[data-card]") as HTMLElement;
+    expect(within(card).getByText(/System deployments aren't registered in LiteLLM/)).toBeInTheDocument();
+    expect(within(card).queryByLabelText("curl example")).toBeNull();
+    expect(within(card).queryByLabelText("Python example")).toBeNull();
+    expect(screen.queryByText(/not registered in LiteLLM yet/)).toBeNull();
+    await userEvent.click(screen.getByRole("tab", { name: /LiteLLM/ }));
+    expect(await screen.findAllByText(/System deployments aren't registered in LiteLLM/)).not.toHaveLength(0);
+    expect(screen.queryByLabelText("Model name")).toBeNull();
+  });
+
+  it("manages a system deployment on the Decision model page: no Switch, Reconfigure or Start", async () => {
+    renderDetail([], { extra: (url, opts) => (url === "/deployments/1" && !opts?.method ? Promise.resolve({ ...dep, state: "stopped", system: true, sleep_capable: false }) : undefined) });
+    expect(await screen.findByRole("link", { name: "Decision model page" })).toHaveAttribute("href", "/decision-model");
+    expect(screen.queryByRole("button", { name: "Start" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Reconfigure" })).toBeNull();
+    await userEvent.click(screen.getByRole("button", { name: "More actions" }));
+    expect(screen.queryByRole("menuitem", { name: /Switch model/ })).toBeNull();
+    await userEvent.click(screen.getByRole("menuitem", { name: /Remove/ }));
+    const dialog = await screen.findByRole("alertdialog");
+    expect(within(dialog).getByText(/also turns the decision model off/)).toBeInTheDocument();
+    expect(within(dialog).getByRole("button", { name: "Remove and turn off" })).toBeInTheDocument();
+  });
+
+  it("explains a queued start-up under the header", async () => {
+    const queued = { ...dep, state: "queued", startup_queue: { position: 2, waiting_for: ["decider"], kind: "launch", since: 0, limit: 1,
+      reason: "waiting for decider to finish starting before it can start (one engine starts at a time; 1 queued ahead)" } };
+    renderDetail([], { extra: (url, opts) => (url === "/deployments/1" && !opts?.method ? Promise.resolve(queued) : undefined) });
+    expect(await screen.findByText("Queued")).toBeInTheDocument();
+    expect(screen.getByText(/1 queued ahead/)).toBeInTheDocument();
+    expect(screen.getByText(/memory stays reserved/)).toBeInTheDocument();
+  });
+});

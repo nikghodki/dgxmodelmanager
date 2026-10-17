@@ -11,7 +11,7 @@
     --card-foreground: 222 47.4% 11.2%;
     --popover: 0 0% 100%;
     --popover-foreground: 222 47.4% 11.2%;
-    --primary: 221 83.2% 53.3%;
+    --primary: 224 76.3% 48%;  /* AA (>= 4.5:1) as text on white and on its own /10-/20 tints */
     --primary-foreground: 0 0% 100%;
     --secondary: 214 33.3% 95.9%;
     --secondary-foreground: 222 47.4% 11.2%;
@@ -19,7 +19,7 @@
     --muted-foreground: 215 19.3% 34.5%;
     --accent: 219 100% 96.7%;
     --accent-foreground: 224 76.3% 48%;
-    --destructive: 0 72.2% 50.6%;
+    --destructive: 0 72.2% 45%;  /* AA with white text, also at the /90 hover */
     --destructive-foreground: 0 0% 100%;
     --border: 218 26.8% 92%;
     --input: 218 26.8% 92%;
@@ -50,15 +50,15 @@
     --card-foreground: 240 5.9% 93.3%;
     --popover: 240 8.1% 7.3%;
     --popover-foreground: 240 5.9% 93.3%;
-    --primary: 239 83.5% 66.7%;
-    --primary-foreground: 0 0% 100%;
+    --primary: 234 89.5% 73.9%;  /* light enough for AA text on the dark surfaces, so buttons use dark text */
+    --primary-foreground: 240 5.9% 10%;
     --secondary: 240 5.9% 10%;
     --secondary-foreground: 240 5.9% 93.3%;
     --muted: 240 5.9% 10%;
     --muted-foreground: 240 5% 64.9%;
     --accent: 240 8.2% 12%;
     --accent-foreground: 0 0% 98%;
-    --destructive: 0 84.2% 60.2%;
+    --destructive: 0 72.2% 45%;  /* AA with white text, also at the /90 hover */
     --destructive-foreground: 0 0% 100%;
     --border: 240 6.1% 12.9%;
     --input: 240 6.1% 12.9%;

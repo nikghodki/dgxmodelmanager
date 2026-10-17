@@ -1,15 +1,18 @@
 import asyncio
 
+from fastapi.responses import JSONResponse
 from fastapi import APIRouter, Depends, Query, Response
-from pydantic import BaseModel, StrictBool
+from pydantic import BaseModel, Field, StrictBool
 
 from dgxmm.api.errors import api_error
 from dgxmm.api.integrations import key_allows, key_out
+from dgxmm.api.ratelimit import allow
 from dgxmm.audit import audit
 from dgxmm.auth.deps import Principal, current_principal, get_ctx, require_admin
 from dgxmm.context import AppContext
 from dgxmm.deployer.service import DeployError, DeployRequest, InsufficientMemory
 from dgxmm.litellm import LiteLLMError
+from dgxmm.memory.redact import redact_log
 from dgxmm.planner.plans import PlanAction
 
 router = APIRouter(prefix="/api/deployments", tags=["deployments"])
@@ -20,6 +23,7 @@ class PreviewIn(BaseModel):
     model_ref: str
     config: dict = {}
     replacing: int | None = None
+    priority: int | None = Field(None, ge=0, le=100)  # the request's priority (plan safety); None = replaced's / 0
 
 
 class DeployIn(DeployRequest):
@@ -31,10 +35,18 @@ def deploy_error(e: DeployError):
     return api_error(e.status, e.code, e.message, **extra)
 
 
+def plan_consult(ctx: AppContext, p: Principal):
+    """May this request ask the decision model to rank plans? (rate limit `decider_plan`; over it: rules only)"""
+    return lambda: allow(ctx, "decider_plan", p.user.id)
+
+
 @router.post("/preview")
-async def preview(body: PreviewIn, p: Principal = Depends(current_principal), ctx: AppContext = Depends(get_ctx)):
+async def preview(body: PreviewIn, p: Principal = Depends(require_admin), ctx: AppContext = Depends(get_ctx)):
+    """Admin-only like every deployment change (the deploy wizard and the switch / reconfigure dialogs, its only
+    callers, are admin-only): it may ask the decision model and writes `decisions` rows."""
     try:
-        return await ctx.deployer.preview(body.engine, body.model_ref, body.config, replacing=body.replacing)
+        return await ctx.deployer.preview(body.engine, body.model_ref, body.config, replacing=body.replacing,
+                                          priority=body.priority, consult=plan_consult(ctx, p))
     except DeployError as e:
         raise deploy_error(e)
 
@@ -50,10 +62,12 @@ async def create(body: DeployIn, p: Principal = Depends(require_admin), ctx: App
     except InsufficientMemory as e:
         await ctx.deployer.undo_actions(applied)
         try:
-            plans = (await ctx.deployer.preview(req.engine, req.model_ref, req.config))["plans"]
+            pv = await ctx.deployer.preview(req.engine, req.model_ref, req.config, priority=req.priority,
+                                            consult=plan_consult(ctx, p))
         except DeployError:
-            plans = []
-        raise api_error(409, e.code, e.message, fit=e.fit.as_dict(), plans=plans)
+            pv = {}
+        raise api_error(409, e.code, e.message, fit=e.fit.as_dict(), plans=pv.get("plans", []),
+                        notes=pv.get("notes", []))
     except DeployError as e:
         await ctx.deployer.undo_actions(applied)
         raise deploy_error(e)
@@ -188,6 +202,10 @@ async def stop(dep_id: int, p: Principal = Depends(require_admin), ctx: AppConte
 @router.post("/{dep_id}/start")
 async def start(dep_id: int, p: Principal = Depends(require_admin), ctx: AppContext = Depends(get_ctx)):
     try:
+        if ctx.deployer.view(dep_id)["system"] and not ctx.decider.enabled:
+            # the decision model loads ~10 GiB that no feature would use: it starts only by enabling it
+            raise DeployError("decider_disabled", "the decision model is disabled; enable it on the Decision model "
+                                                  "page to start it", 409)
         view = await ctx.deployer.restart(dep_id, p.user.id)
     except DeployError as e:
         raise deploy_error(e)
@@ -197,12 +215,22 @@ async def start(dep_id: int, p: Principal = Depends(require_admin), ctx: AppCont
 
 @router.delete("/{dep_id}", status_code=204)
 async def remove(dep_id: int, p: Principal = Depends(require_admin), ctx: AppContext = Depends(get_ctx)):
+    """Removing the System decider also disables it (Decider.on_deployment_removed clears its deployment id)."""
+    was_enabled = None
     try:
-        name = ctx.deployer.view(dep_id)["name"]
+        view = ctx.deployer.view(dep_id)
+        if view["system"] and view["state"] in ("stopped", "failed"):
+            was_enabled = ctx.decider.enabled
+            ctx.decider.set_enabled(False)  # first: the supervisor must not restart it while it is being removed
         await ctx.deployer.remove(dep_id)
     except DeployError as e:
+        if was_enabled:
+            ctx.decider.set_enabled(True)
         raise deploy_error(e)
-    audit(ctx.db, p.user.id, "remove", name)
+    audit(ctx.db, p.user.id, "remove", view["name"])
+    if view["system"]:
+        audit(ctx.db, p.user.id, "decider_disable", view["name"],
+              {"deployment_id": dep_id, "removed": True, **p.audit_extra()})
     return Response(status_code=204)
 
 
@@ -213,7 +241,9 @@ async def logs(dep_id: int, tail: int = Query(200, ge=1, le=5000), p: Principal 
         view = ctx.deployer.view(dep_id)
     except DeployError as e:
         raise deploy_error(e)
-    return {"logs": await asyncio.to_thread(ctx.docker.logs, view["container_id"], tail)}
+    def read() -> str:  # engine output can echo tokens, auth headers, URL credentials: mask them line by line
+        return redact_log(ctx.docker.logs(view["container_id"], tail))
+    return {"logs": await asyncio.to_thread(read)}
 
 
 class SwitchIn(BaseModel):
@@ -247,7 +277,10 @@ async def sleep(dep_id: int, p: Principal = Depends(require_admin), ctx: AppCont
 
 @router.post("/{dep_id}/wake")
 async def wake(dep_id: int, p: Principal = Depends(require_admin), ctx: AppContext = Depends(get_ctx)):
-    return await _run(ctx, p, "wake", str(dep_id), ctx.deployer.wake(dep_id, p.user.id))
+    view = await _run(ctx, p, "wake", str(dep_id), ctx.deployer.wake(dep_id, p.user.id))
+    if view.get("state") == "sleeping" and view.get("startup_queue"):  # waiting for its turn: continues async
+        return JSONResponse(view, status_code=202)
+    return view
 
 
 @router.post("/{dep_id}/switch")
@@ -256,10 +289,12 @@ async def switch(dep_id: int, body: SwitchIn, p: Principal = Depends(require_adm
         view = await ctx.deployer.switch(dep_id, body.request, body.actions, p.user.id)
     except InsufficientMemory as e:
         try:
-            plans = (await ctx.deployer.preview(body.request.engine, body.request.model_ref, body.request.config, replacing=dep_id))["plans"]
+            pv = await ctx.deployer.preview(body.request.engine, body.request.model_ref, body.request.config,
+                                            replacing=dep_id)
         except DeployError:
-            plans = []
-        raise api_error(409, e.code, e.message, fit=e.fit.as_dict(), plans=plans)
+            pv = {}
+        raise api_error(409, e.code, e.message, fit=e.fit.as_dict(), plans=pv.get("plans", []),
+                        notes=pv.get("notes", []))
     except DeployError as e:
         audit(ctx.db, p.user.id, "switch_failed", f"{dep_id}->{body.request.name}",
               {"model": body.request.model_ref, "actions": body.actions, "code": e.code})
