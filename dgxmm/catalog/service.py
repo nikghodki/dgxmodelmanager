@@ -25,6 +25,11 @@ def _llmfit_summary(entry: dict | None, required: int | None) -> dict | None:
             "best_quant": entry.get("best_quant"), "use_case": entry.get("use_case"), "mismatch": mismatch}
 
 
+def _anon(anonymous: bool) -> dict:
+    """The hub keyword for a viewer's request (none for an admin's, so plain hub fakes keep working)."""
+    return {"anonymous": True} if anonymous else {}
+
+
 class CatalogService:
     def __init__(self, settings, hub, llmfit, inventory, budget, deployer, archs):
         self.settings, self.hub, self.llmfit, self.inventory = settings, hub, llmfit, inventory
@@ -42,9 +47,11 @@ class CatalogService:
         except LlmfitError as e:
             return {}, f"llmfit unavailable: {e}"
 
-    async def search(self, q: str, gguf: bool = False, ctx: int = 32768, limit: int = 30) -> dict:
+    async def search(self, q: str, gguf: bool = False, ctx: int = 32768, limit: int = 30,
+                     anonymous: bool = False) -> dict:
+        """`anonymous`: query the Hub without the HF token (a viewer's search)."""
         budget = await self._budget()
-        models = await asyncio.to_thread(self.hub.search, q, limit, gguf)
+        models = await asyncio.to_thread(self.hub.search, q, limit, gguf, **_anon(anonymous))
         llm, banner = await asyncio.to_thread(self._llm_map, q, budget.free_for_new, ctx)
         archs, evictable = self.archs.get(), self._evictable()
         results = []
@@ -60,9 +67,10 @@ class CatalogService:
                             "quant": guess_quant(m.repo_id)})
         return {"results": results, "banner": banner, "free_for_new": budget.free_for_new}
 
-    async def details(self, repo_id: str, ctx: int = 32768) -> dict:
+    async def details(self, repo_id: str, ctx: int = 32768, anonymous: bool = False) -> dict:
+        """`anonymous`: read the Hub without the HF token (a viewer's lookup; private repos are not described)."""
         budget = await self._budget()
-        d = await asyncio.to_thread(self.hub.details, repo_id)
+        d = await asyncio.to_thread(self.hub.details, repo_id, **_anon(anonymous))
         spec = None
         if d.config:
             try:
@@ -95,7 +103,7 @@ class CatalogService:
         out["banner"] = banner
         base = base_model_name(repo_id)
         try:
-            variants = await asyncio.to_thread(self.hub.search, base, 20, False)
+            variants = await asyncio.to_thread(self.hub.search, base, 20, False, **_anon(anonymous))
             out["variants"] = [{"repo_id": v.repo_id, "quant": guess_quant(v.repo_id), "est_bytes": v.est_bytes}
                                for v in variants if v.repo_id != repo_id and base_model_name(v.repo_id) == base]
         except Exception:

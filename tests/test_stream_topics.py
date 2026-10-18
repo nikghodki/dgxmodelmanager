@@ -6,7 +6,7 @@ import pytest
 from dgxmm.api.stream import ADMIN_ONLY_TOPICS, sse_events, visible
 
 VIEWER_TOPICS = ["alert", "benchmark", "budget", "deployment", "deployment_removed", "diagnosis", "download",
-                 "inventory", "metrics"]
+                 "inventory", "metrics", "insights"]
 
 
 async def _collect(is_admin: bool, events):
@@ -39,6 +39,11 @@ async def test_admins_receive_every_topic():
 @pytest.mark.parametrize("topic", VIEWER_TOPICS)
 def test_documented_viewer_topics(topic):
     assert visible(topic, False) and visible(topic, True)
+
+
+def test_stream_module_classifies_the_same_viewer_topics():
+    from dgxmm.api.stream import VIEWER_TOPICS as CLASSIFIED
+    assert CLASSIFIED == set(VIEWER_TOPICS) and not CLASSIFIED & ADMIN_ONLY_TOPICS
 
 
 def test_admin_only_topics():

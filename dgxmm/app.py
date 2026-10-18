@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import re
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -17,18 +18,25 @@ from dgxmm.api import catalog as catalog_api, downloads as downloads_api, planne
 from dgxmm.api import metrics as metrics_api, integrations as integrations_api
 from dgxmm.api import decider as decider_api
 from dgxmm.api import decider_features as decider_features_api
+from dgxmm.api import decider_ops as decider_ops_api
+from dgxmm.api import insights as insights_api
+from dgxmm.api import deploy_advice as deploy_advice_api
+from dgxmm.api import schedules as schedules_api
+from dgxmm.api import commands as commands_api
 from dgxmm.context import AppContext
 
 log = logging.getLogger("dgxmm")
 BACKGROUND_STOP_S = 3.0  # how long shutdown waits for cancelled background loops
 
 ROUTERS = [auth_api, users_api, host_api, inventory_api, engines_api, deployments_api, stream_api, audit_api, containers_api, catalog_api, downloads_api, planner_api, metrics_api, integrations_api, decider_api,
-           decider_features_api]
+           decider_features_api, insights_api, deploy_advice_api, decider_ops_api, schedules_api,
+           commands_api]
 
 
 class BodyLimit:
     """ASGI middleware: request bodies under the given path prefixes may not exceed their byte limit (413
-    ``request_too_large``), whether sent with a Content-Length or chunked. The body is read (up to the limit) before
+    ``request_too_large``), whether sent with a Content-Length or chunked. A limit's path is a prefix, or a compiled
+    pattern matched against the path. The body is read (up to the limit) before
     the route runs, so nothing is parsed or validated for an oversized request."""
 
     def __init__(self, app, limits: list[tuple[str, int]]):
@@ -43,7 +51,9 @@ class BodyLimit:
     async def __call__(self, scope, receive, send):
         if scope["type"] != "http":
             return await self.app(scope, receive, send)
-        limit = next((n for prefix, n in self.limits if scope["path"].startswith(prefix)), None)
+        path = scope["path"]
+        limit = next((n for prefix, n in self.limits
+                      if (prefix.match(path) if isinstance(prefix, re.Pattern) else path.startswith(prefix))), None)
         if limit is None:
             return await self.app(scope, receive, send)
         length = dict(scope.get("headers") or []).get(b"content-length")
@@ -96,7 +106,11 @@ def create_app(ctx: AppContext) -> FastAPI:
     app = FastAPI(title="DGX Model Manager", lifespan=lifespan, docs_url=None, redoc_url=None)
     app.state.ctx = ctx
     bp = ctx.settings.base_path
-    app.add_middleware(BodyLimit, limits=[(f"{bp}/api/decider", decider_api.MAX_REQUEST_BYTES)])
+    app.add_middleware(BodyLimit, limits=[(f"{bp}/api/decider", decider_api.MAX_REQUEST_BYTES),
+                                          (f"{bp}/api/insights", insights_api.MAX_REQUEST_BYTES),
+                                          *[(re.compile(re.escape(bp) + p.pattern) if isinstance(p, re.Pattern)
+                                             else f"{bp}{p}", schedules_api.MAX_REQUEST_BYTES)
+                                            for p in schedules_api.BODY_PATHS]])
     for module in ROUTERS:
         app.include_router(module.router, prefix=bp)
     if bp:

@@ -60,6 +60,22 @@ describe("DeploymentDetail", () => {
     expect(screen.getByRole("button", { name: "Sleep" }).querySelector(".animate-spin")).not.toBeNull();
   });
 
+  it("shows reading-label badges on benchmark rows", async () => {
+    const row = { config_hash: "abcdef1234", config: {}, engine: "vllm", concurrency: 1, requests: 8, errors: 0, ttft_p50: 0.05, ttft_p95: 0.06, itl_p50: 0.02, tps_total: 50, tps_per_req: 52, current: true };
+    const rows = [
+      { ...row, id: 1, ts: "2026-10-16T01:00:00Z", quality: "verified", label: "plausible", label_source: "rules" },
+      { ...row, id: 2, ts: "2026-10-16T02:00:00Z", quality: "disputed", label: "contended", label_source: "model", tps_total: 20 },
+      { ...row, id: 3, ts: "2026-10-16T03:00:00Z", quality: null, label: null, label_source: null },
+    ];
+    renderDetail([], { extra: (url) => (url === "/deployments/1/benchmarks" ? Promise.resolve(rows) : undefined) });
+    await userEvent.click(await screen.findByRole("tab", { name: /Benchmarks/ }));
+    expect(await screen.findByLabelText(/^Reading: Plausible\. Consistent with earlier readings \(rules\)/)).toHaveTextContent("Plausible");
+    const contended = screen.getByLabelText(/^Reading: Contended/);
+    expect(contended.className).toMatch(/text-status-warning/);
+    expect(contended.getAttribute("title")).toMatch(/not used for advice \(decision model\)/);
+    expect(screen.getAllByRole("row")).toHaveLength(4);
+  });
+
   it("colours warning advice as a warning, not as critical", async () => {
     renderDetail([{ id: "a1", severity: "warning", confidence: "high", title: "Raise sequences", rationale: "r", expected_effect: "e", patch: null }]);
     await userEvent.click(await screen.findByRole("tab", { name: /Advice/ }));

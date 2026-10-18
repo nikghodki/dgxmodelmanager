@@ -20,6 +20,7 @@ dependencies = [
   "nvidia-ml-py>=12.560",
   "prometheus-client>=0.20",
   "llmfit>=1.1.17",
+  "tzdata>=2024.1",  # IANA zones for zoneinfo where the image has no /usr/share/zoneinfo (wall-clock schedules)
 ]
 
 [project.optional-dependencies]

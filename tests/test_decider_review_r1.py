@@ -291,25 +291,25 @@ async def test_concurrent_diagnose_stores_one_row(stack):
 # ---------- 3. one deadline ----------
 class SlowDecider(FakeDecider):
     async def available(self):
-        await asyncio.sleep(0.6)
+        await asyncio.sleep(1.5)
         return True
 
 
 async def test_single_deadline_covers_availability_and_decide():
-    d = SlowDecider(answers={"plan": ("a", 0.99)}, delay_s=0.6)
+    d = SlowDecider(answers={"plan": ("a", 0.99)}, delay_s=1.5)
     t = time.monotonic()
     out = await common.safe_decide(d, feature="plan", subject="s", state="", question="q",
                                    options=[Option("a", "A"), Option("b", "B")], timeout_s=1.0)
-    assert time.monotonic() - t <= 1.1 and out.source == "none"
+    assert time.monotonic() - t < 2.0 and out.source == "none"  # two separate deadlines would take 2.5-3 s
     assert not hasattr(common, "model_ready")
 
 
 async def test_suggest_config_asks_both_questions_concurrently():
-    d = FakeDecider(answers={"parser_tool": ("hermes", 0.95), "parser_reasoning": ("none", 0.95)}, delay_s=0.4)
+    d = FakeDecider(answers={"parser_tool": ("hermes", 0.95), "parser_reasoning": ("none", 0.95)}, delay_s=1.0)
     info = cs.ModelInfo("acme/Mystery-7B", "MysteryForCausalLM", template="{{ tools }} <think>")
     t = time.monotonic()
     out = await cs.suggest_config(d, info, "vllm")
-    assert time.monotonic() - t < 0.75 and out["tool_call_parser"]["value"] == "hermes"
+    assert time.monotonic() - t < 1.6 and out["tool_call_parser"]["value"] == "hermes"
 
 
 # ---------- 4. /advice never waits on the model ----------
@@ -317,14 +317,14 @@ async def test_workload_peek_schedules_single_background_compute(stack):
     from tests.test_decider_kind_workload import ready_dep, rollups
     dep = await ready_dep(stack)
     rollups(stack.db, dep, 40, running=1, gen_tps=30)
-    fake = FakeDecider(answers={"workload": ("single_user_chat", 0.9)}, delay_s=0.3)
+    fake = FakeDecider(answers={"workload": ("single_user_chat", 0.9)}, delay_s=1.0)
     ctx = AppContext(settings=stack.settings, db=stack.db, events=stack.events, inventory=stack.inv,
                      deployer=stack.deployer, engines=stack.deployer.engines, decider=fake)
     ctx.metrics = MetricsStore(stack.db)
     wire_features(ctx)
     t = time.monotonic()
     assert ctx.workload.peek(dep) is None and ctx.workload.peek(dep) is None
-    assert time.monotonic() - t < 0.1
+    assert time.monotonic() - t < 0.5  # the model takes 1 s
     await ctx.workload.drain()
     assert len(fake.calls) == 1  # single flight
     assert ctx.workload.peek(dep)["label"] == "single_user_chat"

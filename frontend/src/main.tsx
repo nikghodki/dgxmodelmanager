@@ -10,6 +10,7 @@ import { AppRoutes } from "./routes";
 import { ThemeProvider, useTheme } from "@/components/app/theme";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { Toaster } from "@/components/ui/sonner";
+import "@/components/app/schedules-card"; // registers the schedule insight dialog (any page may open it)
 
 const qc = new QueryClient({ defaultOptions: { queries: { retry: 1, refetchOnWindowFocus: false } } });
 

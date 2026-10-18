@@ -28,6 +28,8 @@ export interface Artifact {
   complete: boolean; kind: "llm" | "draft" | "embedding" | "reranker" | "vision-llm" | "speech" | "decision" | "other"; architecture: string | null; quant: string | null; problems: string[];
   max_context: number | null; is_moe: boolean | null; num_layers: number | null; confident: boolean | null;
   has_mtp: boolean; engines: string[];
+  /** The repo ships custom code (config auto_map): trust_remote_code would run it. */
+  has_remote_code?: boolean;
   /** Who classified `kind`: rules, or the decision model when no rule recognised the model. */
   kind_source?: "rules" | "model"; kind_confidence?: number | null;
 }
@@ -60,6 +62,8 @@ export interface PlanOption { id: string; title: string; detail: string; new_req
   recommended?: boolean; recommendation?: PlanRecommendation | null;
   /** Set when the safety filter excludes this plan from recommendation (still selectable as before). */
   unsafe_reason?: string | null;
+  /** Free-memory plans: what an acknowledgement of the unsafe reason must name (POST /decider/free-memory). */
+  unsafe_fingerprint?: string | null;
 }
 export interface Preview {
   estimate: Estimate; fit: Fit; budget: Budget; served_name: string; config: Record<string, unknown>;
@@ -154,6 +158,36 @@ export interface DeciderStatus {
   /** Client-side back-pressure: requests at the decider, waiting, and answered by rules because it was busy. */
   load?: { max_in_flight: number; in_flight: number; queued: number; shed: number; service_ms: number };
   supervisor?: DeciderSupervisorStatus | null;
+  /** The feature registry's settings groups, in display order (label, description, flags). */
+  feature_specs?: FeatureSpecInfo[];
+  /** Admins only: the background insight engine's jobs. */
+  jobs?: InsightJob[];
+}
+/** A decision-model feature group (GET /decider/status `feature_specs`, from dgxmm/decider/registry.py). */
+export interface FeatureSpecInfo {
+  name: string; label: string; description: string; default_threshold: number; background: boolean; needs_model: boolean;
+  viewer_visible: boolean; members: string[];
+}
+/** A background insight-engine job (GET /decider/status `jobs`). */
+export interface InsightJob {
+  name: string; feature: string; schedule: string; enabled: boolean; running: boolean; last_run_at: string | null;
+  last_duration_ms: number | null; last_result: string | null; next_run_at: string | null; failures: number; runs: number;
+  skipped: number; budget_calls: number; calls_used: number; calls_refused: number;
+}
+export type InsightSeverity = "info" | "warning" | "critical";
+export type InsightStatus = "open" | "dismissed" | "snoozed" | "applied" | "expired";
+/** What an insight's button opens (validated server-side; dgxmm/decider/insights.py validate_action). */
+export type InsightAction =
+  | { type: "reconfigure"; deployment_id: number; patch: Record<string, unknown>; label?: string }
+  | { type: "schedule"; deployment_id: number; proposal: Record<string, unknown>; label?: string }
+  | { type: "threshold"; feature: string; value: number; label?: string }
+  | { type: "copy"; text: string; label?: string }
+  | { type: "open"; path: string; label?: string };
+/** GET /insights rows. `action` is null for viewers. */
+export interface Insight {
+  id: number; kind: string; feature: string; subject: string; severity: InsightSeverity; title: string; body: string;
+  confidence: number | null; source: "rules" | "model"; decision_id: number | null; action: InsightAction | null;
+  status: InsightStatus; snooze_until: string | null; dedupe_key: string; created_at: string; updated_at: string; expires_at: string | null;
 }
 export interface DeciderModelInfo {
   repo: string; revision: string; served_name: string; params: string; reservation_bytes: number; default: boolean; downloaded: boolean;
@@ -191,3 +225,93 @@ export interface ConfigSuggestions { tool_call_parser: Suggestion | null; reason
 export interface PlanRecommendation { source: DecisionSource; confidence: number | null; reason: string; decision_id?: number | null }
 /** GET /deployments/{id}/workload. */
 export interface Workload { label: string | null; source: DecisionSource; confidence: number | null; summary?: Record<string, unknown> | string | null; reason?: string | null; decision_id?: number | null }
+/* ---- deploy-time advice (spec 2026-10-17 features 2, 3, 4, 5, 11) ---- */
+export type DeployGoal = "chat" | "agent_tool_use" | "batch_throughput" | "long_context";
+/** POST /decider/config-advice option: a sizing that fits the free memory, from the memory calculator. */
+export interface ConfigOption {
+  key: string; config: Record<string, any>; summary: string; required_bytes: number; headroom_bytes: number;
+  context: number; seqs: number; kv_cache_dtype: string; prefix_caching: boolean; kv_pool_tokens: number;
+}
+export interface ConfigAdvice {
+  goal: DeployGoal; options: ConfigOption[]; recommended: string | null; top: string[]; source: DecisionSource;
+  confidence: number | null; decision_id: number | null; free_bytes: number | null; reason: string | null; disabled: boolean;
+}
+export type CompatVerdictKey = "runs" | "runs_with_flags" | "unsupported" | "unknown";
+export interface CompatVerdict { verdict: CompatVerdictKey; reasons: string[]; flags: string[] }
+/** GET /catalog/compat?repo= */
+export interface CompatResult {
+  repo: string; sha: string | null; architecture: string | null; gated: boolean; vllm: CompatVerdict; llamacpp: CompatVerdict;
+  source: DecisionSource; confidence: number | null; decision_id: number | null; cached: boolean; error: string | null; disabled: boolean;
+}
+export interface DraftCandidate { ref: string; weights_bytes: number; reason: string; summary: string; p: number | null }
+/** POST /decider/draft-suggest */
+export interface DraftSuggestion {
+  method: string; candidates: DraftCandidate[]; suggested: string | null; source: DecisionSource; confidence: number | null;
+  decision_id: number | null; reason: string | null; disabled: boolean;
+}
+/** POST /decider/engine-suggest */
+export interface EngineSuggestion {
+  engine: string | null; model_ref: string | null; source: DecisionSource; confidence: number | null; reason: string | null;
+  decision_id: number | null; alternatives: Record<string, string>; disabled: boolean;
+}
+export interface RemoteCodeFinding { file: string; line: number; kind: string; detail: string }
+/** POST /decider/remote-code-check */
+export interface RemoteCodeCheck {
+  verdict: "unusual" | "no_findings" | "unknown" | "no_custom_code"; findings: RemoteCodeFinding[]; source: DecisionSource;
+  confidence: number | null; model_label: "unusual" | null; decision_id: number | null; scanned_files: number;
+  truncated: boolean; error: string | null; disabled: boolean; remote_code: boolean;
+}
+
+/** GET /decider/routing-advice (dgxmm/decider/routing.py; admin, advisory only). */
+export interface RoutingClassAdvice {
+  class: "code" | "chat" | "tool_use" | "long_context" | "vision" | "batch";
+  label: string;
+  alias: string;
+  deployment_id: number | null;
+  deployment: string | null;
+  model_name: string | null;
+  model_ref: string | null;
+  source: "rules" | "model" | "none";
+  confidence: number | null;
+  reason: string;
+  /** ready and registered in LiteLLM: only these are in the snippet */
+  routable: boolean;
+  note: string | null;
+  candidates: { deployment_id: number; deployment: string; model_name: string | null }[];
+}
+export interface RoutingAdvice {
+  enabled: boolean;
+  classes: RoutingClassAdvice[];
+  snippet: string;
+  computed_at: string | null;
+  source: "rules" | "model" | "none";
+}
+
+/** A deployment's sleep/wake schedule (GET /deployments/{id}/schedules). `days`: bit 0 = Monday .. bit 6 = Sunday. */
+export type ScheduleAction = "sleep" | "wake" | "stop" | "start";
+export interface Schedule {
+  id: number; deployment_id: number; action: ScheduleAction; days: number; days_label: string; at_local: string;
+  timezone: string; enabled: boolean; created_by?: number | null; created_at: string | null; updated_at: string | null;
+  last_run_at: string | null; last_result: string | null; next_run_at: string | null;
+  /** Today's slot could not run yet (traffic, metrics, a transition): retried every minute for up to an hour. */
+  deferred?: boolean;
+  /** A wake / start waiting for its start-up slot: the outcome is recorded when it ends. */
+  pending?: boolean;
+}
+export interface ScheduleList { deployment_id: number; schedules: Schedule[]; allowed_actions: ScheduleAction[]; timezone: string; paused_all?: boolean }
+export interface ScheduleSettings { paused_all: boolean; timezone: string }
+/** The `proposal` of a schedule insight action (dgxmm/decider/schedule.py). */
+export interface ScheduleProposal {
+  sleep_action: "sleep" | "stop"; sleep_at: string; sleep_days: number; wake_action: "wake" | "start"; wake_at: string;
+  wake_days: number; timezone: string; idle_hours_per_week?: number; weeks?: number;
+}
+
+/** POST /decider/command: interpretations of a typed ⌘K command (nothing runs until the user confirms one). */
+export type CommandActionKey = "navigate" | "start" | "stop" | "sleep" | "wake" | "restart" | "deploy" | "reconfigure" | "free_memory";
+export interface CommandTarget { kind: "page" | "deployment" | "model"; name: string; path?: string; id?: number; state?: string; engine?: string; ref?: string }
+export interface CommandInterpretation {
+  action: CommandActionKey; target: CommandTarget | null; confidence: number; label: string; source: "rules" | "model";
+  params: { bytes?: number; model_ref?: string; context?: number; patch?: Record<string, number> };
+}
+export interface CommandResult { interpretations: CommandInterpretation[]; source: "rules" | "model" | "none"; message: string | null; refused: boolean }
+export interface FreePlans { bytes: number; free_for_new: number; shortfall: number; plans: PlanOption[] }

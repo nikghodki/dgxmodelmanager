@@ -24,7 +24,11 @@ auto_protect: false           # true = when memory turns critical the watchdog s
 images:
   # vLLM image, pinned by digest (public multi-arch manifest list, arm64 + amd64)
   vllm: vllm/vllm-openai@sha256:22d3b1217fda569653f32f1e00a2a4e64119c1601c67ff94cc72d7ca5ef352c8
-  llamacpp: ghcr.io/ggml-org/llama.cpp:server-cuda  # image for llama.cpp (GGUF) deployments
+  # llama.cpp image for GGUF deployments, pinned by digest: build b11669 (tag server-cuda-b11669; multi-arch
+  # manifest list, arm64 + amd64). To move to a newer build, take the manifest-list digest (the first "Digest:")
+  # of the moving tag or of a server-cuda-b<build> tag:
+  #   docker buildx imagetools inspect ghcr.io/ggml-org/llama.cpp:server-cuda
+  llamacpp: ghcr.io/ggml-org/llama.cpp@sha256:e4cfff28678327b0ae7eda129e700e56a0fa55aa23db2f016256ea155c15c2b5
 docker_network: dgxmm         # docker network engines join; must equal DGXMM_NETWORK in .env
 port_range: [8100, 8199]      # host ports handed to engine containers (1024-65535, ascending)
 publish_bind: 127.0.0.1       # host interface engine ports are published on (keep loopback;

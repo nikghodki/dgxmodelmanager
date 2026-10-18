@@ -90,3 +90,43 @@ async def test_catalog_degrades_without_llmfit(stack):
     res = await cat.search("qwen")
     assert "llmfit unavailable" in res["banner"] and res["results"][0]["llmfit"] is None
     assert res["results"][0]["support"]["vllm"] is None
+
+
+class _InfoApi:
+    def __init__(self, private=False):
+        self.kw, self.private = [], private
+
+    def model_info(self, repo_id, **kw):
+        self.kw.append(kw)
+        return SimpleNamespace(id=repo_id, sha="abc", gated=False, private=self.private,
+                               siblings=[SimpleNamespace(rfilename="config.json", size=500)])
+
+    def list_models(self, **kw):
+        self.kw.append(kw)
+        return []
+
+
+def test_hub_details_and_search_are_anonymous_for_viewers():
+    """Review follow-up (L1): a viewer's catalog lookups go out without the admin's HF token, and a private repo
+    is never described to a viewer (same rule as the compatibility check)."""
+    import httpx
+    seen = []
+
+    def handler(r):
+        seen.append(r.headers.get("authorization"))
+        return httpx.Response(200, json=QWEN_TINY)
+    api = _InfoApi()
+    hub = HfHubClient(token="hf_secret", api=api, http=httpx.Client(transport=httpx.MockTransport(handler)))
+    assert hub.details("org/m").config == QWEN_TINY
+    assert api.kw[-1].get("token") is None and seen[-1] == "Bearer hf_secret"
+    assert hub.details("org/m", anonymous=True).config == QWEN_TINY
+    assert api.kw[-1]["token"] is False and seen[-1] is None
+    hub.search("qwen", 5, anonymous=True)
+    assert api.kw[-1]["token"] is False
+    hub.search("qwen", 5)
+    assert "token" not in api.kw[-1]
+    private = HfHubClient(token="hf_secret", api=_InfoApi(private=True),
+                          http=httpx.Client(transport=httpx.MockTransport(handler)))
+    with pytest.raises(LookupError):
+        private.details("org/secret", anonymous=True)
+    assert private.details("org/secret").repo_id == "org/secret"  # the admin still sees it

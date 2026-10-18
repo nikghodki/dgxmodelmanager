@@ -20,6 +20,10 @@ PING_S = 15.0  # keep-alive comment after this long without events
 ADMIN_ONLY_TOPICS = frozenset({
     "decider",  # decision-model image build progress: docker build output and the image's package list (SBOM)
 })
+VIEWER_TOPICS = frozenset({
+    "alert", "benchmark", "budget", "deployment", "deployment_removed", "diagnosis", "download", "inventory", "metrics",
+    "insights",  # {"id": <insight id>} only: clients re-fetch GET /api/insights, which filters by role
+})
 
 
 def visible(topic: str, is_admin: bool) -> bool:

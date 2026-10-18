@@ -8,6 +8,7 @@ secrets/
 frontend/node_modules/
 frontend/dist/
 .pytest_cache/
+*.bundle
 
 # --- GitHub template (from initial commit) ---
 # Byte-compiled / optimized / DLL files

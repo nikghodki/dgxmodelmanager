@@ -18,12 +18,13 @@ applies it and records it, or rolls back completely and raises. Steps must be id
 Rollback compatibility: migrations are forward-only. Older DGXMM versions ignore ``schema_version`` and tables
 they do not know; every step here must keep the schema readable and writable by the previous release (add, never
 drop or rename, columns and tables). A database migrated by a newer DGXMM opened by an older one logs a warning and
-is otherwise left alone. Tested downgrades: main (b193e9c, before the decision model) and dec-int (e3ca780) read
-and write a migrated database. Partly supported: the first decision-model
-builds before 4a6a215 (schema 11ce098, diagnosis service abc4af7) check for an existing diagnosis before inserting
-but do not handle the IntegrityError that migration 2's unique index raises when two diagnoses of the same failure
-event race; that background task then fails and logs (one duplicate diagnosis is not stored); everything else
-works.
+is otherwise left alone. Migration 30 rebuilds ``deployments`` (same columns and constraints plus AUTOINCREMENT,
+which older versions use transparently). Tested downgrades: main (b193e9c, before the decision model), dec-int
+(e3ca780) and main (7c055b7, for migration 30) read and write a migrated database. Partly supported: the first
+decision-model builds before 4a6a215 (schema 11ce098, diagnosis service abc4af7) check for an existing diagnosis
+before inserting but do not handle the IntegrityError that migration 2's unique index raises when two diagnoses of
+the same failure event race; that background task then fails and logs (one duplicate diagnosis is not stored);
+everything else works.
 """
 from __future__ import annotations
 
@@ -47,6 +48,9 @@ class Migration:
     version: int
     name: str
     apply: Callable[[sqlite3.Connection], None]
+    # rebuilds a parent table: run with foreign key enforcement off (SQLite's documented table rebuild; otherwise
+    # dropping the old table cascades to its children) and checked for new foreign key violations before commit
+    rebuilds: bool = False
 
 
 def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
@@ -78,11 +82,98 @@ def _diagnoses_unique_event(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_diagnoses_event ON diagnoses (deployment_id, event_id)")
 
 
+def _insights_live_dedupe(conn: sqlite3.Connection) -> None:
+    """Version 3: at most one live (open / snoozed / dismissed) insight per dedupe_key. ``create_all`` creates the
+    ``insights`` table with this partial unique index on upgrade from main (7c055b7) and on fresh installs; this step
+    covers a table created without it: duplicates keep their newest row live and the older ones become ``expired``
+    (closed rows are pruned by retention), then the index is added."""
+    if not _table_exists(conn, "insights"):
+        return
+    live = "status IN ('open', 'snoozed', 'dismissed')"
+    conn.execute(f"UPDATE insights SET status = 'expired' WHERE {live} AND id NOT IN "
+                 f"(SELECT MAX(id) FROM insights WHERE {live} GROUP BY dedupe_key)")
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_insights_live_dedupe ON insights (dedupe_key) "
+                 "WHERE status IN ('open', 'snoozed', 'dismissed')")
+
+
+def _traffic_profiles_unique_hour(conn: sqlite3.Connection) -> None:
+    """Version 20: one traffic-profile row per (deployment, hour of week). ``create_all`` creates the table with this
+    constraint; this step covers a table created without it: duplicates keep their newest row, then a unique index
+    is added. Profiles are rebuilt nightly, so dropping a duplicate loses nothing."""
+    if not _table_exists(conn, "traffic_profiles") or _has_unique(conn, "traffic_profiles",
+                                                                   ["deployment_id", "hour_of_week"]):
+        return
+    conn.execute("DELETE FROM traffic_profiles WHERE id NOT IN "
+                 "(SELECT MAX(id) FROM traffic_profiles GROUP BY deployment_id, hour_of_week)")
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_traffic_profiles_hour ON traffic_profiles "
+                 "(deployment_id, hour_of_week)")
+
+
+_SUBJECT_TABLES = ("insights", "decisions")  # subject "deployment:<id>"
+
+
+def _deployment_ids_never_reused(conn: sqlite3.Connection) -> None:
+    """Version 30: deployment ids are never handed out again. Without AUTOINCREMENT SQLite reuses the highest rowid
+    after a delete, so a new deployment took the id of a removed one and showed its benchmark runs, readings,
+    rollups and insights (all keyed by the id; benchmark results themselves are per model and config, by design).
+    Rebuild ``deployments`` with AUTOINCREMENT (columns copied by name; ``create_all`` already creates it so on a
+    fresh install) and start the sequence above every deployment id still referenced anywhere."""
+    from sqlalchemy.dialects import sqlite as sqlite_dialect
+    from sqlalchemy.schema import CreateTable
+
+    from dgxmm.db import Deployment
+    if not _table_exists(conn, "deployments"):
+        return
+    sql = conn.execute("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'deployments'").fetchone()[0]
+    if "AUTOINCREMENT" not in sql.upper():
+        table = Deployment.__table__
+        new = str(CreateTable(table).compile(dialect=sqlite_dialect.dialect()))
+        new = new.replace("CREATE TABLE deployments ", "CREATE TABLE deployments__rebuild ", 1)
+        if "AUTOINCREMENT" not in new or "deployments__rebuild" not in new:  # pragma: no cover - model changed
+            raise RuntimeError("unexpected DDL for the deployments rebuild")
+        old_cols = [r[1] for r in conn.execute('PRAGMA table_info("deployments")')]
+        indexes = [r[0] for r in conn.execute("SELECT sql FROM sqlite_master WHERE type = 'index' AND "
+                                               "tbl_name = 'deployments' AND sql IS NOT NULL")]
+        conn.execute("DROP TABLE IF EXISTS deployments__rebuild")
+        conn.execute(new)
+        known = set(table.columns.keys())
+        for row in conn.execute('PRAGMA table_info("deployments")').fetchall():  # columns of a newer DGXMM: kept
+            if row[1] not in known:
+                conn.execute(f'ALTER TABLE deployments__rebuild ADD COLUMN "{row[1]}" {row[2] or ""}')
+        cols = ", ".join(f'"{c}"' for c in old_cols)
+        conn.execute(f"INSERT INTO deployments__rebuild ({cols}) SELECT {cols} FROM deployments")
+        conn.execute("DROP TABLE deployments")
+        conn.execute("ALTER TABLE deployments__rebuild RENAME TO deployments")
+        for ix in indexes:
+            conn.execute(ix)
+    high = [conn.execute("SELECT COALESCE(MAX(id), 0) FROM deployments").fetchone()[0]]
+    for (name,) in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall():
+        cols = {r[1] for r in conn.execute(f'PRAGMA table_info("{name}")')}
+        if "deployment_id" in cols:
+            high.append(conn.execute(f'SELECT COALESCE(MAX(deployment_id), 0) FROM "{name}"').fetchone()[0])
+        if name in _SUBJECT_TABLES and "subject" in cols:
+            high.append(conn.execute(
+                f"SELECT COALESCE(MAX(CAST(SUBSTR(subject, 12) AS INTEGER)), 0) FROM \"{name}\" "
+                "WHERE subject LIKE 'deployment:%'").fetchone()[0])
+    seq = max(int(h or 0) for h in high)
+    have = conn.execute("SELECT seq FROM sqlite_sequence WHERE name = 'deployments'").fetchone()
+    if have is None:
+        conn.execute("INSERT INTO sqlite_sequence (name, seq) VALUES ('deployments', ?)", (seq,))
+    elif have[0] < seq:
+        conn.execute("UPDATE sqlite_sequence SET seq = ? WHERE name = 'deployments'", (seq,))
+
+
+# Version numbers reserved for the parallel feature lanes of the advanced decision-model features, so their
+# branches merge without renumbering: 4-9 deploy-time features, 10-19 operations features, 20-29 schedules/commands;
+# fixes after them from 30 on.
 MIGRATIONS: list[Migration] = [
     Migration(1, "baseline (create_all + add_missing_columns)", _baseline),
     Migration(2, "diagnoses: unique (deployment_id, event_id)", _diagnoses_unique_event),
+    Migration(3, "insights: one live insight per dedupe_key", _insights_live_dedupe),
+    Migration(20, "traffic_profiles: unique (deployment_id, hour_of_week)", _traffic_profiles_unique_hour),
+    Migration(30, "deployments: ids are never reused (AUTOINCREMENT)", _deployment_ids_never_reused, rebuilds=True),
 ]
-LATEST = MIGRATIONS[-1].version
+LATEST = max(m.version for m in MIGRATIONS)
 
 
 def add_missing_indexes(engine: Engine, metadata) -> list[str]:
@@ -130,15 +221,20 @@ def migrate(engine: Engine) -> list[int]:
         if newer:
             log.warning("database schema version %s was written by a newer DGXMM (this one knows up to %s); "
                         "continuing without changing it", newer[-1], LATEST)
-        for m in MIGRATIONS:
+        for m in sorted(MIGRATIONS, key=lambda m: m.version):
             if m.version in done:
                 continue
+            if m.rebuilds:
+                conn.execute("PRAGMA foreign_keys=OFF")  # a no-op inside a transaction: set before BEGIN
             conn.execute("BEGIN IMMEDIATE")
             try:
                 if m.version in _applied(conn):  # another process applied it while we waited for the lock
                     conn.execute("ROLLBACK")
                     continue
+                violations = conn.execute("PRAGMA foreign_key_check").fetchall() if m.rebuilds else []
                 m.apply(conn)
+                if m.rebuilds and conn.execute("PRAGMA foreign_key_check").fetchall() != violations:
+                    raise RuntimeError(f"schema migration {m.version} would break foreign keys")
                 conn.execute(f"INSERT INTO {TABLE} (version, name, applied_at) VALUES (?, ?, ?)",
                              (m.version, m.name, datetime.now(timezone.utc).isoformat()))
                 conn.execute("COMMIT")
@@ -150,6 +246,9 @@ def migrate(engine: Engine) -> list[int]:
                 log.error("schema migration %s (%s) failed; the database was left at the previous version",
                           m.version, m.name)
                 raise
+            finally:
+                if m.rebuilds:
+                    conn.execute("PRAGMA foreign_keys=ON")
             applied_now.append(m.version)
             log.info("applied schema migration %s: %s", m.version, m.name)
     finally:

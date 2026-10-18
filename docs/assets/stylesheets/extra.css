@@ -1,0 +1,36 @@
+/* Colours of the DGXMM app (frontend/src/index.css): primary hsl(224 76.3% 48%) in light, hsl(234 89.5% 73.9%) in dark. */
+[data-md-color-scheme="default"] {
+  --md-primary-fg-color: #1d4ed8;
+  --md-primary-fg-color--light: #3b6ef0;
+  --md-primary-fg-color--dark: #1e3fae;
+  --md-accent-fg-color: #1d4ed8;
+  --md-accent-fg-color--transparent: rgba(29, 78, 216, 0.1);
+}
+
+[data-md-color-scheme="slate"] {
+  --md-primary-fg-color: #818cf8;
+  --md-primary-fg-color--light: #a5b0fb;
+  --md-primary-fg-color--dark: #5f6bd6;
+  --md-primary-bg-color: #18181b;
+  --md-primary-bg-color--light: rgba(24, 24, 27, 0.7);
+  --md-accent-fg-color: #a5b0fb;
+  --md-accent-fg-color--transparent: rgba(129, 140, 248, 0.1);
+  --md-typeset-a-color: #a5b0fb;
+}
+
+/* System font stacks (theme.font is off: nothing is fetched from a font service) */
+:root {
+  --md-text-font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --md-code-font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+}
+
+/* Screenshots: a thin frame so light screenshots stand out on the light page */
+.md-typeset img[src*="images/"] {
+  border: 1px solid var(--md-default-fg-color--lightest);
+  border-radius: 6px;
+}
+
+.md-typeset .grid.cards > ul > li > p:first-child .twemoji,
+.md-typeset .grid.cards > ul > li > p:first-child svg {
+  color: var(--md-primary-fg-color);
+}

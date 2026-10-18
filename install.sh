@@ -19,7 +19,7 @@ CONFIG_FILE="$REPO_DIR/config.yaml"
 EXAMPLE_CONFIG="$REPO_DIR/config.example.yaml"
 SECRETS_DIR="$REPO_DIR/secrets"
 DATA_DIR="$REPO_DIR/data"
-ENV_KEYS=(DGXMM_UID DGXMM_GID DOCKER_GID DGXMM_PORT DGXMM_BIND DGXMM_HF_CACHE DGXMM_MODELS_DIR DGXMM_NETWORK DGXMM_HOST_HOME DGXMM_TRUSTED_PROXIES DGXMM_INSTALL_ID)
+ENV_KEYS=(DGXMM_UID DGXMM_GID DOCKER_GID DGXMM_PORT DGXMM_BIND DGXMM_HF_CACHE DGXMM_MODELS_DIR DGXMM_NETWORK DGXMM_HOST_HOME DGXMM_TRUSTED_PROXIES DGXMM_INSTALL_ID DGXMM_TZ)
 # Written to .env only when the bundled LiteLLM is enabled (--with-litellm / DGXMM_WITH_LITELLM=1).
 LITELLM_ENV_KEYS=(DGXMM_WITH_LITELLM DGXMM_LITELLM_PORT COMPOSE_PROFILES)
 LITELLM_SERVICE=dgxmm-litellm
@@ -40,6 +40,10 @@ DECIDER_IMAGE_GIB=30                        # recommended free Docker disk for a
 DECIDER_MAX_TIMEOUT=10200                   # the CLI's token lifetime (3 h) minus its 10-minute margin
 DECIDER_CLI=(python -m dgxmm.admin decider)
 MEMINFO=${DGXMM_MEMINFO:-/proc/meminfo}
+# Host time-zone sources (overridable for tests): see detect_tz.
+TIMEZONE_FILE=${DGXMM_TIMEZONE_FILE:-/etc/timezone}
+LOCALTIME=${DGXMM_LOCALTIME:-/etc/localtime}
+TZ_RE='^[A-Za-z0-9_+-]{1,64}(/[A-Za-z0-9_+-]{1,64}){0,3}$'
 
 usage() {
   cat <<'EOF'
@@ -108,6 +112,8 @@ Environment (all optional; non-interactive, nothing is prompted):
                        running container named litellm-proxy exists, the key is read from it
                        (unless DGXMM uses the bundled LiteLLM; then a set LITELLM_MASTER_KEY
                        also seeds secrets/litellm_bundled_master_key).
+  DGXMM_TZ             IANA time zone for daily/weekly schedules (default: the host's, from timedatectl,
+                       /etc/timezone or the /etc/localtime link; else UTC). Remembered in .env.
   DGXMM_TRUSTED_PROXIES  Comma-separated IPs/CIDRs trusted to set X-Forwarded-For (default
                        127.0.0.1,::1). Behind a reverse proxy, set to the proxy's IP or docker
                        network subnet.
@@ -311,6 +317,23 @@ check_path() {  # check_path NAME VALUE
   esac
 }
 
+# detect_tz: the host's IANA time zone name, else UTC (never fails).
+detect_tz() {
+  local z=""
+  if [ -z "${DGXMM_TIMEZONE_FILE:-}" ] && command -v timedatectl >/dev/null 2>&1; then
+    z=$(timedatectl show -p Timezone --value 2>/dev/null || true)
+  fi
+  if ! [[ $z =~ $TZ_RE ]] && [ -r "$TIMEZONE_FILE" ]; then
+    z=$(head -n 1 "$TIMEZONE_FILE" 2>/dev/null | tr -d '[:space:]')
+  fi
+  if ! [[ $z =~ $TZ_RE ]] && [ -L "$LOCALTIME" ]; then
+    z=$(readlink -f "$LOCALTIME" 2>/dev/null || true)
+    z=${z##*/zoneinfo/}
+  fi
+  [[ $z =~ $TZ_RE ]] || z=UTC
+  printf '%s' "$z"
+}
+
 load_settings() {
   local def_uid def_gid def_dgid
   def_uid=$(id -u)
@@ -328,6 +351,7 @@ load_settings() {
   HF_CACHE=$(expand_tilde "$(resolve DGXMM_HF_CACHE "$FLAG_HF" "$HOST_HOME/.cache/huggingface")")
   MODELS_DIR=$(expand_tilde "$(resolve DGXMM_MODELS_DIR "$FLAG_MODELS" "$HOST_HOME/models")")
   TRUSTED_PROXIES=$(resolve DGXMM_TRUSTED_PROXIES "" "")
+  TZ_NAME=$(resolve DGXMM_TZ "" "$(detect_tz)")
   WITH_LITELLM=$(resolve DGXMM_WITH_LITELLM "$FLAG_WITH_LITELLM" 0)
   WITH_LITELLM=$(bool01 "$WITH_LITELLM") || die "DGXMM_WITH_LITELLM must be 1 or 0 (got '$WITH_LITELLM')"
   LITELLM_PORT=$(resolve DGXMM_LITELLM_PORT "$FLAG_LITELLM_PORT" 4000)
@@ -372,6 +396,7 @@ load_settings() {
   fi
   [[ $BIND =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || die "DGXMM_BIND must be an IPv4 address such as 0.0.0.0 or 127.0.0.1 (got '$BIND')"
   [[ $NETWORK =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] || die "DGXMM_NETWORK is not a valid docker network name (got '$NETWORK')"
+  [[ $TZ_NAME =~ $TZ_RE && $TZ_NAME != *..* ]] || die "DGXMM_TZ must be an IANA time zone such as Europe/Berlin or UTC (got '$TZ_NAME')"
   local n
   for n in DGXMM_UID DGXMM_GID DOCKER_GID; do
     [[ ${!n} =~ ^[0-9]+$ ]] || die "$n must be numeric (got '${!n}')"
@@ -404,6 +429,7 @@ env_value() {  # env_value KEY -> effective value for .env
     COMPOSE_PROFILES) printf '%s' "$COMPOSE_PROFILES_VALUE" ;;
     DGXMM_WITH_DECIDER) printf '%s' "$WITH_DECIDER" ;;
     DGXMM_INSTALL_ID) printf '%s' "$INSTALL_ID" ;;
+    DGXMM_TZ) printf '%s' "$TZ_NAME" ;;
   esac
 }
 
@@ -1234,9 +1260,9 @@ cmd_install() {
     note "admin user: admin   password: $ADMIN_PW"
     note "(shown once; also saved to secrets/admin_password. You must change it at first login.)"
   elif [ -e "$SECRETS_DIR/admin_password" ]; then
-    note "admin password: see secrets/admin_password (if unchanged), or reset it (see docs/operations.md)"
+    note "admin password: see secrets/admin_password (if unchanged), or reset it (see docs/operations/troubleshooting.md)"
   else
-    note "admin password: see secrets/admin_password, or reset it (see docs/operations.md)"
+    note "admin password: see secrets/admin_password, or reset it (see docs/operations/troubleshooting.md)"
   fi
   note "manage: ./install.sh status | logs | upgrade | uninstall"
   proxy_hint
@@ -1418,7 +1444,7 @@ decider_exclusive_blobs() {
   done
   if ((${#own_blobs[@]})); then
     for d in "$hub"/*--*; do
-      [ -d "$d" ] && [ ! -L "$d" ] || continue
+      if [ ! -d "$d" ] || [ -L "$d" ]; then continue; fi
       skip=0
       for x in "$@"; do [ "$d" = "$hub/$x" ] && skip=1; done
       ((skip)) && continue

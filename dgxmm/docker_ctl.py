@@ -402,11 +402,13 @@ class DockerController:
         except docker.errors.NotFound:
             pass
 
-    def logs(self, cid: str | None, tail: int = 200) -> str:
+    def logs(self, cid: str | None, tail: int = 200, since: float | None = None) -> str:
+        """The last ``tail`` lines (``since``: only lines written at or after this Unix time)."""
         if not cid:
             return ""
+        kw = {"tail": tail} if since is None else {"tail": tail, "since": int(since)}
         try:
-            return self.client.containers.get(cid).logs(tail=tail).decode(errors="replace")
+            return self.client.containers.get(cid).logs(**kw).decode(errors="replace")
         except docker.errors.NotFound:
             return ""
 

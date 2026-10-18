@@ -10,7 +10,7 @@ import asyncio
 import logging
 import time
 
-from dgxmm.decider.common import quoted_block, safe_decide, safe_record_rules
+from dgxmm.decider.common import busy_minute, last_span, quoted_block, safe_decide, safe_record_rules
 from dgxmm.decider.protocol import decider_of
 from dgxmm.decider.types import Option
 
@@ -56,10 +56,6 @@ BOOST: dict[str, tuple[set[str], set[str]]] = {
 SEVERITY_BASE = {"warning": 3.0, "suggestion": 2.0, "info": 1.0}
 
 
-def _busy(r: dict) -> bool:
-    return any((r.get(k) or 0) > 0 for k in ("running", "waiting", "gen_tps", "prompt_tps"))
-
-
 def _mean(vals) -> float | None:
     vals = [v for v in vals if v is not None]
     return round(sum(vals) / len(vals), 4) if vals else None
@@ -90,7 +86,7 @@ def summarize(rows: list[dict], live: list[dict] | None = None) -> dict:
     if live:
         last = rows[-1]["ts"] + 60 if rows else 0
         rows += _per_minute([s for s in live if (s.get("ts") or 0) >= last])
-    busy = [r for r in rows if _busy(r)]
+    busy = [r for r in rows if busy_minute(r)]
     n = len(rows)
     prompt, gen = _mean(r.get("prompt_tps") for r in busy), _mean(r.get("gen_tps") for r in busy)
     out = {
@@ -144,7 +140,7 @@ def per_request(s: dict) -> dict:
 
 def rule_label(s: dict, cfg: dict | None = None) -> tuple[str, str] | None:
     if s.get("idle_fraction") is not None and s["idle_fraction"] >= 0.9:
-        return "idle", f"no traffic in {s['idle_fraction']:.0%} of the last {s['minutes']} minutes"
+        return "idle", f"no traffic in {s['idle_fraction']:.0%} of {last_span(s['minutes'], 'minute')}"
     mr, q = s.get("mean_running") or 0, s.get("queued_fraction") or 0
     if mr >= 16 or (mr >= 8 and q >= 0.5):
         return "batch_throughput", f"{mr:.0f} requests running on average, queued {q:.0%} of the busy time"
@@ -240,6 +236,11 @@ class WorkloadService:
             task.add_done_callback(lambda t, d=dep_id: self._inflight.pop(d, None) if self._inflight.get(d) is t
                                    else None)
         return task
+
+    def cached(self, dep_id: int) -> dict | None:
+        """The cached workload, fresh or not; never computes (callers inside insight-engine jobs)."""
+        hit = self._cache.get(dep_id)
+        return hit[1] if hit else None
 
     def peek(self, dep_id: int) -> dict | None:
         """The cached workload (never waits). On a miss, schedules one background computation and returns

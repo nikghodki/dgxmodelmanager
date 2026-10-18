@@ -93,9 +93,71 @@ def safe_record_rules(decider, *, feature: str, subject: str, choice: str, reaso
     return Decision(feature=feature, subject=subject, source="rules", choice=choice, confidence=1.0, reason=reason)
 
 
+async def arecord_rules(decider, **kw) -> Decision:
+    """``safe_record_rules`` in a worker thread (it writes the decision log): for code on the event loop."""
+    import asyncio
+    return await asyncio.to_thread(lambda: safe_record_rules(decider, **kw))
+
+
 def decider_view(ctx) -> dict | None:
     """The decider deployment: the one in settings, else any deployment of the decision engine (e.g. adopted)."""
     view = ctx.decider.deployment() if getattr(ctx, "decider", None) is not None else None
     if view is None and getattr(ctx, "deployer", None) is not None:
         view = next((v for v in ctx.deployer.list_views() if v["engine"] == "decision"), None)
     return view
+
+
+def _num(n) -> str:
+    return f"{int(n):,}" if float(n).is_integer() else f"{n:g}"
+
+
+def plural(n, word: str, many: str | None = None) -> str:
+    """``n`` with the word in the right number: "1 minute", "3 minutes", "2 classes" (``many``)."""
+    return f"{_num(n)} {word if n == 1 else (many or word + 's')}"
+
+
+def last_span(n, unit: str, many: str | None = None) -> str:
+    """A window phrase for insight text: "the last minute", "the last 5 minutes" (``n`` shown rounded)."""
+    if n is None:
+        return f"the last few {many or unit + 's'}"
+    r = round(n)
+    return f"the last {unit}" if r <= 1 else f"the last {plural(r, unit, many)}"
+
+
+BUSY_KEYS = ("running", "waiting", "gen_tps", "prompt_tps")
+GIB = 1024**3
+
+
+def busy_minute(r: dict) -> bool:
+    """A metrics sample or rollup minute with any request activity (running or waiting requests, or tokens
+    processed). The one definition shared by the plan safety filter, workload labels, health triage and the
+    schedule runner / profiles, so they always agree on what "idle" means."""
+    return any((r.get(k) or 0) > 0 for k in BUSY_KEYS)
+
+
+def percentile(vals: list[float], q: float, digits: int = 4) -> float | None:
+    """The ``q`` quantile (0–1) of ``vals`` by linear interpolation between the two closest ranks (the
+    "inclusive" method, numpy's default), rounded to ``digits``; None for no values."""
+    if not vals:
+        return None
+    xs = sorted(vals)
+    k = (len(xs) - 1) * q
+    lo, hi = int(k), min(int(k) + 1, len(xs) - 1)
+    return round(xs[lo] + (xs[hi] - xs[lo]) * (k - lo), digits)
+
+
+def gib(n) -> str:
+    """Bytes as GiB text for insight and state text: "3.0 GiB" (None counts as 0)."""
+    return f"{(n or 0) / GIB:.1f} GiB"
+
+
+def wilson(k: int, n: int, z: float = 1.96) -> tuple[float | None, float | None]:
+    """Wilson score interval (95 % by default) of a proportion k/n; (None, None) for n == 0. Used to judge
+    thresholds from small samples (evaluation harness, threshold tuning)."""
+    if n <= 0:
+        return None, None
+    p = k / n
+    denom = 1 + z * z / n
+    centre = (p + z * z / (2 * n)) / denom
+    half = z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n)) / denom
+    return max(0.0, centre - half), min(1.0, centre + half)

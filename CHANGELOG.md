@@ -3,7 +3,141 @@
 All notable changes to DGXMM are documented in this file. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). DGXMM does not publish tagged releases yet
 (the package version is `0.1.0`), so each section below is identified by its date. Upgrade notes for existing installs are in
-[operations](docs/operations.md#upgrading-an-existing-install).
+[upgrade](docs/getting-started/upgrade.md#upgrading-an-existing-install).
+
+## [2026-10-18] — Advanced decision-model features
+
+Eleven more advisory features of the decision model (16 in all), an Insights feed with a background job engine,
+deploy-time advice in the wizard and catalog, user-owned sleep/wake schedules and natural-language commands in
+the ⌘K palette. Rules run first and every feature fails open, as before; nothing changes without an admin's
+confirmation, except schedules an admin created.
+
+### Added
+
+- **Insights** (Operate → Insights, a count in the top bar and an Insights card on each deployment's Overview):
+  findings from DGXMM's background checks, each with a templated explanation, its source (Rules or AI with the
+  confidence) and an action that opens the normal dialog (Reconfigure, set a threshold, show a snippet, review a
+  schedule, open a page). Admins can dismiss them or snooze them for 1 hour to 1 week. See
+  [insights](docs/user-guide/insights.md).
+- **Background job engine**: health checks every 5 minutes, reading labels, nightly traffic profiles and schedule
+  proposals, daily routing advice, weekly threshold tuning and the schedule runner every minute. Model questions
+  of these jobs have a per-run budget and queue behind interactive questions; a job that fails three times in a
+  row raises one "degraded" insight. Their status is on the Decision model page (**Background jobs**).
+- **Health triage** of ready deployments: KV-cache pressure, preemption storms, throughput drops, rising server
+  errors and clients sending bad requests, with a suggested reconfigure fix where one fits the free memory.
+- **Deploy-time advice** in the wizard: a goal (chat, agents and tool use, batch throughput, long context) with
+  suggested configurations sized by the memory calculator (Fill sets only fields you have not changed), an engine
+  suggestion next to the engine selector, a new **Speculative decoding** field with a suggested draft model from
+  your disk, and a compatibility summary for models that are not downloaded yet.
+- **Compatibility check** before a download (catalog details and the download dialog): whether vLLM and
+  llama.cpp can run a Hugging Face repo here, and what it needs (trust_remote_code, an HF token, a chat template).
+  It reads a few small files from the Hub (64 KiB each), never writes to the HF cache and caches results 7 days.
+- **Remote-code check**: when trust_remote_code would be turned on for a model with custom code, the snapshot's
+  Python files are scanned statically in an isolated, resource-limited process (never imported) and findings are
+  listed with file and line. Findings only add warnings; a clean scan is shown as "no suspicious patterns found
+  (static scan only)".
+- **⌘K Ask**: text that matches no palette entry can be interpreted into navigation, start, stop, sleep, wake,
+  restart, opening the deploy wizard or Reconfigure prefilled, or freeing N GiB with a plan. Every interpretation
+  opens the normal confirmation; removing deployments, deleting weights and user administration are refused.
+  Viewers get navigation only.
+- **Sleep/wake schedules**: a **Schedules** card on the deployment page (add, edit, pause, delete), proposals from
+  the traffic of the last 30 days (at least 7 days needed), and **Pause all schedules** on the Decision model
+  page. A schedule never sleeps or stops a deployment that is serving requests, never stops anything else to make
+  room, runs each time at most once a day and is audited as `schedule:<id>`. Schedules keep running when the
+  schedule feature or the decision model is switched off; only Pause all (or pausing a schedule) stops them.
+- **Reading labels** for benchmark levels and start-up memory measurements (plausible, contended, cold cache,
+  broken): only plausible readings feed calibration and benchmark advice, and a broken one raises an insight.
+  Badges on the Benchmarks tab.
+- **Threshold tuning** (rules only): once a week, a feature with enough rated answers in the last 30 days gets a
+  proposal for the lowest threshold whose precision (Wilson 95 % lower bound) reaches the target, with the
+  evidence table. **Set threshold** applies it.
+- **LiteLLM routing advice**: per traffic class (code, chat, tool use, long context, vision, batch) a suggested
+  deployment and a copyable `router_settings.model_group_alias` snippet (`dgxmm-<class>` aliases) on the LiteLLM
+  page and as an insight. DGXMM never changes LiteLLM itself.
+- The Decision model page lists all 16 features with a switch and threshold each (threshold tuning, which asks
+  no model, shows "Rules only — no threshold"), and the background jobs with their last result and next run.
+- The installer detects the host's time zone and writes `DGXMM_TZ` to `.env`; daily and weekly jobs and schedules
+  use it.
+- New tables (`insights`, `deployment_schedules`, `traffic_profiles`, `compat_cache`) and the settings
+  `decider_feedback_retention_days` (180) and `schedules.paused_all`.
+- `SECURITY.md` (private vulnerability reporting, supported versions, scope), issue forms for bug reports and
+  feature requests, and a pull request checklist.
+- CI: a shellcheck job (pinned `koalaman/shellcheck:v0.11.0`) for the installer, its test stubs and the scripts;
+  README badge for the tests workflow.
+- Documentation site at <https://nikghodki.github.io/dgxmodelmanager/> (MkDocs Material, built from `docs/` and
+  published by `.github/workflows/pages.yml`; pull requests build it with `mkdocs build --strict`). The pages were
+  reorganised into getting started, user guide, architecture (with new request-flow, decision pipeline, insight
+  lifecycle and schedule-runner diagrams), configuration, operations, security and evaluation; the decision model
+  page's **Docs** link opens the site.
+
+### Changed
+
+- The default llama.cpp image is pinned by digest (`ghcr.io/ggml-org/llama.cpp@sha256:e4cfff28…`, build
+  b11669), like the vLLM image. DGXMM's own base images (`node:22-bookworm-slim`,
+  `python:3.12-slim-bookworm`) and the bundled LiteLLM's Postgres (`postgres:16.15-trixie`) are pinned by
+  digest as well. Existing `config.yaml` files keep their image settings (see
+  [upgrading](docs/getting-started/upgrade.md#upgrading-an-existing-install)).
+- Who stopped a deployment is now recorded as a structured field of the stop event. A deployment that a schedule
+  stopped before this upgrade is therefore not woken by that schedule afterwards: start it once by hand.
+- Routing advice refreshes once deployment changes and the LiteLLM registrations they cause have settled (15 s,
+  at most 60 s after the first change), so a burst of changes is one run.
+- Chart legends use the muted text colour, so they are readable in the light theme too.
+- Insight texts keep their structure: bulleted lists and the threshold-tuning evidence table are shown as a list
+  and a table, other paragraphs keep their line breaks. Counts and time windows are pluralised ("1 request",
+  "the last minute", "the same 3 windows").
+- The code-scan summary counts the files with findings and the files scanned separately ("2 findings in 1 file
+  (14 files scanned)").
+- CI actions moved to their Node 24 releases and to `ubuntu-24.04` runners.
+- README: requirements (network, disk, ports), supported hardware, dry run, security reporting and
+  contributing. Operations: upgrading by hand, and moving a clone from before the history rewrites.
+
+### Fixed
+
+- Two DGXMM processes opening a new database at the same moment (the app and an admin command, or the
+  test suite on a busy machine) could fail with "database is locked" while switching it to WAL; the
+  switch is now retried for up to 5 seconds.
+- `install.sh` is clean under shellcheck 0.9 as well (SC2015), the version on Ubuntu 24.04 runners.
+- A new deployment could get the id of a removed one (SQLite reuses the highest row id) and show its
+  benchmark runs, reading labels, rollups and insights. Deployment ids are now never reused: on the first start
+  after the upgrade a one-time migration rebuilds the `deployments` table and starts the id sequence above every
+  id still referenced. Benchmark results stay per model and configuration, as before.
+- Health triage: a flood of client HTTP 4xx answers on a sleep-mode vLLM (which logs an error echo per
+  rejected request) is reported as clients sending bad requests only, no longer also as rising server errors.
+
+### Security
+
+- Remote-code scan: rules for code objects built by hand, object-graph walks, asyncio / multiprocessing / fork
+  process APIs, native code loaded at run time, code fetched from the Hub or from other repositories at run time,
+  loaders given a file path, aliased and from-imported calls, `trust_remote_code=True` with a literal repo id,
+  `torch.hub.load` and pip installs, and more unpickling paths (`pandas.read_pickle`, `np.load` with
+  `allow_pickle`). The decision model can
+  only add a warning, never report code as safe. One scan runs at a time; failed scans are remembered briefly. The
+  scan is static only and has blind spots, listed in [security](docs/security.md#deploy-time-advice-hub-fetches-and-the-code-scanner).
+- ⌘K: the rules' matching is bounded and runs off the event loop; a timed-out interpretation answers with the
+  rules result instead of starting over. Unsafe free-memory plans must be acknowledged against the reason shown;
+  if the reason changed meanwhile, the request is refused with the new one.
+- Decision log: rules-only answers to viewers are not logged; rows with feedback are exempt from the row cap and
+  kept 180 days (`decider_feedback_retention_days`, never fewer than `decider_retention_days`), so viewers'
+  requests cannot push rated rows out of the log.
+- Hub access: viewers' compatibility checks, catalog search and catalog details (`GET /api/catalog/search`,
+  `GET /api/catalog/details`) read the Hub anonymously, never with the configured HF token, so a viewer neither
+  sees the token owner's private repos nor probes gated access with it; private repos are never cached; Hub redirects go only to Hub
+  hosts over https (at most 3); every Hub API call has a timeout (20 s per connect/read), on its own thread pool.
+- Insight actions that would change the model or turn on trust_remote_code are rejected by the server and the
+  client; deleting a deployment's schedules with it is audited; viewers do not see who created a schedule.
+  `docs/security.md` covers the job engine, insights, the schedule runner, ⌘K and the new rate limits.
+
+### Upgrade notes
+
+- `./install.sh upgrade` migrates the database once at the first start: the new tables, then the rebuild of the
+  `deployments` table (one transaction, foreign keys checked before and after). Rolling back with
+  `git checkout <previous commit> && ./install.sh` keeps working on the migrated database (older code ignores
+  the new tables). See [upgrading an existing install](docs/getting-started/upgrade.md#upgrading-an-existing-install).
+- The background jobs start with the upgrade. With the decision model disabled they run their rules only and
+  ask nothing; schedules exist only once an admin creates one.
+- Re-run `./install.sh` once so `.env` gets `DGXMM_TZ`; without it, DGXMM uses `TZ`, `/etc/localtime`, else UTC.
+- The repository history was rewritten again on 2026-10-18 (see
+  [the history rewrite](docs/getting-started/upgrade.md#clones-from-before-the-2026-10-18-history-rewrite)).
 
 ## [2026-10-17] — Decision model
 
@@ -17,7 +151,7 @@ download cancellation and out-of-memory reporting.
   pinned revision `97dd054d`; `vllm-sr/d3-nano` selectable) that answers typed questions with
   calibrated probabilities. Rules first, the model second, abstain below a per-feature threshold,
   advisory only, fail open: when it is off, unhealthy, slow or wrong, every feature behaves as with its
-  rules alone. See [usage](docs/usage.md#decision-model).
+  rules alone. See [usage](docs/user-guide/decision-model.md).
 - **Failure diagnosis**: when a deployment fails, rules (14 causes, such as GPU out of memory, KV cache
   too small, context longer than the model supports, gated repo, bad parser flag, port in use, disk full,
   and the decider's own integrity and key refusals) or the model explain why, with a fix hint and, where
@@ -75,8 +209,8 @@ download cancellation and out-of-memory reporting.
   `GET /api/deployments/{id}/workload`; plan options gain `recommended`, `recommendation` and
   `unsafe_reason`; inventory artifacts gain `kind_source` and `kind_confidence`; advice items gain
   `relevance` and `workload_fit`; deployment views gain `system` and `startup_queue`.
-- Documentation: the decision model in [usage](docs/usage.md#decision-model), its settings in
-  [configuration](docs/configuration.md#decision-model-decider), a [threat model](docs/security.md) and
+- Documentation: the decision model in [usage](docs/user-guide/decision-model.md), its settings in
+  [configuration](docs/configuration/index.md#decision-model-decider), a [threat model](docs/security.md) and
   an [evaluation on real data](docs/decider-evaluation.md) (real failure logs, 140 real model repos, real
   traffic, performance under load), with the corpora as regression fixtures under `tests/fixtures/`.
 
@@ -144,7 +278,7 @@ download cancellation and out-of-memory reporting.
 - `./install.sh upgrade` migrates `data/dgxmm.sqlite3` in place at start (new tables and columns, then
   versioned migrations). Rolling back to the previous release keeps working; disable and remove the
   decision model first if you enabled it. See
-  [upgrading an existing install](docs/operations.md#upgrading-an-existing-install).
+  [upgrading an existing install](docs/getting-started/upgrade.md#upgrading-an-existing-install).
 - The decision model stays off until you enable it on the Decision model page or with
   `./install.sh --with-decider`. It needs about 13 GiB of free memory (9 GiB for d3-nano), about 21 GB
   of Docker disk for its image's base and 8.5 GiB in the HF cache for d3-mini.
@@ -152,7 +286,7 @@ download cancellation and out-of-memory reporting.
   the old behaviour (not recommended on unified memory).
 - Backups: the decider's settings, the decision log and diagnoses are in `data/dgxmm.sqlite3`, its key
   in `data/secrets/decider_api_key`; the model snapshot and image are re-created with
-  `decider download` / `decider build` (see [backup and restore](docs/operations.md#backup-and-restore)).
+  `decider download` / `decider build` (see [backup and restore](docs/operations/backup.md)).
 
 ## [2026-10-16]
 

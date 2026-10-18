@@ -20,6 +20,8 @@ services:
       DGXMM_HOST_HOME: "${DGXMM_HOST_HOME:?set DGXMM_HOST_HOME in .env (run ./install.sh)}"
       DGXMM_TRUSTED_PROXIES: "${DGXMM_TRUSTED_PROXIES:-}"  # empty → config.yaml/default
       DGXMM_INSTALL_ID: "${DGXMM_INSTALL_ID:-}"  # labels this install's images/containers (dgxmm.install)
+      DGXMM_TZ: "${DGXMM_TZ:-}"   # the host's time zone (install.sh detects it): daily/weekly schedules
+      TZ: "${DGXMM_TZ:-UTC}"      # same zone for the container's local time (logs)
       NVIDIA_VISIBLE_DEVICES: all
       NVIDIA_DRIVER_CAPABILITIES: utility
     ports:
@@ -44,7 +46,9 @@ services:
 
   dgxmm-litellm-db:
     profiles: [litellm]
-    image: postgres:16
+    # Postgres 16.15 (what postgres:16 resolved to when pinned; multi-arch index). Stay on major 16: the data
+    # directory data/litellm-db is tied to it.
+    image: postgres:16.15-trixie@sha256:ca0bd484cb98bf4b24eb1010e73fb3fcbd6714d240fbc1a10eea5b7dbecb641d
     restart: unless-stopped
     # Runs as the DGXMM user so data/litellm-db stays owned by it (install.sh creates it, mode 700).
     user: "${DGXMM_UID:?set DGXMM_UID in .env (run ./install.sh)}:${DGXMM_GID:?set DGXMM_GID in .env (run ./install.sh)}"

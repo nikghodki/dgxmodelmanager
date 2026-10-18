@@ -1,3 +1,7 @@
+---
+description: "Every DGXMM setting with its default: config.yaml, environment overrides, .env and installer variables, and secrets."
+---
+
 # Configuration
 
 DGXMM reads its settings from three places:
@@ -15,24 +19,9 @@ start, and `./install.sh` does not recreate an unchanged container, so after edi
 `docker restart dgxmm`. Engine containers keep running either way.
 
 A few settings can also be changed at runtime in the UI. They are stored in DGXMM's database and win
-over `config.yaml`: the [LiteLLM connection](#runtime-settings-and-precedence) (URLs, master key,
-on/off) and the [decision model](#decision-model-runtime-settings) (on/off, model, per-feature switches
-and thresholds). They apply immediately, without a restart.
-
-- [config.yaml reference](#configyaml-reference)
-- [Environment variable overrides](#environment-variable-overrides)
-- [.env and installer variables](#env-and-installer-variables)
-- [Secrets](#secrets)
-- [Model directories](#model-directories)
-- [Engine images](#engine-images)
-- [Networking](#networking)
-- [Reverse proxy](#reverse-proxy)
-- [LiteLLM integration](#litellm-integration)
-- [Bundled LiteLLM](#bundled-litellm)
-- [Hugging Face token](#hugging-face-token)
-- [Tuning the memory budget](#tuning-the-memory-budget)
-- [Decision model runtime settings](#decision-model-runtime-settings)
-- [API limits](#api-limits)
+over `config.yaml`: the [LiteLLM connection](litellm.md#runtime-settings-and-precedence) (URLs, master key,
+on/off) and the [decision model](decision-model.md#decision-model-runtime-settings) (on/off, model, per-feature switches
+and thresholds, and **Pause all schedules**). They apply immediately, without a restart.
 
 ## config.yaml reference
 
@@ -57,7 +46,7 @@ the container.
 | Key | Type | Default | Meaning |
 |---|---|---|---|
 | `images.vllm` | string | `vllm/vllm-openai@sha256:22d3b121…352c8` | vLLM image (public multi-arch image, pinned by digest). |
-| `images.llamacpp` | string | `ghcr.io/ggml-org/llama.cpp:server-cuda` | llama.cpp server image. |
+| `images.llamacpp` | string | `ghcr.io/ggml-org/llama.cpp@sha256:e4cfff28…c2b5` | llama.cpp server image (build b11669, multi-arch, pinned by digest). |
 | `docker_network` | string | `dgxmm` | Docker network that engine containers join. **Must equal `DGXMM_NETWORK` in `.env`.** |
 | `port_range` | `[low, high]` | `[8100, 8199]` | Host ports handed to engine containers (1024–65535, ascending). Ports used by other containers are skipped. |
 | `publish_bind` | string | `127.0.0.1` | Host address that engine ports are published on. Keep it on loopback: clients should go through LiteLLM or the Docker network. |
@@ -74,10 +63,10 @@ the container.
 
 Whether the decider runs, which model it runs and the per-feature switches and thresholds are not in
 `config.yaml`: they are set on the **Decision model** page and stored in the database (see
-[decision model runtime settings](#decision-model-runtime-settings)). The model is `vllm-sr/d3-mini`
+[decision model runtime settings](decision-model.md#decision-model-runtime-settings)). The model is `vllm-sr/d3-mini`
 (default, 13 GiB reserved) or `vllm-sr/d3-nano` (9 GiB), both pinned to a revision whose files are
-checked against hashes built into the decider image. Using it: [usage](usage.md#decision-model);
-measurements: [decider-evaluation.md](decider-evaluation.md). The keys below tune its container,
+checked against hashes built into the decider image. Using it: [usage](../user-guide/decision-model.md);
+measurements: [decider-evaluation.md](../decider-evaluation.md). The keys below tune its container,
 supervision and data retention; the defaults fit a DGX Spark.
 
 | Key | Type | Default | Meaning |
@@ -101,7 +90,8 @@ supervision and data retention; the defaults fit a DGX Spark.
 | `decider_max_restarts_per_hour` | int | `5` | After this many automatic restart attempts in an hour (failed ones included) the supervisor gives up until the decider is enabled again (**Retry** on the Decision model page). |
 | `decider_stable_s` | float | `600` | Healthy this long after a restart resets the backoff. |
 | `decider_retention_days` | int ≥ 1 | `30` | Decision-log rows (`decisions`) older than this are deleted (once a minute, by the metrics loop). |
-| `decider_max_rows` | int ≥ 1000 | `50000` | At most this many of the newest decision-log rows are kept. Diagnoses keep the latest 20 per deployment and are deleted with it. |
+| `decider_max_rows` | int ≥ 1000 | `50000` | At most this many of the newest decision-log rows are kept (rows with feedback excepted). Diagnoses keep the latest 20 per deployment and are deleted with it. |
+| `decider_feedback_retention_days` | int ≥ 1 | `180` | Decision-log rows with feedback (what threshold tuning learns from) are never removed by the row cap or the `decider_retention_days` rule; they are deleted after this many days. A value below `decider_retention_days` is treated as `decider_retention_days`. |
 | `decider_overuse_margin_gib` | float ≥ 0 | `2` | The memory watchdog stops the decider when its measured memory exceeds its 13 GiB reservation by more than this in two budget samples in a row. |
 
 Automatic restarts happen only for a decider that crashed, hangs or was stopped by the memory watchdog while
@@ -117,7 +107,10 @@ the alert, also for the decider. If stopping the decider fails, it is skipped an
 
 Each feature waits a fixed time for an answer before it falls back to its rules (not configurable): failure
 diagnosis 10 s (in the background), parser suggestions 4 s per question, plan recommendation 2 s, model kind and
-workload 2 s (in the background). Plan rankings are cached for 2 minutes and workload labels for 15 minutes.
+workload 2 s (in the background); config advice, draft pairing, engine choice, the compatibility check and the
+remote-code check 4 s; ⌘K commands 3 s per question and 8 s for the whole interpretation; health triage, reading
+labels, routing advice and schedule proposals 10 s (in the background). Plan rankings are cached for 2 minutes and
+workload labels for 15 minutes.
 
 ### Models and storage
 
@@ -125,9 +118,9 @@ workload 2 s (in the background). Plan rankings are cached for 2 minutes and wor
 |---|---|---|---|
 | `hf_cache.host` | path | `~/.cache/huggingface` | Hugging Face cache on the host (mounted into engines). |
 | `hf_cache.local` | path | `/data/hf` | The same directory inside the `dgxmm` container (set by `docker-compose.yaml`). |
-| `gguf_roots` | list of `{host, local}` | `[{host: ~/models, local: /data/gguf/0}]` | Directories scanned for `.gguf` files. See [Model directories](#model-directories). |
+| `gguf_roots` | list of `{host, local}` | `[{host: ~/models, local: /data/gguf/0}]` | Directories scanned for `.gguf` files. See [Model directories](models-and-engines.md#model-directories). |
 | `min_free_disk_gib` | float | `50` | Downloads are refused when they would leave less than this free on the HF cache disk. |
-| `helper_image` | string or null | `null` | Image of the short-lived helper container that [deletes weights](architecture.md#deleting-weights) as root. `null`: the image of the running `dgxmm` container, else `dgxmm:latest`. It is never pulled; if it is missing, DGXMM deletes in-process. |
+| `helper_image` | string or null | `null` | Image of the short-lived helper container that [deletes weights](../architecture/storage.md#deleting-weights) as root. `null`: the image of the running `dgxmm` container, else `dgxmm:latest`. It is never pulled; if it is missing, DGXMM deletes in-process. |
 | `helper_timeout_s` | float | `120` | Seconds a delete helper may run before it is killed. |
 
 ### LiteLLM and secrets
@@ -146,6 +139,7 @@ workload 2 s (in the background). Plan rankings are cached for 2 minutes and wor
 | `base_path` | string | `/dgxmm` | URL prefix of the UI and API. The frontend is built for `/dgxmm`, so leave this alone. |
 | `session_ttl_s` | int | `43200` (12 h) | Login session lifetime. It is extended on every request. |
 | `secure_cookies` | `auto` / `always` / `never` | `auto` | `auto`: the cookie is `Secure` when the request is HTTPS (directly or via `X-Forwarded-Proto`). Use `always` behind an HTTPS proxy. |
+| `tz` | IANA zone or null | `null` | Time zone of daily/weekly schedules (background insight jobs, sleep/wake schedules), e.g. `Europe/Berlin`. Set from `DGXMM_TZ` in `.env`, which the installer detects from the host. `null`: `$TZ`, then `/etc/localtime`, then UTC. Across DST changes a time that does not exist runs just after the gap (02:30 becomes 03:30), and a time that occurs twice runs once, at its first occurrence. |
 | `trusted_proxies` | comma-separated IPs/CIDRs (or a YAML list) | `127.0.0.1,::1` | IPs/subnets trusted to set `X-Forwarded-For` (for correct client IPs in logs and rate limiting). Default is loopback-only; an empty value means the default. Set it to your proxy's IP or Docker network subnet, for example `172.18.0.0/16`. `*` trusts every client (logged as a warning; not recommended). Invalid entries stop DGXMM from starting. Peers on the decider's internal network (`decider_network`) are never trusted, even when a range here covers them. `DGXMM_TRUSTED_PROXIES` in `.env` overrides it. |
 
 ### Polling intervals
@@ -213,10 +207,11 @@ from an older `.env` are appended.
 | `DGXMM_HF_CACHE` | `--hf-cache` / `DGXMM_HF_CACHE` | `$HOME/.cache/huggingface` | HF cache, mounted at `/data/hf`. |
 | `DGXMM_MODELS_DIR` | `--models-dir` / `DGXMM_MODELS_DIR` | `$HOME/models` | GGUF directory, mounted at `/data/gguf/0`. |
 | `DGXMM_HOST_HOME` | `DGXMM_HOST_HOME` | `$HOME` | Home directory that `~` in `config.yaml` expands to. |
-| `DGXMM_WITH_LITELLM` | `--with-litellm` / `DGXMM_WITH_LITELLM=1` | `0` (key not written) | Run the [bundled LiteLLM](#bundled-litellm). Written only when enabled; set `0` to turn it off. |
+| `DGXMM_WITH_LITELLM` | `--with-litellm` / `DGXMM_WITH_LITELLM=1` | `0` (key not written) | Run the [bundled LiteLLM](litellm.md#bundled-litellm). Written only when enabled; set `0` to turn it off. |
 | `DGXMM_LITELLM_PORT` | `--litellm-port` / `DGXMM_LITELLM_PORT` | `4000` | Host port of the bundled LiteLLM, bound to `DGXMM_BIND`. |
-| `DGXMM_WITH_DECIDER` | `--with-decider` / `DGXMM_WITH_DECIDER=1` | `0` (key not written) | Set up the [decision model](operations.md#decision-model) on every install/upgrade: build its image, download and verify its model snapshot, enable it and wait until it is healthy. Written only when enabled. Set `0` so the installer stops re-enabling it (disabling it is done in the UI or with the admin CLI). |
+| `DGXMM_WITH_DECIDER` | `--with-decider` / `DGXMM_WITH_DECIDER=1` | `0` (key not written) | Set up the [decision model](../operations/decision-model.md) on every install/upgrade: build its image, download and verify its model snapshot, enable it and wait until it is healthy. Written only when enabled. Set `0` so the installer stops re-enabling it (disabling it is done in the UI or with the admin CLI). |
 | `DGXMM_INSTALL_ID` | (generated once) | 12 random letters/digits | Labels the containers DGXMM creates and the images it builds (`dgxmm.install`), so `uninstall` removes only this install's decider container and image. |
+| `DGXMM_TZ` | `DGXMM_TZ` | the host's zone (`timedatectl`, `/etc/timezone`, or the `/etc/localtime` link), else `UTC` | Passed to the container as [`tz`](#web-ui-and-sessions) and `TZ`: the zone of daily/weekly schedules. Must be an IANA name such as `Europe/Berlin`. |
 | `DGXMM_TRUSTED_PROXIES` | `DGXMM_TRUSTED_PROXIES` | empty | Passed to the container as an override of [`trusted_proxies`](#web-ui-and-sessions). Empty means `config.yaml` (or the loopback default) applies. |
 | `COMPOSE_PROFILES` | (written with `DGXMM_WITH_LITELLM=1`) | `litellm` | Makes a plain `docker compose up -d` start the bundled LiteLLM too. A stray shell value is never adopted. |
 
@@ -263,304 +258,9 @@ The HF token is read when DGXMM starts: after you change it, restart DGXMM with 
 The LiteLLM master key file is read each time DGXMM talks to LiteLLM, so a key written in place (for
 example with `printf … > secrets/litellm_master_key`) applies without a restart; an editor that
 replaces the file needs `docker restart dgxmm`. A master key entered on the LiteLLM page is stored in DGXMM's database (`data/`) instead and
-wins over the file (see [runtime settings](#runtime-settings-and-precedence)).
+wins over the file (see [runtime settings](litellm.md#runtime-settings-and-precedence)).
 
-## Model directories
+## Next steps
 
-- **Hugging Face models (vLLM)** live in the HF cache (`DGXMM_HF_CACHE`). DGXMM lists complete snapshots
-  and downloads into that cache. Models you fetch with `huggingface-cli download` show up too, after the
-  next rescan.
-- **GGUF files (llama.cpp)** are found under every `gguf_roots` entry, and also inside the HF cache.
-
-To add another GGUF directory, for example `/data/more-gguf`:
-
-1. Add it to `config.yaml`. `local` must be a new path inside the container:
-
-   ```yaml
-   gguf_roots:
-     - host: /home/me/models        # keep the existing entry
-       local: /data/gguf/0
-     - host: /data/more-gguf
-       local: /data/gguf/1
-   ```
-
-2. Mount it into the `dgxmm` container with a `docker-compose.override.yaml` in the checkout:
-
-   ```yaml
-   services:
-     dgxmm:
-       volumes:
-         - /data/more-gguf:/data/gguf/1
-   ```
-
-3. Run `./install.sh`. llama.cpp containers mount each root read-only at `/models/<index>`.
-
-`docker-compose.override.yaml` is not tracked by git. To keep it out of `git status`, add it to
-`.git/info/exclude`.
-
-## Engine images
-
-The default vLLM image is pinned by digest, so upgrades of DGXMM do not silently change it. The
-llama.cpp image uses the moving `server-cuda` tag. To pin or change either, set `images` in
-`config.yaml`:
-
-```yaml
-images:
-  vllm: vllm/vllm-openai:<tag>             # any tag or digest published for your CPU architecture
-  llamacpp: ghcr.io/ggml-org/llama.cpp@sha256:<digest>
-```
-
-Images are pulled on first use, and the first vLLM image is pulled in the background when DGXMM first
-starts. Pre-pull with `DGXMM_PULL_ENGINES=1 ./install.sh` or `docker pull <image>`. DGXMM caches the
-list of model architectures each vLLM image supports in `data/`, keyed by image reference, so a new
-image is inspected once.
-
-## Networking
-
-- **UI port**: `DGXMM_BIND:DGXMM_PORT` on the host (default `0.0.0.0:8090`) maps to port 8090 in the
-  container. Change it in `.env` and re-run `./install.sh`.
-- **URL path**: the UI and API are served under `/dgxmm/` (`/` redirects there). The prefix is built
-  into the frontend, so a reverse proxy must forward `/dgxmm/` unchanged. Do not strip the prefix.
-  Serving DGXMM under another path is not supported.
-- **Docker network**: DGXMM and every engine join `DGXMM_NETWORK` (`docker_network`). Containers on the
-  same network (LiteLLM, your proxy, other apps) can reach an engine at `http://dgxmm-<name>:<port>/v1`.
-- **Engine ports** are also published at `publish_bind:<port>` (default `127.0.0.1`, ports 8100–8199),
-  so tools on the host can call `http://127.0.0.1:<port>/v1`.
-
-## Reverse proxy
-
-For HTTPS or internet-facing access, bind DGXMM to loopback and put a proxy in front:
-
-```bash
-DGXMM_BIND=127.0.0.1 ./install.sh
-```
-
-Set `secure_cookies: always` in `config.yaml` when the proxy terminates HTTPS. The proxy must disable
-response buffering for the event stream, allow long-lived connections, and pass `X-Forwarded-Proto`.
-
-Set [`trusted_proxies`](#web-ui-and-sessions) (or `DGXMM_TRUSTED_PROXIES` in `.env`) to the address
-DGXMM sees the proxy connect from, otherwise its `X-Forwarded-For` header is ignored:
-
-- **Proxy container on the DGXMM network**: the proxy container's IP or the network's subnet, for
-  example `DGXMM_TRUSTED_PROXIES=172.18.0.0/16`.
-- **Proxy on the host** (through the published port): the DGXMM network's gateway IP, from
-  `docker network inspect <network> -f '{{(index .IPAM.Config 0).Gateway}}'`. A loopback install
-  prints this hint at the end.
-
-**nginx in a Docker container on the DGXMM network**: the shipped `deploy/nginx-dgxmm.conf`. It
-resolves `dgxmm` through Docker's DNS, so nginx still starts while DGXMM is down. Install with
-`DGXMM_NETWORK=<your proxy's network>` (or `docker network connect <network> <nginx-container>`) and include
-it in your `server { }` block:
-
-```nginx
-    # DGX Model Manager. Variable upstream + Docker DNS so nginx still starts when dgxmm is down.
-    location /dgxmm/ {
-        resolver 127.0.0.11 valid=10s ipv6=off;
-        set $dgxmm_upstream http://dgxmm:8090;
-        proxy_pass $dgxmm_upstream;
-        proxy_http_version 1.1;
-        proxy_set_header Host $host;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_buffering off;          # SSE
-        proxy_read_timeout 1h;
-        client_max_body_size 1m;
-    }
-```
-
-**nginx on the host**: use the same block with `proxy_pass http://127.0.0.1:8090;` and without the
-`resolver` and `set` lines. Set `trusted_proxies` to the gateway IP.
-
-**Caddy on the host** (it gets certificates automatically):
-
-```caddy
-dgx.example.com {
-    redir / /dgxmm/
-    handle /dgxmm/* {
-        reverse_proxy 127.0.0.1:8090 {
-            flush_interval -1
-        }
-    }
-}
-```
-
-Use `handle`, not `handle_path`: the `/dgxmm` prefix must reach DGXMM.
-
-## LiteLLM integration
-
-DGXMM registers every `ready` deployment with a [LiteLLM](https://docs.litellm.ai/) proxy and removes
-it again when the deployment stops or sleeps. Each deployment is registered **once**, under its
-**model name** (the **Model name (LiteLLM)** set in the deploy wizard or on the deployment's LiteLLM tab,
-else the served name), with `model: openai/<served name>`, `api_base: http://dgxmm-<name>:<port>/v1`
-and `model_info.dgxmm_id` set to the deployment id. Clients therefore use one endpoint,
-`<public URL>/v1`, and pick the deployment with `"model"`. Models in LiteLLM without a `dgxmm_id` are
-never changed.
-
-Model names are unique. DGXMM refuses a deploy, start, wake or rename (`409 model_name_taken`, naming
-the deployment that holds it) when the name is another deployment's model name, or another running
-deployment's served name. Two deployments of the same model therefore need different model names.
-
-Requirements:
-
-1. LiteLLM stores models in its database: `general_settings: { store_model_in_db: true }` with a
-   configured database. Virtual keys need that database too.
-2. DGXMM has the master key: on the LiteLLM page, or in `secrets/litellm_master_key`. If you install
-   with no key file and a container named `litellm-proxy` is running, the installer reads the key from
-   that container. Otherwise pass `LITELLM_MASTER_KEY=…`, write the file yourself, or enter the key on
-   the LiteLLM page.
-3. DGXMM can reach the internal URL (default `http://litellm-proxy:4000`, so a container named
-   `litellm-proxy` on the DGXMM network).
-4. LiteLLM can reach the engines: put it on the same Docker network
-   (`docker network connect dgxmm litellm-proxy`), or install DGXMM with `DGXMM_NETWORK=<LiteLLM's
-   network>`.
-
-Example for a fresh install next to an existing LiteLLM on network `ai`:
-
-```bash
-DGXMM_NETWORK=ai LITELLM_URL=http://litellm-proxy:4000 ./install.sh
-```
-
-Then open **Integrations > LiteLLM**, set the **Public endpoint URL** your clients use, and press **Test
-connection**.
-
-Each deployment's LiteLLM status is `synced`, `pending` (the last sync failed and DGXMM retries; see
-[troubleshooting](operations.md#litellm-status-stays-pending)), `error` (not registered because another
-deployment holds its model name), `disabled` (integration off or no master key) or `none` (not ready).
-For `pending` and `error`, the deployment's LiteLLM tab and the Deployments table tooltip give the
-exact reason. Switching models moves the model name to the new deployment, so clients keep working.
-
-**Upgrading from an older DGXMM:** older versions registered a deployment twice when it had an alias
-(once under the served name, once under the alias). The first sync after the upgrade removes the
-served-name entry and keeps the alias. Clients that called the served name of an aliased deployment
-must switch to the alias.
-
-### Runtime settings and precedence
-
-The LiteLLM page stores these in DGXMM's database (table `app_settings`). DGXMM reads them each time it
-talks to LiteLLM, so changes apply immediately:
-
-| Setting | Default when not set on the page | Notes |
-|---|---|---|
-| Internal URL | `litellm_url` | Where DGXMM sends its API calls. Setting it back to the `litellm_url` value removes the override. |
-| Public endpoint URL | `litellm_public_url` (empty) | Only shown to users and in snippets; DGXMM never calls it. Clearing it on the page keeps it empty, even when `litellm_public_url` is set. |
-| Master key | the file in `litellm_key_file` | Write-only. Never returned by the API, never logged, never written to the audit log. |
-| Integration enabled | on when a master key is available | Turning it off stops registering; existing registrations stay in LiteLLM. |
-
-Precedence is always: value saved on the page > `config.yaml` (or `DGXMM_*` variable) > built-in
-default.
-
-The master key is bound to a URL, so it can never be sent to a server it was not meant for:
-
-- a key entered on the page is used only with the internal URL that was in effect when it was saved;
-- the key from `secrets/litellm_master_key` is used only with the default `litellm_url`.
-
-If you change the internal URL, no key applies until you enter the master key for the new URL; the
-page says so. Changing the URL back makes the earlier key usable again. Registrations on the previous
-LiteLLM are not removed when you switch to another one.
-
-## Bundled LiteLLM
-
-For a fresh box without a LiteLLM, `./install.sh --with-litellm` (or `DGXMM_WITH_LITELLM=1`) enables the
-compose profile `litellm`, which has two more services:
-
-- `dgxmm-litellm`: LiteLLM pinned to a released, multi-arch image. It uses
-  `deploy/litellm/config.yaml` (`store_model_in_db: true`, so DGXMM's registrations persist) and
-  publishes `${DGXMM_BIND}:${DGXMM_LITELLM_PORT:-4000}`.
-- `dgxmm-litellm-db`: `postgres:16` with its data in `data/litellm-db`. It runs as `DGXMM_UID`, so the
-  files belong to you. It has no published port. Containers on the shared Docker network can reach
-  it, so it is password-protected (`secrets/litellm_db_password`).
-
-Neither has a fixed container name: they are called `<compose project>-dgxmm-litellm-1` and so on.
-DGXMM and engines reach LiteLLM as `http://dgxmm-litellm:4000` on `DGXMM_NETWORK`.
-
-Keys. The bundled LiteLLM always gets its **own** master key, `secrets/litellm_bundled_master_key`,
-generated once and never overwritten. It is never the key of another LiteLLM.
-
-- Fresh install: `config.yaml` is generated with `litellm_url: http://dgxmm-litellm:4000`. If
-  `secrets/litellm_master_key` is empty, the installer writes the same key there too, so registration
-  works with nothing to configure. It also writes `litellm_public_url: http://<host IPv4>:<port>` (the
-  first LAN address, or the `DGXMM_BIND` address), so the UI shows the right endpoint. With
-  `DGXMM_BIND=127.0.0.1` it is left out: set the public URL of your reverse proxy on the LiteLLM page.
-- Existing install that uses another LiteLLM: `config.yaml` and `secrets/litellm_master_key` are kept
-  and the installer prints a note. To switch DGXMM to the bundled LiteLLM, set `litellm_url` to
-  `http://dgxmm-litellm:4000` and the master key from `secrets/litellm_bundled_master_key` on DGXMM's
-  LiteLLM page (Integrations > LiteLLM). If a container named `litellm-proxy` runs, the installer
-  warns that a second LiteLLM will run and needs a free port.
-
-At the end the installer prints the single endpoint, `http://<host>:<port>/v1`. Clients pass the DGXMM
-model name as `model`. Create virtual keys on DGXMM's LiteLLM page, or call `POST /key/generate` on
-the endpoint with the bundled master key. `./install.sh status` lists both containers.
-
-If the database or LiteLLM fails to start, the installer still finishes DGXMM's setup (and shows the
-first-run admin password). It then prints the redacted LiteLLM and database logs and exits non-zero.
-
-**Turning it off:** set `DGXMM_WITH_LITELLM=0` in `.env` and run `./install.sh`. It stops and removes
-the two containers and leaves `litellm` out of `COMPOSE_PROFILES` for that run. `data/litellm-db` and
-the secrets are kept; remove `litellm` from `COMPOSE_PROFILES` in `.env` too, so a manual
-`docker compose up -d` does not start it again. `uninstall --purge` deletes `data/litellm-db` but leaves
-the images. Remove them with `docker image rm postgres:16 ghcr.io/berriai/litellm:<tag>` (see
-`docker-compose.yaml` for the exact tag).
-
-For backups of the LiteLLM database (virtual keys, budgets, spend), see
-[backup and restore](operations.md#backup-and-restore).
-
-## Hugging Face token
-
-Gated repos (Llama, Gemma, …) need a token from an account that has accepted the model's licence on
-huggingface.co. DGXMM uses it for catalog details and downloads. Engines run offline from the cache, so
-they never need it.
-
-```bash
-HF_TOKEN=hf_xxx ./install.sh                  # when secrets/hf_token is missing or empty
-# or, to replace an existing token:
-umask 077; printf '%s' 'hf_xxx' > secrets/hf_token; docker restart dgxmm
-```
-
-## Tuning the memory budget
-
-- **`safety_margin_gib`** (8) is the most important knob. It is the memory DGXMM always leaves free,
-  and the level below which the watchdog goes critical and starting deployments are aborted. Lower it
-  only if the box runs nothing but DGXMM.
-- **`os_reserve_gib`** (4) adds to the margin for the OS and desktop. On a headless box you can lower it.
-  Memory used by other processes is measured and counted separately as "external" either way.
-- **Engine overheads** (`vllm_runtime_fixed_gib`, `vllm_cuda_graph_gib`, `llamacpp_runtime_fixed_gib`)
-  apply to every estimate. Calibration already corrects per model from measurements, so change these
-  only if every model is off in the same direction.
-- **`auto_protect: true`** lets the watchdog stop the lowest-priority deployment when `MemAvailable`
-  drops below the margin. Give important deployments a higher **priority** (0–100) in the deploy
-  wizard.
-- Per deployment, the biggest levers are context length, concurrent sequences, the KV pool size
-  (`kv_tokens`), and the KV cache dtype (`fp8` halves KV memory).
-
-## Decision model runtime settings
-
-The Decision model page stores its settings in the `app_settings` table (a backup of `data/` keeps them).
-They are not in `config.yaml` and have no environment override:
-
-| `app_settings` key | Default | Set by | Meaning |
-|---|---|---|---|
-| `decider.enabled` | `false` | **Enable** / **Disable**, `decider enable` / `disable` | Whether the decider should run. Disabled: every feature uses its rules only. |
-| `decider.model` | not set (= `vllm-sr/d3-mini`) | **Model** card, `PUT /api/decider/settings {"model": …}` | The model the next (re)start runs: `vllm-sr/d3-mini` or `vllm-sr/d3-nano`. Unknown values fall back to d3-mini. |
-| `decider.feature.<feature>.enabled` | `true` | **Features** card | Ask the model for this feature (`diagnosis`, `parser`, `plan`, `kind`, `workload`). Off: rules only. |
-| `decider.feature.<feature>.threshold` | diagnosis `0.8`, parser `0.8`, plan `0.6`, kind `0.8`, workload `0.75` | **Features** card (in percent) | Minimum confidence for a model answer to be used (0–1). |
-| `decider.deployment_id`, `decider.switch_from` | — | DGXMM | Internal: the decider's deployment, and the previous model while a model switch is not yet confirmed ready. |
-
-Thresholds you saved override the defaults, also when a later release changes a default. The same settings
-can be changed with `PUT /api/decider/settings`, for example
-`{"features": {"plan": {"threshold": 0.7}, "workload": {"enabled": false}}}` (admin, see
-[API limits](#api-limits)).
-
-## API limits
-
-| What | Limit |
-|---|---|
-| Sign-in | 5 attempts per minute per client IP and per username |
-| Decision model changes (`PUT /api/decider/settings`, `POST /api/decider/enable`, `disable`, `models/download`, `image/build`, `rotate-key`) | 10 per minute per admin, shared |
-| Parser suggestions (`POST /api/decider/suggest-config`) | 30 per minute per user, 120 per minute for all users |
-| Plan ranking by the model in `POST /api/deployments/preview` | 30 per minute per user, 120 for all users; over it the preview still answers, with safety marks but no model ranking |
-| Decision log (`GET /api/decider/decisions`) | 120 per minute per user |
-| Feedback (`POST /api/decider/decisions/{id}/feedback`) | 60 per minute per user |
-| Request bodies under `/api/decider` | 64 KiB (`413 request_too_large`, also for chunked bodies) |
-
-Over a limit the API answers `429 rate_limited` with a `Retry-After` header. The limits are in memory and per
-process: a restart resets them. They are not configurable.
+- [Models, engines and memory](models-and-engines.md)
+- [Networking and reverse proxy](networking.md)

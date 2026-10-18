@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { renderHook } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { useLiveUpdates } from "./stream";
+import { INSIGHTS_COALESCE_MS, useLiveUpdates } from "./stream";
 
 class FakeES {
   static last: FakeES;
@@ -53,5 +53,23 @@ describe("useLiveUpdates — decision model topics", () => {
     const { spy } = setup();
     FakeES.last.emit("deployment_removed", { id: 9 });
     expect(spy).toHaveBeenCalledWith({ queryKey: ["decider-status"] });
+  });
+});
+
+describe("useLiveUpdates — insights topic", () => {
+  it("refreshes every insights query once per burst (the event carries only the id)", () => {
+    vi.useFakeTimers();
+    try {
+      const { spy } = setup();
+      for (let id = 1; id <= 20; id++) FakeES.last.emit("insights", { id });
+      expect(spy).not.toHaveBeenCalledWith({ queryKey: ["insights"] });
+      vi.advanceTimersByTime(INSIGHTS_COALESCE_MS);
+      expect(spy.mock.calls.filter(([a]) => JSON.stringify(a) === JSON.stringify({ queryKey: ["insights"] }))).toHaveLength(1);
+      FakeES.last.emit("insights", { id: 21 });
+      vi.advanceTimersByTime(INSIGHTS_COALESCE_MS);
+      expect(spy.mock.calls.filter(([a]) => JSON.stringify(a) === JSON.stringify({ queryKey: ["insights"] }))).toHaveLength(2);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

@@ -1,0 +1,42 @@
+{"name": "office-8d-p0-lo-0", "pattern": "office", "days": 8, "priority": 0, "pressure": {"minutes": 10080, "pressure_share": 0.0, "short_share": 0.02}, "seed": 0}
+{"name": "office-14d-p0-lo-0", "pattern": "office", "days": 14, "priority": 0, "pressure": {"minutes": 10080, "pressure_share": 0.0, "short_share": 0.02}, "seed": 0}
+{"name": "office-30d-p0-lo-0", "pattern": "office", "days": 30, "priority": 0, "pressure": {"minutes": 10080, "pressure_share": 0.0, "short_share": 0.02}, "seed": 0}
+{"name": "office-21d-p40-hi-0", "pattern": "office", "days": 21, "priority": 40, "pressure": {"minutes": 10080, "pressure_share": 0.35, "short_share": 0.4}, "seed": 0}
+{"name": "office-21d-p95-lo-0", "pattern": "office", "days": 21, "priority": 95, "pressure": {"minutes": 10080, "pressure_share": 0.0, "short_share": 0.02}, "seed": 0}
+{"name": "office_late-8d-p0-lo-0", "pattern": "office_late", "days": 8, "priority": 0, "pressure": {"minutes": 10080, "pressure_share": 0.0, "short_share": 0.02}, "seed": 0}
+{"name": "office_late-14d-p0-lo-0", "pattern": "office_late", "days": 14, "priority": 0, "pressure": {"minutes": 10080, "pressure_share": 0.0, "short_share": 0.02}, "seed": 0}
+{"name": "office_late-30d-p0-lo-0", "pattern": "office_late", "days": 30, "priority": 0, "pressure": {"minutes": 10080, "pressure_share": 0.0, "short_share": 0.02}, "seed": 0}
+{"name": "office_late-21d-p40-hi-0", "pattern": "office_late", "days": 21, "priority": 40, "pressure": {"minutes": 10080, "pressure_share": 0.35, "short_share": 0.4}, "seed": 0}
+{"name": "office_late-21d-p95-lo-0", "pattern": "office_late", "days": 21, "priority": 95, "pressure": {"minutes": 10080, "pressure_share": 0.0, "short_share": 0.02}, "seed": 0}
+{"name": "nightly_batch-8d-p0-lo-0", "pattern": "nightly_batch", "days": 8, "priority": 0, "pressure": {"minutes": 10080, "pressure_share": 0.0, "short_share": 0.02}, "seed": 0}
+{"name": "nightly_batch-14d-p0-lo-0", "pattern": "nightly_batch", "days": 14, "priority": 0, "pressure": {"minutes": 10080, "pressure_share": 0.0, "short_share": 0.02}, "seed": 0}
+{"name": "nightly_batch-30d-p0-lo-0", "pattern": "nightly_batch", "days": 30, "priority": 0, "pressure": {"minutes": 10080, "pressure_share": 0.0, "short_share": 0.02}, "seed": 0}
+{"name": "nightly_batch-21d-p40-hi-0", "pattern": "nightly_batch", "days": 21, "priority": 40, "pressure": {"minutes": 10080, "pressure_share": 0.35, "short_share": 0.4}, "seed": 0}
+{"name": "nightly_batch-21d-p95-lo-0", "pattern": "nightly_batch", "days": 21, "priority": 95, "pressure": {"minutes": 10080, "pressure_share": 0.0, "short_share": 0.02}, "seed": 0}
+{"name": "weekend-8d-p0-lo-0", "pattern": "weekend", "days": 8, "priority": 0, "pressure": {"minutes": 10080, "pressure_share": 0.0, "short_share": 0.02}, "seed": 0}
+{"name": "weekend-14d-p0-lo-0", "pattern": "weekend", "days": 14, "priority": 0, "pressure": {"minutes": 10080, "pressure_share": 0.0, "short_share": 0.02}, "seed": 0}
+{"name": "weekend-30d-p0-lo-0", "pattern": "weekend", "days": 30, "priority": 0, "pressure": {"minutes": 10080, "pressure_share": 0.0, "short_share": 0.02}, "seed": 0}
+{"name": "weekend-21d-p40-hi-0", "pattern": "weekend", "days": 21, "priority": 40, "pressure": {"minutes": 10080, "pressure_share": 0.35, "short_share": 0.4}, "seed": 0}
+{"name": "weekend-21d-p95-lo-0", "pattern": "weekend", "days": 21, "priority": 95, "pressure": {"minutes": 10080, "pressure_share": 0.0, "short_share": 0.02}, "seed": 0}
+{"name": "lunch-8d-p0-lo-0", "pattern": "lunch", "days": 8, "priority": 0, "pressure": {"minutes": 10080, "pressure_share": 0.0, "short_share": 0.02}, "seed": 0}
+{"name": "lunch-14d-p0-lo-0", "pattern": "lunch", "days": 14, "priority": 0, "pressure": {"minutes": 10080, "pressure_share": 0.0, "short_share": 0.02}, "seed": 0}
+{"name": "lunch-30d-p0-lo-0", "pattern": "lunch", "days": 30, "priority": 0, "pressure": {"minutes": 10080, "pressure_share": 0.0, "short_share": 0.02}, "seed": 0}
+{"name": "lunch-21d-p40-hi-0", "pattern": "lunch", "days": 21, "priority": 40, "pressure": {"minutes": 10080, "pressure_share": 0.35, "short_share": 0.4}, "seed": 0}
+{"name": "lunch-21d-p95-lo-0", "pattern": "lunch", "days": 21, "priority": 95, "pressure": {"minutes": 10080, "pressure_share": 0.0, "short_share": 0.02}, "seed": 0}
+{"name": "short_gap-14d-p0-hi-0", "pattern": "short_gap", "days": 14, "priority": 0, "pressure": {"minutes": 10080, "pressure_share": 0.35, "short_share": 0.4}, "seed": 0}
+{"name": "short_gap-14d-p20-lo-0", "pattern": "short_gap", "days": 14, "priority": 20, "pressure": {"minutes": 10080, "pressure_share": 0.0, "short_share": 0.02}, "seed": 0}
+{"name": "short_gap-30d-p0-hi-0", "pattern": "short_gap", "days": 30, "priority": 0, "pressure": {"minutes": 10080, "pressure_share": 0.35, "short_share": 0.4}, "seed": 0}
+{"name": "short_gap-30d-p20-lo-0", "pattern": "short_gap", "days": 30, "priority": 20, "pressure": {"minutes": 10080, "pressure_share": 0.0, "short_share": 0.02}, "seed": 0}
+{"name": "office_stray-30d-p0-lo-0", "pattern": "office_stray", "days": 30, "priority": 0, "pressure": {"minutes": 10080, "pressure_share": 0.0, "short_share": 0.02}, "seed": 0}
+{"name": "office_stray-21d-p0-lo-1", "pattern": "office_stray", "days": 21, "priority": 0, "pressure": {"minutes": 10080, "pressure_share": 0.0, "short_share": 0.02}, "seed": 1}
+{"name": "office_stray-30d-p0-hi-2", "pattern": "office_stray", "days": 30, "priority": 0, "pressure": {"minutes": 10080, "pressure_share": 0.35, "short_share": 0.4}, "seed": 2}
+{"name": "office_stray-21d-p0-hi-3", "pattern": "office_stray", "days": 21, "priority": 0, "pressure": {"minutes": 10080, "pressure_share": 0.35, "short_share": 0.4}, "seed": 3}
+{"name": "irregular-8d-p0-hi-0", "pattern": "irregular", "days": 8, "priority": 0, "pressure": {"minutes": 10080, "pressure_share": 0.35, "short_share": 0.4}, "seed": 0, "p": 0.35}
+{"name": "irregular-14d-p0-lo-1", "pattern": "irregular", "days": 14, "priority": 0, "pressure": {"minutes": 10080, "pressure_share": 0.0, "short_share": 0.02}, "seed": 1, "p": 0.2}
+{"name": "irregular-30d-p0-hi-2", "pattern": "irregular", "days": 30, "priority": 0, "pressure": {"minutes": 10080, "pressure_share": 0.35, "short_share": 0.4}, "seed": 2, "p": 0.5}
+{"name": "irregular-8d-p0-lo-3", "pattern": "irregular", "days": 8, "priority": 0, "pressure": {"minutes": 10080, "pressure_share": 0.0, "short_share": 0.02}, "seed": 3, "p": 0.35}
+{"name": "irregular-14d-p0-hi-4", "pattern": "irregular", "days": 14, "priority": 0, "pressure": {"minutes": 10080, "pressure_share": 0.35, "short_share": 0.4}, "seed": 4, "p": 0.2}
+{"name": "irregular-30d-p0-lo-5", "pattern": "irregular", "days": 30, "priority": 0, "pressure": {"minutes": 10080, "pressure_share": 0.0, "short_share": 0.02}, "seed": 5, "p": 0.5}
+{"name": "always_on-21d-p0-lo-0", "pattern": "always_on", "days": 21, "priority": 0, "pressure": {"minutes": 10080, "pressure_share": 0.0, "short_share": 0.02}, "seed": 0}
+{"name": "always_on-30d-p0-hi-0", "pattern": "always_on", "days": 30, "priority": 0, "pressure": {"minutes": 10080, "pressure_share": 0.35, "short_share": 0.4}, "seed": 0}
+{"name": "office-5d-p0-lo-0", "pattern": "office", "days": 5, "priority": 0, "pressure": {"minutes": 10080, "pressure_share": 0.0, "short_share": 0.02}, "seed": 0}

@@ -4,6 +4,7 @@ import type { ColumnDef } from "@tanstack/react-table";
 import { AlertTriangle, Download, Search } from "lucide-react";
 import { api } from "@/api";
 import { useIsAdmin } from "@/auth";
+import { CompatLine } from "@/components/app/compat-line";
 import { DataTable } from "@/components/app/data-table";
 import { PageHeader } from "@/components/app/page-header";
 import { ErrorState } from "@/components/app/states";
@@ -99,6 +100,7 @@ function Details({ repo, ctx, admin }: { repo: string; ctx: number; admin: boole
       {x && (
         <>
           {x.gated && <p className="rounded-md bg-status-warning-bg px-3 py-2 text-xs text-status-warning">Gated repository: an HF token with access is required.</p>}
+          <CompatLine repo={repo} />
           {x.estimate && (
             <div className="space-y-2 rounded-lg border p-4">
               <div className="flex items-center justify-between"><span className="text-sm font-medium">vLLM estimate</span><FitBadge badge={x.fit.badge} /></div>
@@ -109,7 +111,10 @@ function Details({ repo, ctx, admin }: { repo: string; ctx: number; admin: boole
           )}
           <p className="text-sm">vLLM: <b>{x.support.vllm === null ? "unknown (registry loading)" : x.support.vllm ? "supported" : "not supported"}</b> · llama.cpp: <b>{x.support.llamacpp ? "GGUF available" : "no GGUF"}</b></p>
           {admin && x.estimate && !x.downloaded && (
-            <Button disabled={dl.isPending} onClick={() => dl.mutate(undefined)}><Download className="mr-1 h-4 w-4" />Download safetensors</Button>
+            <div className="space-y-1.5">
+              <CompatLine repo={repo} compact label="Before downloading" />
+              <Button disabled={dl.isPending} onClick={() => dl.mutate(undefined)}><Download className="mr-1 h-4 w-4" />Download safetensors</Button>
+            </div>
           )}
           {x.gguf_files.length > 0 && (
             <div className="space-y-2">

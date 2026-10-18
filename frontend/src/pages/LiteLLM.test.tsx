@@ -310,4 +310,34 @@ describe("LiteLLM page", () => {
     expect(await screen.findByText(warning)).toBeInTheDocument();
     expect(screen.getByText(/while the integration is off; turning it off removes the models DGXMM registered there/)).toBeInTheDocument();
   });
+
+  it("shows routing advice per traffic class with copyable alias snippets, and changes nothing", async () => {
+    const advice = {
+      enabled: true, source: "model", computed_at: "2026-10-17T05:15:00Z",
+      snippet: 'router_settings:\n  model_group_alias:\n    dgxmm-chat: "chat"',
+      classes: [
+        { class: "chat", label: "General chat and assistants", alias: "dgxmm-chat", deployment_id: 1, deployment: "qwen", model_name: "chat", model_ref: "Qwen/Qwen3-8B",
+          source: "model", confidence: 0.91, reason: "ranked first by the decision model", routable: true, note: null, candidates: [{ deployment_id: 1, deployment: "qwen", model_name: "chat" }, { deployment_id: 2, deployment: "b", model_name: "b" }] },
+        { class: "long_context", label: "Long documents", alias: "dgxmm-long-context", deployment_id: 2, deployment: "b", model_name: "b", model_ref: "org/b",
+          source: "rules", confidence: null, reason: "the longest context", routable: false, note: "would suit; start b first (LiteLLM serves only ready deployments)", candidates: [{ deployment_id: 2, deployment: "b", model_name: "b" }] },
+        { class: "vision", label: "Images in the prompt", alias: "dgxmm-vision", deployment_id: null, deployment: null, model_name: null, model_ref: null,
+          source: "none", confidence: null, reason: "no deployment has this capability", routable: false, note: null, candidates: [] },
+      ],
+    };
+    setup({}, (url) => (url === "/decider/routing-advice" ? advice : undefined));
+    const card = await screen.findByLabelText("Routing advice");
+    const chat = await within(card).findByText("dgxmm-chat");
+    const row = chat.closest("tr") as HTMLElement;
+    expect(within(row).getByText("Decision model · 91 %")).toBeInTheDocument();
+    expect(within(row).getByText(/2 candidates/)).toBeInTheDocument();
+    expect(within(row).getByRole("button", { name: "Copy dgxmm-chat snippet" })).toBeInTheDocument();
+    const vision = within(card).getByText("dgxmm-vision").closest("tr") as HTMLElement;
+    expect(within(vision).getByText("No suitable deployment")).toBeInTheDocument();
+    expect(within(vision).queryByRole("button")).toBeNull();
+    expect(within(card).getByLabelText("LiteLLM alias snippet")).toHaveTextContent('dgxmm-chat: "chat"');
+    const long = within(card).getByText("dgxmm-long-context").closest("tr") as HTMLElement;
+    expect(within(long).getByText(/start b first/)).toBeInTheDocument();
+    expect(within(long).queryByRole("button")).toBeNull();
+    expect(vi.mocked(apiModule.api).mock.calls.filter(([u, o]) => String(u).includes("routing") && (o as any)?.method)).toEqual([]);
+  });
 });

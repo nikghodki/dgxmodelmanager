@@ -234,9 +234,9 @@ describe("Decision model page", () => {
     expect(screen.queryByRole("alert", { name: "Decision model needs a restart" })).toBeNull();
   });
 
-  it("links the docs to the decision model section of the usage guide", async () => {
+  it("links the docs to the decision model page of the documentation site", async () => {
     setup();
-    expect(await screen.findByRole("link", { name: "Docs" })).toHaveAttribute("href", "https://github.com/nikghodki/dgxmodelmanager/blob/main/docs/usage.md#decision-model");
+    expect(await screen.findByRole("link", { name: "Docs" })).toHaveAttribute("href", "https://nikghodki.github.io/dgxmodelmanager/user-guide/decision-model/");
   });
 
   it("disables after confirmation", async () => {

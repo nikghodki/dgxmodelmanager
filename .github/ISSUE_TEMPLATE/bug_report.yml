@@ -1,0 +1,82 @@
+name: Bug report
+description: Something in DGXMM does not work as documented.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. Security problems go through [private vulnerability reporting](https://github.com/nikghodki/dgxmodelmanager/security/advisories/new), not here.
+
+        **Remove secrets** from everything you paste: passwords, LiteLLM and virtual keys (`sk-...`), Hugging Face tokens (`hf_...`), the decider key, and the contents of `.env` and `secrets/`. Replace private host names and IP addresses with placeholders if you prefer.
+  - type: input
+    id: version
+    attributes:
+      label: DGXMM version
+      description: The commit you run (`git rev-parse --short HEAD` in your checkout), or the release from the changelog.
+      placeholder: e.g. 7c055b7
+    validations:
+      required: true
+  - type: textarea
+    id: host
+    attributes:
+      label: Host and GPU
+      description: Machine, OS, CPU architecture, GPU and driver, Docker and Compose versions.
+      placeholder: |
+        DGX Spark (GB10), DGX OS 7, aarch64
+        driver 580.xx (nvidia-smi), Docker 28.x, Compose v2.x, NVIDIA Container Toolkit 1.x
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Installer (install.sh)
+        - Deploying or running a model
+        - Memory check or plans
+        - Models on disk, catalog or downloads
+        - LiteLLM or virtual keys
+        - Decision model
+        - Metrics, dashboard or benchmarks
+        - Users, login or permissions
+        - Web UI (layout, theme, mobile)
+        - Documentation
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: What you did, step by step, including the model and engine settings if a deployment is involved.
+      placeholder: |
+        1. Deploy Qwen/Qwen3-0.6B on vLLM with max_model_len 8192
+        2. ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected and actual behaviour
+      description: What you expected to happen, and what happened instead (error messages, screenshots).
+    validations:
+      required: true
+  - type: textarea
+    id: status
+    attributes:
+      label: Output of ./install.sh status
+      description: Run `./install.sh status` in your checkout and paste the output, with secrets removed.
+      render: text
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: |
+        The relevant part of `./install.sh logs` (the DGXMM container), and for a failed deployment the log on its page or `docker logs <engine container>`. Remove secrets.
+      render: text
+  - type: textarea
+    id: config
+    attributes:
+      label: Configuration changes
+      description: Any keys you changed in `config.yaml` or `.env` (values that are not secrets), and installer flags (`--with-litellm`, `--with-decider`, reverse proxy).
+      render: text

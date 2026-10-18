@@ -84,3 +84,35 @@ def test_build_context_wires_the_retention_into_the_metrics_loop():
     src = inspect.getsource(context)
     assert "scraper.retention.append" in src and "prune_decider_tables(db, settings)" in src
     assert retention.prune is prune
+
+
+def test_rows_with_feedback_survive_the_row_cap_and_age_out_only_after_their_own_retention(db, settings):
+    """Security review M3: viewer traffic must not push the feedback-labelled rows (what threshold tuning learns
+    from) out of the log. Rows with feedback are never deleted by the row cap, and only after
+    decider_feedback_retention_days (180) instead of 30."""
+    assert settings.decider_feedback_retention_days == 180
+    settings.decider_max_rows = 1000
+    _decisions(db, 3, age_days=40)
+    _decisions(db, 2, age_days=200)
+    with db.session() as s:
+        s.execute(DecisionRecord.__table__.update().values(feedback="correct"))
+    _decisions(db, 1250)
+    out = prune(db, settings)
+    assert _count(db, DecisionRecord, DecisionRecord.feedback.is_not(None)) == 3  # 40 days old: kept; 200: gone
+    assert _count(db, DecisionRecord, DecisionRecord.feedback.is_(None)) == 1000
+    assert out["decisions_age"] == 2
+
+
+def test_feedback_rows_are_never_kept_shorter_than_plain_rows(db, settings):
+    """Review N2: a feedback retention set below the plain-row retention does not delete the feedback rows
+    earlier; the effective feedback retention is max(decider_feedback_retention_days, decider_retention_days)."""
+    settings.decider_retention_days, settings.decider_feedback_retention_days = 30, 10
+    _decisions(db, 3, age_days=20)
+    _decisions(db, 2, age_days=40)
+    with db.session() as s:
+        s.execute(DecisionRecord.__table__.update().values(feedback="correct"))
+    _decisions(db, 4, age_days=20)
+    out = prune(db, settings)
+    assert _count(db, DecisionRecord, DecisionRecord.feedback.is_not(None)) == 3  # 20 days old: kept; 40: gone
+    assert _count(db, DecisionRecord, DecisionRecord.feedback.is_(None)) == 4
+    assert out["decisions_age"] == 2

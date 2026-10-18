@@ -168,15 +168,26 @@ class _LRU:
         self.items.clear()
 
 
+PRIORITY_INTERACTIVE = 0  # request path (served first)
+PRIORITY_BACKGROUND = 1   # background features (diagnosis, kind, workload, ...)
+PRIORITY_LANE = 2         # the insight engine's jobs (dgxmm/decider/insight_engine.py): lowest, and capped
+
+
 class Limiter:
     """At most ``max_in_flight`` requests at the decider; the rest wait, lower ``priority`` first (FIFO within a
     priority), for at most the given timeout, then are shed. d3_server answers one request at a time and finishes
     requests whose client already gave up, so an unbounded burst would make every later caller wait for work nobody
-    needs any more."""
+    needs any more.
+
+    Background lane: requests at ``PRIORITY_LANE`` or lower priority hold at most ``lane_slots`` (= max_in_flight - 1,
+    at least 1) slots, so with two or more slots an interactive caller never waits behind background jobs; with one
+    slot it waits for at most the request in flight and then goes ahead of every queued lane request."""
 
     def __init__(self, max_in_flight: int = 2):
         self.max_in_flight = max(int(max_in_flight), 1)
+        self.lane_slots = max(self.max_in_flight - 1, 1)
         self.in_flight = 0
+        self.lane_in_flight = 0
         self.shed = 0
         self.service_s = 0.0  # moving average of the server's time per request (successful ones)
         self._waiters: list[list] = []  # heap of [priority, seq, future]
@@ -196,10 +207,22 @@ class Limiter:
         cap = queue_timeout_s if priority <= 0 else max(queue_timeout_s, deadline_s / 2)
         return min(cap, deadline_s - self.service_s)
 
+    def _allowed(self, priority: int) -> bool:
+        """A slot may go to this priority now (the lane cap)."""
+        return priority < PRIORITY_LANE or self.lane_in_flight < self.lane_slots
+
+    def _take(self, priority: int) -> None:
+        if priority >= PRIORITY_LANE:
+            self.lane_in_flight += 1
+
+    def _eligible_waiter(self) -> bool:
+        return any(not w[2].done() and self._allowed(w[0]) for w in self._waiters)
+
     async def acquire(self, priority: int, timeout_s: float) -> bool:
-        """True = holds a slot (call release()); False = shed."""
-        if self.in_flight < self.max_in_flight and not any(not w[2].done() for w in self._waiters):
+        """True = holds a slot (call release(priority)); False = shed."""
+        if self.in_flight < self.max_in_flight and self._allowed(priority) and not self._eligible_waiter():
             self.in_flight += 1
+            self._take(priority)
             return True
         if timeout_s <= 0:
             self.shed += 1
@@ -211,23 +234,31 @@ class Limiter:
             return True
         except asyncio.TimeoutError:
             if fut.done() and not fut.cancelled():
-                self.release()  # granted at the very moment the wait timed out: hand the slot on
+                self.release(priority)  # granted at the very moment the wait timed out: hand the slot on
             else:
                 fut.cancel()
             self.shed += 1
             return False
         except BaseException:
             if fut.done() and not fut.cancelled():
-                self.release()
+                self.release(priority)
             else:
                 fut.cancel()
             raise
 
-    def release(self) -> None:
-        while self._waiters:
-            _, _, fut = heapq.heappop(self._waiters)
-            if not fut.done():
-                fut.set_result(True)  # the slot passes to the next waiter; in_flight is unchanged
+    def release(self, priority: int = PRIORITY_INTERACTIVE) -> None:
+        """Give back the slot taken at ``priority``: it passes to the first waiter (by priority, then arrival) that
+        the lane cap admits; waiters held back by the cap keep waiting."""
+        if priority >= PRIORITY_LANE:
+            self.lane_in_flight = max(self.lane_in_flight - 1, 0)
+        self._waiters = [w for w in self._waiters if not w[2].done()]
+        heapq.heapify(self._waiters)
+        for w in sorted(self._waiters):
+            if self._allowed(w[0]):
+                self._waiters.remove(w)
+                heapq.heapify(self._waiters)
+                self._take(w[0])
+                w[2].set_result(True)  # the slot passes to this waiter; in_flight is unchanged
                 return
         self.in_flight = max(self.in_flight - 1, 0)
 
@@ -259,7 +290,7 @@ class SystemOneClient:
     async def choose(self, *, feature: str, state: str, question: str, options: list[Option],
                      timeout_s: float = 2.0, priority: int = 0) -> Answer:
         """Ask one choice question. Raises DeciderError on any failure (callers fail open). ``timeout_s`` covers the
-        queue wait and the request; ``priority`` 0 = interactive (served first), 1 = background."""
+        queue wait and the request; ``priority`` 0 = interactive (served first), 1 = background, 2 = the insight engine's lane (capped)."""
         if not options:
             raise DeciderError("bad_request", "a choice question needs options")
         if len(options) > MAX_OPTIONS:
@@ -286,7 +317,7 @@ class SystemOneClient:
                 raise DeciderError("busy", "decider busy (deadline reached while queued); answered by rules")
             r, latency = await self._post(base, body, remaining, penalize=remaining >= timeout_s / 2)
         finally:
-            self.limiter.release()
+            self.limiter.release(priority)
         return self._read(r, options, latency, key)
 
     async def _post(self, base: str, body: dict, timeout_s: float, penalize: bool) -> tuple[httpx.Response, float]:

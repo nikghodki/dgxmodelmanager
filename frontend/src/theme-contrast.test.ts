@@ -40,7 +40,8 @@ const PAIRS: [string, string, string?, number?][] = [
   ["destructive-foreground", "card", "destructive", 0.9], // hover:bg-destructive/90
   ["foreground", "background"], ["card-foreground", "card"], ["secondary-foreground", "secondary"],
   ["accent-foreground", "accent"], ["sidebar-foreground", "sidebar"],
-  ["muted-foreground", "card"], ["muted-foreground", "background"], ["muted-foreground", "muted"],
+  ["muted-foreground", "card"], // also chart axis ticks and legend labels (metric-chart-legend.test.tsx)
+  ["muted-foreground", "background"], ["muted-foreground", "muted"],
   ["muted-foreground", "sidebar"], ["muted-foreground", "card", "muted", 0.5],
   ...["card", "background", "sidebar", "popover"].flatMap((s) => [
     [ "primary", s ] as [string, string],                                // links, active nav, <summary>

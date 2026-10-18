@@ -90,7 +90,8 @@ async def test_a_bad_run_directory_disables_only_the_admin_socket(tmp_path, monk
     port = ds.main.servers[0].sockets[0].getsockname()[1]
     async with httpx.AsyncClient(base_url=f"http://127.0.0.1:{port}") as c:
         assert (await c.get("/")).text == "tcp"  # the app keeps working
-    assert any("admin socket" in r.getMessage() for r in caplog.records)
+    # serve() starts the admin socket on its next poll after startup: wait for its log line (a busy runner)
+    await wait_for(lambda: any("admin socket" in r.getMessage() for r in caplog.records))
     assert ds.admin_task is None
     ds.main.should_exit = True
     await asyncio.wait_for(task, 10)

@@ -310,4 +310,78 @@ describe("DeployWizard preview priority", () => {
     fireEvent.change(screen.getByLabelText("Priority"), { target: { value: "40" } });
     await waitFor(() => expect(previews.some((b) => b.priority === 40)).toBe(true));
   });
+
+  it("config advice fills untouched fields only; a typed value is never overwritten", async () => {
+    vi.mocked(auth.useIsAdmin).mockReturnValue(true);
+    const api = vi.mocked(apiModule.api);
+    const adv = { goal: "chat", options: [{ key: "ctx16k-seq32-auto-pc", config: { max_model_len: 16384, max_num_seqs: 32, kv_cache_dtype: "auto", enable_prefix_caching: true, kv_tokens: 131072 }, summary: "16k context · 32 concurrent", required_bytes: 1e9, headroom_bytes: 1e9, context: 16384, seqs: 32, kv_cache_dtype: "auto", prefix_caching: true, kv_pool_tokens: 131072 }],
+      recommended: "ctx16k-seq32-auto-pc", top: ["ctx16k-seq32-auto-pc"], source: "model", confidence: 0.9, decision_id: 1, free_bytes: 1e10, reason: null, disabled: false };
+    api.mockImplementation((url: string) => {
+      if (url === "/inventory") return Promise.resolve([artifact]);
+      if (url === "/engines") return Promise.resolve(engines);
+      if (url === "/deployments/preview") return Promise.resolve(fitsPreview);
+      if (url === "/decider/config-advice") return Promise.resolve(adv);
+      return Promise.reject(new Error(`unexpected ${url}`));
+    });
+    renderWizard();
+    await screen.findByText(/Suggested config/);
+    fireEvent.change(screen.getByLabelText("Concurrent sequences"), { target: { value: "5" } });
+    await userEvent.click(screen.getByRole("button", { name: /Fill untouched fields/ }));
+    expect(screen.getByLabelText("Context length (tokens)")).toHaveValue(16384);
+    expect(screen.getByLabelText("Concurrent sequences")).toHaveValue(5);
+    await waitFor(() => {
+      const bodies = api.mock.calls.filter((c) => c[0] === "/deployments/preview").map((c) => (c[1] as any).body.config);
+      expect(bodies.at(-1)).toMatchObject({ max_model_len: 16384, max_num_seqs: 5, kv_tokens: 131072 });
+    });
+  });
+
+  it("shows the code scan with trust_remote_code on, and a clean scan keeps the generic warning", async () => {
+    vi.mocked(auth.useIsAdmin).mockReturnValue(true);
+    const remote = { ...artifact, has_remote_code: true };
+    vi.mocked(apiModule.api).mockImplementation((url: string) => {
+      if (url === "/inventory") return Promise.resolve([remote]);
+      if (url === "/engines") return Promise.resolve(engines);
+      if (url === "/deployments/preview") return Promise.resolve(fitsPreview);
+      if (url === "/decider/remote-code-check") return Promise.resolve({ verdict: "no_findings", findings: [], source: "rules", confidence: null, model_label: null, decision_id: 1, scanned_files: 4, truncated: false, error: null, disabled: false, remote_code: true });
+      return Promise.reject(new Error(`unexpected ${url}`));
+    });
+    renderWizard();
+    await screen.findByLabelText("Context length (tokens)");
+    await userEvent.click(screen.getByRole("button", { name: "Show advanced settings" }));
+    await userEvent.click(screen.getByRole("switch", { name: "Trust remote code" }));
+    expect(await screen.findByText("No suspicious patterns found in 4 files (static scan only)")).toBeInTheDocument();
+    expect(screen.getByText(/trust_remote_code runs Python code from the model repository/)).toBeInTheDocument();
+  });
+
+  it("summarises compatibility for a repo that is not downloaded yet", async () => {
+    vi.mocked(auth.useIsAdmin).mockReturnValue(true);
+    vi.mocked(apiModule.api).mockImplementation((url: string) => {
+      if (url === "/inventory") return Promise.resolve([]);
+      if (url === "/engines") return Promise.resolve(engines);
+      if (url.startsWith("/catalog/compat")) return Promise.resolve({ repo: "org/model-a", sha: "s", architecture: "Qwen3ForCausalLM", gated: false, vllm: { verdict: "runs", reasons: ["supported_architecture"], flags: [] }, llamacpp: { verdict: "unsupported", reasons: ["no_gguf"], flags: [] }, source: "rules", confidence: 1, decision_id: 1, cached: false, error: null, disabled: false });
+      return Promise.reject(new Error(`unexpected ${url}`));
+    });
+    renderWizard();
+    expect(await screen.findByText(/org\/model-a is not downloaded yet/)).toBeInTheDocument();
+    expect(await screen.findByText("vLLM: runs")).toBeInTheDocument();
+  });
+
+  it("the engine chip's Use keeps typed values that stay valid for the new model", async () => {
+    vi.mocked(auth.useIsAdmin).mockReturnValue(true);
+    const other = { ...artifact, ref: "org/model-a-fp8" };
+    vi.mocked(apiModule.api).mockImplementation((url: string) => {
+      if (url === "/inventory") return Promise.resolve([artifact, other]);
+      if (url === "/engines") return Promise.resolve(engines);
+      if (url === "/deployments/preview") return Promise.resolve(fitsPreview);
+      if (url === "/decider/engine-suggest") return Promise.resolve({ engine: "vllm", model_ref: "org/model-a-fp8", source: "model", confidence: 0.9, reason: "model", decision_id: 1, alternatives: {}, disabled: false });
+      return Promise.reject(new Error(`unexpected ${url}`));
+    });
+    renderWizard();
+    await screen.findByLabelText("Concurrent sequences");
+    fireEvent.change(screen.getByLabelText("Concurrent sequences"), { target: { value: "5" } });
+    await userEvent.click(await screen.findByRole("button", { name: /Use vLLM with org\/model-a-fp8/ }));
+    await waitFor(() => expect(screen.getByRole("combobox", { name: /^Model\s+org\/model-a-fp8$/ })).toBeInTheDocument());
+    expect(screen.getByLabelText("Concurrent sequences")).toHaveValue(5);
+    expect(screen.getByLabelText("Context length (tokens)")).toHaveValue(4096);
+  });
 });

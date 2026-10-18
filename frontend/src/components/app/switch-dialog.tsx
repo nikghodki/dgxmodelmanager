@@ -13,15 +13,18 @@ import { EstimatePanel } from "./estimate-panel";
 import { ModelSelect } from "./model-select";
 import { useParserSuggestions } from "./parser-suggestions";
 import { PlanChooser } from "./plan-chooser";
+import { RemoteCodeFindings, RemoteCodeWarning } from "./remote-code-panel";
 import { ResponsiveDialog } from "./responsive-dialog";
 import { ErrorState } from "./states";
 
 const fmtSetting = (v: unknown) => (v === undefined || v === null || v === "" ? "default" : typeof v === "object" ? JSON.stringify(v) : String(v));
 
-export function SwitchDialog({ mode, deployment, initialPatch, patchSource = "the suggestion", onClose }: {
+export function SwitchDialog({ mode, deployment, initialPatch, patchSource = "the suggestion", onClose, onDone }: {
   mode: "switch" | "reconfigure"; deployment: Deployment; initialPatch?: Record<string, any>;
   /** Names where initialPatch came from in the change summary, e.g. "the diagnosis". */
   patchSource?: string; onClose: () => void;
+  /** Called once the switch / reconfigure succeeded (before onClose), e.g. to mark an insight applied. */
+  onDone?: () => void;
 }) {
   const { model_ref: _patchRef, ...patchFields } = initialPatch ?? {};
   const patchKeys = Object.keys(patchFields);
@@ -60,7 +63,7 @@ export function SwitchDialog({ mode, deployment, initialPatch, patchSource = "th
     : api(`/deployments/${deployment.id}/reconfigure`, { method: "POST", body: { config, model_ref: ref === deployment.model_ref ? null : ref, actions } })), {
     success: mode === "switch" ? "Switched — the new deployment is ready" : "Reconfigured and restarted",
     invalidate: [["deployments"], ["deployment", deployment.id]],
-    onSuccess: onClose,
+    onSuccess: () => { onDone?.(); onClose(); },
   });
 
   // A 409 carries a fresh fit + plans: show them and make the user choose again (depends only on the error).
@@ -91,6 +94,10 @@ export function SwitchDialog({ mode, deployment, initialPatch, patchSource = "th
                 Face cache mounted). The log message that suggested it can be written by the repository itself.
                 Confirm only if you trust this repository&apos;s code.</p>
             </div>
+          )}
+          {config.trust_remote_code === true && patchFields.trust_remote_code !== true && <RemoteCodeWarning />}
+          {config.trust_remote_code === true && (
+            <RemoteCodeFindings modelRef={ref} enabled={!!(inv.data ?? []).find((a) => a.ref === ref)?.has_remote_code} />
           )}
           {patchKeys.length > 0 && (
             <div className="rounded-md border bg-muted/50 p-3 text-xs">

@@ -10,6 +10,7 @@ import { DataTable } from "@/components/app/data-table";
 import { KeyManager } from "@/components/app/litellm-keys";
 import { PageHeader } from "@/components/app/page-header";
 import { PasswordInput } from "@/components/app/password-input";
+import { RoutingAdviceCard } from "@/components/app/routing-advice";
 import { EmptyState, ErrorState, PageSkeleton } from "@/components/app/states";
 import { StatusBadge } from "@/components/app/status-badge";
 import { Badge } from "@/components/ui/badge";
@@ -290,6 +291,7 @@ function LiteLLMPage() {
       <ConnectionCard key={saved} s={s} onSaved={(r) => setLeaveWarning(r.warning ?? null)} />
       <ModelsCard s={s} status={status} />
       <KeysCard s={s} status={status} />
+      <RoutingAdviceCard />
     </div>
   );
 }

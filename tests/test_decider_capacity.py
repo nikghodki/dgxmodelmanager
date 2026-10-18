@@ -60,29 +60,29 @@ async def test_burst_is_shed_quickly_instead_of_timing_out():
     ok = [r for r in res if not isinstance(r, Exception)]
     busy = [r for r in res if isinstance(r, DeciderError) and r.code == "busy"]
     assert len(ok) == 1 and len(busy) == 5
-    assert time.perf_counter() - t0 < 1.0  # nobody waited for the 2 s deadline
+    assert time.perf_counter() - t0 < 1.6  # nobody waited for the 2 s deadline
     assert srv.served == 1  # shed requests never reached the server
     assert not c.breaker.is_open() and c.breaker.failures == 0  # back-pressure is not ill health
     assert c.limiter.shed == 5
 
 
 async def test_queue_wait_counts_against_the_callers_deadline():
-    srv = SlowServer(0.4)
+    srv = SlowServer(1.2)  # slow enough that each bound below has a wide margin on a busy CI runner
     c = make(srv, max_in_flight=1, queue_timeout_s=5)
-    first = asyncio.ensure_future(ask(c, 0, timeout_s=2.0))
+    first = asyncio.ensure_future(ask(c, 0, timeout_s=6.0))
     await asyncio.sleep(0.01)
     t0 = time.perf_counter()
     with pytest.raises(DeciderError) as e:
-        await ask(c, 1, timeout_s=0.2)  # cannot even start before its own deadline
-    assert e.value.code == "busy" and time.perf_counter() - t0 < 0.35
+        await ask(c, 1, timeout_s=0.6)  # cannot even start before its own deadline (the slot frees at ~1.2 s)
+    assert e.value.code == "busy" and time.perf_counter() - t0 < 1.05
     await first
     c = make(srv, max_in_flight=1, queue_timeout_s=5)  # a fresh client: no service time learned yet
     t0 = time.perf_counter()
-    blocker = asyncio.ensure_future(ask(c, 2, timeout_s=2.0))
+    blocker = asyncio.ensure_future(ask(c, 2, timeout_s=6.0))
     await asyncio.sleep(0.01)
     with pytest.raises(DeciderError) as e:
-        await ask(c, 3, timeout_s=0.6)  # gets the slot after ~0.4 s, then only ~0.2 s are left for the request
-    assert e.value.code == "timeout" and time.perf_counter() - t0 < 0.8
+        await ask(c, 3, timeout_s=1.8)  # gets the slot after ~1.2 s, then only ~0.6 s are left for the request
+    assert e.value.code == "timeout" and time.perf_counter() - t0 < 2.3  # (it would succeed at ~2.4 s)
     await blocker
 
 
@@ -156,7 +156,7 @@ async def test_queue_budget_leaves_room_for_the_measured_service_time():
     t0 = time.perf_counter()
     with pytest.raises(DeciderError) as e:
         await ask(c, 11, timeout_s=0.4)  # 0.4 s deadline - 0.3 s service: may queue ~0.1 s at most
-    assert e.value.code == "busy" and time.perf_counter() - t0 < 0.2
+    assert e.value.code == "busy" and time.perf_counter() - t0 < 0.3  # shed, not queued to the 0.4 s deadline
     await blocker
 
 

@@ -217,11 +217,12 @@ async def test_switch_waits_through_the_queue(stack):
 async def test_wait_ready_does_not_count_queue_time(stack):
     a = await stack.deployer.deploy(req("a"), 1)
     b = await stack.deployer.deploy(req("b"), 1)
-    waiter = asyncio.ensure_future(stack.deployer.wait_ready(b["id"], 0.2))
-    await asyncio.sleep(0.4)
+    # a 1 s timeout (it starts when b leaves the queue) and 1.5 s queued: wide enough for a busy CI runner
+    waiter = asyncio.ensure_future(stack.deployer.wait_ready(b["id"], 1.0))
+    await asyncio.sleep(1.5)
     assert not waiter.done()  # still queued: the timeout has not started
     stack.http.all_healthy = True
-    assert await asyncio.wait_for(waiter, 5) == "ready"
+    assert await asyncio.wait_for(waiter, 20) == "ready"
     assert state(stack, a["id"]) == "ready"
 
 

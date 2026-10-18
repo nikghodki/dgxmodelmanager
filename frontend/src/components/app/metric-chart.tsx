@@ -32,7 +32,9 @@ export function MetricChart({ data, series, height = 200, fmt = defaultFmt, xKey
           labelFormatter={(v) => (xKey === "ts" ? timeFull(v as number) : String(v))}
           formatter={(v: number, name) => [Number.isFinite(v) ? fmt(v) : "—", name]}
         />
-        {series.length >= 2 && <Legend iconType="plainline" wrapperStyle={{ fontSize: 12, color: c.axis }} />}
+        {/* label text in the muted text colour (>= 4.5:1 in both themes); series colours stay on the line icons */}
+        {series.length >= 2 && <Legend iconType="plainline" wrapperStyle={{ fontSize: 12, color: c.axis }}
+          formatter={(value) => <span style={{ color: c.axis }}>{value}</span>} />}
         {series.map((s) => (
           <Line key={s.key} type="monotone" dataKey={s.key} name={s.label} stroke={c.series[(s.slot - 1) % 8]} strokeWidth={2}
             dot={false} activeDot={{ r: 4, strokeWidth: 2, stroke: c.tooltipBg }} isAnimationActive={false} connectNulls />

@@ -1,0 +1,32 @@
+name: Feature request
+description: Suggest an improvement or a new feature for DGXMM.
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the idea. Please check the [documentation](https://github.com/nikghodki/dgxmodelmanager/tree/main/docs) and the open issues first: it may already exist or be planned.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What you are trying to do, and what makes it hard or impossible today.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal
+      description: What you would like DGXMM to do. Screens, commands or API calls you have in mind are welcome.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives
+      description: Workarounds you use now, or other approaches you considered.
+  - type: input
+    id: host
+    attributes:
+      label: Host and GPU
+      description: Where you would use it, if it matters (e.g. DGX Spark, another arm64 or x86_64 GPU box).

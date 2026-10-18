@@ -14,15 +14,19 @@ from __future__ import annotations
 import logging
 import statistics
 import time
+from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any, Callable
 
 from sqlalchemy import func, select
 
 from dgxmm.db import Database, DecisionRecord, utcnow
-from dgxmm.decider.client import DeciderError, SystemOneClient
+from dgxmm.decider import registry
+from dgxmm.decider.client import (PRIORITY_BACKGROUND, PRIORITY_INTERACTIVE, PRIORITY_LANE, DeciderError,
+                                  SystemOneClient)
 from dgxmm.decider.common import finite, finite_probs
-from dgxmm.decider.protocol import DEFAULT_THRESHOLDS
 from dgxmm.decider.secret import read_key
 from dgxmm.decider.types import Decision, Option
 from dgxmm.engines.decision import DECIDER_MODELS, DEFAULT_MODEL
@@ -33,17 +37,60 @@ DECIDER_ENABLED = "decider.enabled"
 DECIDER_DEPLOYMENT_ID = "decider.deployment_id"
 DECIDER_SWITCH_FROM = "decider.switch_from"  # set while a model switch is not confirmed ready
 DECIDER_MODEL = "decider.model"  # which pinned decision model (engines/decision.py DECIDER_MODELS) to run
-# Settings-level features (UI toggles/thresholds) and their default thresholds.
-FEATURES: dict[str, float] = dict(DEFAULT_THRESHOLDS)  # calibrated defaults: see dgxmm/decider/protocol.py
-# Decision features (as logged) -> settings feature.
-FEATURE_GROUP = {"parser_tool": "parser", "parser_reasoning": "parser"}
+# Settings-level features (UI toggles/thresholds) and their default thresholds: the feature registry's groups
+# (dgxmm/decider/registry.py; the same dict object, so later registrations show up here). Calibration: protocol.py.
+FEATURES: dict[str, float] = registry.DEFAULT_THRESHOLDS
+# Decision features (as logged) -> settings feature (registry members, e.g. parser_tool -> parser).
+FEATURE_GROUP = registry.GROUP_OF
 UNLOGGED_ERRORS = {"circuit_open", "unavailable", "busy"}  # counted (load()), not logged: bursts would flood the log
-# Features asked from background tasks: they queue behind interactive (request-path) questions.
-BACKGROUND_FEATURES = frozenset({"diagnosis", "kind", "workload"})
+@dataclass
+class JobBudget:
+    """Decider calls one insight-engine job run may make (dgxmm/decider/insight_engine.py)."""
+    job: str
+    left: int
+    used: int = 0
+    refused: int = 0
+
+
+# Set for the duration of a job run (``job_context``). Every ``decide`` in that context — through ``ctx.decider``,
+# a feature service or anything else — uses the client's background lane (lowest priority, never every slot) and
+# counts against the run's budget; once it is used up, calls abstain without asking.
+LANE: ContextVar[JobBudget | None] = ContextVar("decider_job", default=None)
+
+
+@contextmanager
+def job_context(budget: JobBudget):
+    token = LANE.set(budget)
+    try:
+        yield budget
+    finally:
+        LANE.reset(token)
+
+
+def take_budget() -> bool:
+    """One model call is about to be made: False if the current job's budget is used up (counted as refused).
+    Outside a job: always True. Called only once the decider would really be asked."""
+    b = LANE.get()
+    if b is None:
+        return True
+    if b.left <= 0:
+        b.refused += 1
+        return False
+    b.left -= 1
+    b.used += 1
+    return True
 
 
 def feature_group(feature: str) -> str:
-    return FEATURE_GROUP.get(feature, feature)
+    return registry.group_of(feature)
+
+
+def call_priority(feature: str) -> int:
+    """Client priority of a model call: the insight lane, else background features (registry ``background``) queue
+    behind interactive (request-path) questions."""
+    if LANE.get() is not None:
+        return PRIORITY_LANE
+    return PRIORITY_BACKGROUND if registry.is_background(feature) else PRIORITY_INTERACTIVE
 
 
 def enabled_key(group: str) -> str:
@@ -134,8 +181,13 @@ class Decider:
         return FEATURES.get(group, 0.8)
 
     def feature_enabled(self, feature: str) -> bool:
-        """The decider is enabled and this feature is switched on (default on)."""
+        """The decider is enabled and this feature is switched on (default on): the model may be asked."""
         return self.enabled and self.store.get_bool(enabled_key(feature_group(feature)), True)
+
+    def rules_enabled(self, feature: str) -> bool:
+        """This feature is switched on (default on), whether or not the decider is: its rules may run (rules-only
+        paths work with the decision model disabled; spec "Feature registry")."""
+        return self.store.get_bool(enabled_key(feature_group(feature)), True)
 
     def features(self) -> dict[str, dict]:
         return {g: {"enabled": self.store.get_bool(enabled_key(g), True), "threshold": self.threshold(g)}
@@ -206,13 +258,15 @@ class Decider:
         try:
             if not options or not self.feature_enabled(feature) or not await self.available():
                 return none
+            if not take_budget():  # inside an insight-engine job whose budget is used up
+                return none
             client = self.client()
             th = self.threshold(feature) if threshold is None else threshold
             input_hash = client.input_hash(feature, state, question, options)
             try:
                 ans = await client.choose(feature=feature, state=state, question=question, options=options,
                                           timeout_s=timeout_s,
-                                          priority=1 if feature_group(feature) in BACKGROUND_FEATURES else 0)
+                                          priority=call_priority(feature))
             except DeciderError as e:
                 if log and e.code not in UNLOGGED_ERRORS:
                     try:

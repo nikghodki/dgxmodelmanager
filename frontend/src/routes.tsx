@@ -18,6 +18,7 @@ const DeploymentDetail = lazy(() => import("./pages/DeploymentDetail").then((m) 
 const LiteLLM = lazy(() => import("./pages/LiteLLM").then((m) => ({ default: m.LiteLLM })));
 const Processes = lazy(() => import("./pages/Processes").then((m) => ({ default: m.Processes })));
 const DecisionModel = lazy(() => import("./pages/DecisionModel").then((m) => ({ default: m.DecisionModel })));
+const Insights = lazy(() => import("./pages/Insights").then((m) => ({ default: m.Insights })));
 const Audit = lazy(() => import("./pages/Audit").then((m) => ({ default: m.Audit })));
 const lazyEl = (el: React.ReactNode) => <Suspense fallback={<PageSkeleton />}>{el}</Suspense>;
 
@@ -35,6 +36,7 @@ export function AppRoutes() {
         <Route path="/downloads" element={<Downloads />} />
         <Route path="/planner" element={lazyEl(<Planner />)} />
         <Route path="/processes" element={lazyEl(<Processes />)} />
+        <Route path="/insights" element={lazyEl(<Insights />)} />
         <Route path="/users" element={<Users />} />
         <Route path="/audit" element={lazyEl(<Audit />)} />
         <Route path="/litellm" element={lazyEl(<LiteLLM />)} />

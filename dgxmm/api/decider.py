@@ -37,7 +37,7 @@ class FeatureIn(BaseModel):
 
 class SettingsIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    features: dict[FeatureName, FeatureIn] = Field(default_factory=dict, max_length=16)
+    features: dict[FeatureName, FeatureIn] = Field(default_factory=dict, max_length=64)
     model: str | None = Field(None, max_length=128)  # one of DECIDER_MODELS; applied by the next enable
 
 
@@ -83,8 +83,10 @@ def models_out(ctx: AppContext) -> list[dict]:
     return out
 
 
-async def status_out(ctx: AppContext) -> dict:
-    from dgxmm.decider import upgrade
+async def status_out(ctx: AppContext, *, admin: bool = False) -> dict:
+    """Decider status. ``features``: group -> {enabled, threshold}; ``feature_specs``: the registry's groups in
+    display order (label, description, ...); ``jobs`` only with ``admin=True``: the insight engine's job status."""
+    from dgxmm.decider import registry, upgrade
     d = ctx.decider
     view = d.deployment()
     img = await image_status(ctx)
@@ -102,12 +104,14 @@ async def status_out(ctx: AppContext) -> dict:
                         "retry_in_s": round(breaker.retry_in(), 1)} if breaker is not None else None,
             "load": d.load() if hasattr(d, "load") else None,
             "supervisor": d.supervisor.status() if getattr(d, "supervisor", None) is not None else None,
+            "feature_specs": registry.feature_info(),
+            **({"jobs": ctx.insight_engine.status() if ctx.insight_engine is not None else []} if admin else {}),
             "image": {"present": img["present"], "building": img["building"], "error": img["error"]}}
 
 
 @router.get("/status")
 async def status(p: Principal = Depends(current_principal), ctx: AppContext = Depends(get_ctx)):
-    return await status_out(ctx)
+    return await status_out(ctx, admin=p.user.role == "admin")
 
 
 @router.put("/settings")
@@ -127,7 +131,7 @@ async def put_settings(body: SettingsIn, p: Principal = Depends(limited("decider
     audit(ctx.db, p.user.id, "decider_settings", "decider",
           {"features": {k: v.model_dump(exclude_none=True) for k, v in body.features.items()},
            **({"model": body.model} if body.model is not None else {})})
-    return await status_out(ctx)
+    return await status_out(ctx, admin=True)  # admin-only route
 
 
 @router.post("/enable", status_code=202)

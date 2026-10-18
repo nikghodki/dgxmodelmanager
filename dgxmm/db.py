@@ -1,12 +1,14 @@
 """SQLite persistence (SQLAlchemy 2 ORM)."""
 from __future__ import annotations
 
+import sqlite3
+import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Iterator
 
-from sqlalchemy import (JSON, BigInteger, Boolean, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint,
-                        create_engine, event, inspect, text)
+from sqlalchemy import (JSON, BigInteger, Boolean, DateTime, Float, ForeignKey, Index, Integer, String, Text,
+                        UniqueConstraint, create_engine, event, inspect, text)
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 
@@ -55,6 +57,9 @@ class CliToken(Base):
 
 class Deployment(Base):
     __tablename__ = "deployments"
+    # ids are never reused: rows of other tables keyed by a removed deployment's id (benchmark runs, readings,
+    # rollups, insights) must not attach to a new one (migration 30 rebuilds older tables)
+    __table_args__ = {"sqlite_autoincrement": True}
     id: Mapped[int] = mapped_column(primary_key=True)
     name: Mapped[str] = mapped_column(String(64), unique=True)
     engine: Mapped[str] = mapped_column(String(16))
@@ -91,6 +96,8 @@ class DeploymentEvent(Base):
     to_state: Mapped[str] = mapped_column(String(16))
     message: Mapped[str] = mapped_column(Text, default="")
     log_tail: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # who asked for a stop ("user", "schedule:<id>", ...); NULL on other events and on rows of older versions
+    actor: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
 
 class MemoryCalibration(Base):
@@ -108,6 +115,9 @@ class MemoryCalibration(Base):
     method: Mapped[str | None] = mapped_column(String(32), nullable=True)
     quality: Mapped[str | None] = mapped_column(String(16), nullable=True)  # verified | disputed | unverified
     detail: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    # Reading label (dgxmm/decider/reading.py); when set, quality is verified (plausible) or disputed (not learned
+    # from). The MemAvailable check's own verdict moves to reading.delta_quality; unlabelled rows are used as before.
+    reading: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
 
 class Benchmark(Base):
@@ -129,6 +139,10 @@ class Benchmark(Base):
     tps_total: Mapped[float] = mapped_column(Float)
     tps_per_req: Mapped[float] = mapped_column(Float)
     ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    # Reading label (dgxmm/decider/reading.py): quality verified (plausible) | disputed (left out of advice);
+    # NULL = not labelled (undecided or feature off): used as before
+    quality: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    reading: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
 
 class BenchmarkRun(Base):
@@ -244,6 +258,85 @@ class ArtifactKindRow(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
 
+# Insight statuses that hold their dedupe_key: at most one such row per key (open/snoozed are updated in place; a
+# dismissed one stays dismissed until its condition clears). applied / expired are closed for good.
+INSIGHT_LIVE = ("open", "snoozed", "dismissed")
+
+
+class Insight(Base):
+    """A proactive finding of a decision-model feature (spec "Insights feed"): templated title/body, an optional
+    action descriptor the UI turns into an existing dialog (never executed by the server). dgxmm/decider/insights.py
+    """
+    __tablename__ = "insights"
+    __table_args__ = (Index("uq_insights_live_dedupe", "dedupe_key", unique=True,
+                            sqlite_where=text("status IN ('open', 'snoozed', 'dismissed')")),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    kind: Mapped[str] = mapped_column(String(32), index=True)
+    feature: Mapped[str] = mapped_column(String(32), index=True)
+    subject: Mapped[str] = mapped_column(String(256), default="", index=True)  # e.g. deployment:<id>
+    severity: Mapped[str] = mapped_column(String(8))  # info | warning | critical
+    title: Mapped[str] = mapped_column(String(256))
+    body: Mapped[str] = mapped_column(Text, default="")
+    confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    source: Mapped[str] = mapped_column(String(8))  # rules | model
+    decision_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    action: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    status: Mapped[str] = mapped_column(String(16), default="open", index=True)  # open|dismissed|snoozed|applied|expired
+    snooze_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    dedupe_key: Mapped[str] = mapped_column(String(256))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class CompatCacheRow(Base):
+    """Results of the pre-download compatibility check (dgxmm/decider/compat.py) by (repo, commit sha): verdicts,
+    reason keys and flags only, never file contents. Pruned after 7 days (dgxmm/decider/retention.py)."""
+    __tablename__ = "compat_cache"
+    repo: Mapped[str] = mapped_column(String(256), primary_key=True)
+    sha: Mapped[str] = mapped_column(String(64), primary_key=True)
+    result: Mapped[dict] = mapped_column(JSON)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+
+
+class DeploymentSchedule(Base):
+    """A user-owned sleep/wake (or stop/start) schedule of a deployment (decision-model feature 7), run by the
+    schedule runner (dgxmm/decider/schedule.py) through the deployer's normal paths, audited as ``schedule:<id>``."""
+    __tablename__ = "deployment_schedules"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    deployment_id: Mapped[int] = mapped_column(ForeignKey("deployments.id", ondelete="CASCADE"), index=True)
+    action: Mapped[str] = mapped_column(String(8))  # sleep | wake | stop | start
+    days: Mapped[int] = mapped_column(Integer)  # bitmask: bit 0 = Monday .. bit 6 = Sunday
+    at_local: Mapped[str] = mapped_column(String(5))  # HH:MM wall time in `timezone`
+    timezone: Mapped[str] = mapped_column(String(64))  # IANA name
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_by: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    # Changed by the user only (create / edit / pause / resume), never by a run: slots before it are not "missed".
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    last_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_run_date: Mapped[str | None] = mapped_column(String(10), nullable=True)  # local date of the last slot handled
+    last_result: Mapped[str | None] = mapped_column(String(256), nullable=True)
+
+
+class TrafficProfile(Base):
+    """A deployment's request activity per hour of the week (0 = Monday 00:00 local) over the last 30 days of
+    metric rollups, rebuilt nightly (decision-model feature 7)."""
+    __tablename__ = "traffic_profiles"
+    __table_args__ = (UniqueConstraint("deployment_id", "hour_of_week", name="uq_traffic_profiles_hour"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    deployment_id: Mapped[int] = mapped_column(ForeignKey("deployments.id", ondelete="CASCADE"), index=True)
+    hour_of_week: Mapped[int] = mapped_column(Integer)
+    requests_per_min_p50: Mapped[float | None] = mapped_column(Float, nullable=True)
+    requests_per_min_p95: Mapped[float | None] = mapped_column(Float, nullable=True)
+    active_fraction: Mapped[float] = mapped_column(Float)  # share of observed minutes with request activity
+    samples: Mapped[int] = mapped_column(Integer)  # observed minutes
+    weeks: Mapped[int | None] = mapped_column(Integer, nullable=True)  # weeks with this hour observed
+    idle_weeks: Mapped[int | None] = mapped_column(Integer, nullable=True)  # of those, weeks it was idle (<= 5 %)
+    days: Mapped[int | None] = mapped_column(Integer, nullable=True)  # local days with data (the whole profile)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 def add_missing_columns(engine) -> list[str]:
     """Idempotent schema upgrade step: `create_all` creates new tables but never alters existing ones, so add any
     nullable model column missing from an existing table. Constraints, unique indexes and data changes are
@@ -274,6 +367,23 @@ def add_missing_columns(engine) -> list[str]:
     return added
 
 
+def enable_wal(cur, timeout_s: float = 5.0) -> None:
+    """Switch the database to WAL. Converting a rollback-journal database takes an exclusive lock, and when another
+    connection converts or opens it at the same moment (concurrent startups) SQLite answers "database is locked" at
+    once instead of waiting in its busy handler, so retry with a short backoff for up to `timeout_s`."""
+    deadline = time.monotonic() + timeout_s
+    delay = 0.01
+    while True:
+        try:
+            cur.execute("PRAGMA journal_mode=WAL")
+            return
+        except sqlite3.OperationalError as e:
+            if "locked" not in str(e) or time.monotonic() >= deadline:
+                raise
+        time.sleep(delay)
+        delay = min(delay * 2, 0.2)
+
+
 class Database:
     def __init__(self, url: str):
         self.engine = create_engine(url, connect_args={"check_same_thread": False})
@@ -282,7 +392,7 @@ class Database:
         def _pragmas(conn, _):  # noqa: ANN001
             cur = conn.cursor()
             cur.execute("PRAGMA busy_timeout=5000")  # first: switching to WAL needs a lock another process may hold
-            cur.execute("PRAGMA journal_mode=WAL")
+            enable_wal(cur)
             cur.execute("PRAGMA foreign_keys=ON")
             cur.close()
 

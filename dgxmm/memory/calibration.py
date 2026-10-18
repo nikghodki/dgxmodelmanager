@@ -56,18 +56,36 @@ LOG_TAIL = 10000
 
 
 def _usable(r: MemoryCalibration) -> bool:
-    return not r.oom and r.method in RELIABLE_METHODS and r.measured_bytes > 0
+    """A reliable measurement; a reading labelled anything but plausible (quality "disputed", set by the reading
+    labels of dgxmm/decider/reading.py) is not learned from."""
+    return not r.oom and r.method in RELIABLE_METHODS and r.measured_bytes > 0 and r.quality != "disputed"
+
+
+def delta_quality_of(r: MemoryCalibration | None) -> str | None:
+    """The MemAvailable cross-check's verdict (``quality`` as recorded; kept in ``reading`` once labelled)."""
+    if r is None:
+        return None
+    return (r.reading or {}).get("delta_quality", r.quality) if r.reading else r.quality
 
 
 class Calibration:
     def __init__(self, db: Database):
         self.db = db
+        self.listeners: list = []  # fn(row_id) after a measurement is stored (reading labels)
 
     def record(self, engine: str, repo: str, config_hash: str, estimated: int, measured: int, *, method: str,
                quality: str | None = None, detail: dict | None = None) -> None:
         with self.db.session() as s:
-            s.add(MemoryCalibration(engine=engine, repo=repo, config_hash=config_hash, estimated_bytes=estimated,
-                                    measured_bytes=measured, oom=False, method=method, quality=quality, detail=detail))
+            row = MemoryCalibration(engine=engine, repo=repo, config_hash=config_hash, estimated_bytes=estimated,
+                                    measured_bytes=measured, oom=False, method=method, quality=quality, detail=detail)
+            s.add(row)
+            s.flush()
+            row_id = row.id
+        for fn in self.listeners:
+            try:
+                fn(row_id)
+            except Exception:
+                log.exception("calibration listener failed")
 
     def record_oom(self, engine: str, repo: str, config_hash: str, estimated: int) -> None:
         with self.db.session() as s:
@@ -108,10 +126,13 @@ class Calibration:
         if exact:
             # Controller ruling: never lower the estimate. Only a MemAvailable-verified row claims "measured".
             new_total = max(int(exact.measured_bytes * 1.05), est.total)
-            verified = exact.quality == "verified"
+            # The MemAvailable cross-check decides "measured", never the reading label (dgxmm/decider/reading.py
+            # rewrites ``quality`` to verified/disputed; the cross-check's own verdict is kept in reading.delta_quality).
+            check = delta_quality_of(exact)
+            verified = check == "verified"
             note = f"measured {exact.measured_bytes / GIB:.1f} GiB with this exact configuration"
             est = est.with_total(new_total, "measured" if verified else "calibrated",
-                                 note if verified else f"{note} (quality={exact.quality})")
+                                 note if verified else f"{note} (quality={check})")
         else:
             ratios = [r.measured_bytes / r.estimated_bytes for r in rows if not r.oom and r.estimated_bytes > 0][:5]
             if ratios:
@@ -222,7 +243,8 @@ class CalibrationRecorder:
         learned_excess = 0
         if unexplained:
             prev = self.calibration.last_reading(dep.engine, dep.model_ref, h)
-            prev_excess = (prev.detail or {}).get("unexplained_bytes", 0) if prev and prev.quality == "disputed_high" else 0
+            prev_excess = (prev.detail or {}).get("unexplained_bytes", 0) \
+                if prev and delta_quality_of(prev) == "disputed_high" else 0
             if prev_excess > 0:  # confirmed by two consecutive readings: learn the smaller excess, capped
                 learned_excess = min(unexplained, prev_excess, excess_cap(observed))
             log.warning("calibration: %s MemAvailable dropped %.1f GiB but the engine log + host account for %.1f GiB; "
@@ -234,7 +256,8 @@ class CalibrationRecorder:
         detail = {"engine_bytes": fp.total, "host_bytes": host, "observed_bytes": observed, "learned_bytes": learned,
                   "formula_kv_bytes": formula_kv, "unexplained_bytes": unexplained,
                   "learned_excess_bytes": learned_excess, "complete": fp.complete,
-                  "parts": fp.parts, "memavailable_delta": delta, "cgroup_nvml_bytes": actual}
+                  "parts": fp.parts, "memavailable_delta": delta, "cgroup_nvml_bytes": actual,
+                  "noisy": bool(window and window["noisy"])}
         self.calibration.record(dep.engine, dep.model_ref, h, int(raw), int(measured),
                                 method="engine_log", quality=quality, detail=detail)
         log.info("calibration: %s estimated %.1f GiB (formula) measured %.1f GiB (observed %.1f = engine log %.1f + "

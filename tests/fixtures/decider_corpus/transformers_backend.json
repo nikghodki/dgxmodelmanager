@@ -1,0 +1,189 @@
+{
+"architectures": {
+"AXK2ForCausalLM": {
+"attn_backend": true,
+"in_transformers": true
+},
+"BaiChuanForCausalLM": {
+"attn_backend": false,
+"in_transformers": false
+},
+"BaichuanForCausalLM": {
+"attn_backend": false,
+"in_transformers": false
+},
+"BartForSequenceClassification": {
+"attn_backend": false,
+"in_transformers": true
+},
+"CLIPT5ForConditionalGeneration": {
+"attn_backend": false,
+"in_transformers": false
+},
+"CodeGenForCausalLM": {
+"attn_backend": false,
+"in_transformers": true
+},
+"CostWiseGemmaForCausalLM": {
+"attn_backend": false,
+"in_transformers": false
+},
+"DebertaV2ForSequenceClassification": {
+"attn_backend": false,
+"in_transformers": true
+},
+"DistilBertForSequenceClassification": {
+"attn_backend": true,
+"in_transformers": true
+},
+"DreamModel": {
+"attn_backend": false,
+"in_transformers": false
+},
+"Eagle3Speculator": {
+"attn_backend": false,
+"in_transformers": false
+},
+"ElectraForPreTraining": {
+"attn_backend": true,
+"in_transformers": true
+},
+"GPTNeoForCausalLM": {
+"attn_backend": false,
+"in_transformers": true
+},
+"GigaChatAudioForConditionalGeneration": {
+"attn_backend": false,
+"in_transformers": false
+},
+"IlamaForCausalLM": {
+"attn_backend": false,
+"in_transformers": false
+},
+"InternLMForCausalLM": {
+"attn_backend": false,
+"in_transformers": false
+},
+"K2HorizonForCausalLM": {
+"attn_backend": false,
+"in_transformers": false
+},
+"LLaDA2MoeModelLM": {
+"attn_backend": false,
+"in_transformers": false
+},
+"LLaDAModelLM": {
+"attn_backend": false,
+"in_transformers": false
+},
+"MPNetForMaskedLM": {
+"attn_backend": false,
+"in_transformers": true
+},
+"MaskedDiffusionLM": {
+"attn_backend": false,
+"in_transformers": false
+},
+"MiniCPMSALAForCausalLM": {
+"attn_backend": false,
+"in_transformers": false
+},
+"NanbeigeForCausalLM": {
+"attn_backend": false,
+"in_transformers": false
+},
+"NeedleForToolCalling": {
+"attn_backend": false,
+"in_transformers": false
+},
+"NemotronLabsDiffusionModel": {
+"attn_backend": false,
+"in_transformers": false
+},
+"Neutrino": {
+"attn_backend": false,
+"in_transformers": false
+},
+"OpenAIGPTLMHeadModel": {
+"attn_backend": false,
+"in_transformers": true
+},
+"OpenELMForCausalLM": {
+"attn_backend": false,
+"in_transformers": false
+},
+"PicoDecoderHF": {
+"attn_backend": false,
+"in_transformers": false
+},
+"QWenLMHeadModel": {
+"attn_backend": false,
+"in_transformers": false
+},
+"Qwen3Mamba3ForCausalLM": {
+"attn_backend": false,
+"in_transformers": false
+},
+"Qwen3_5Model": {
+"attn_backend": false,
+"in_transformers": true
+},
+"Qwen4ExpForConditionalGeneration": {
+"attn_backend": false,
+"in_transformers": false
+},
+"RemoteForCausalLM": {
+"attn_backend": false,
+"in_transformers": false
+},
+"Spark2_5ForCausalLM": {
+"attn_backend": false,
+"in_transformers": false
+},
+"SparkXForCausalLM": {
+"attn_backend": false,
+"in_transformers": false
+},
+"SpeechT5ForTextToSpeech": {
+"attn_backend": false,
+"in_transformers": true
+},
+"T5EncoderModel": {
+"attn_backend": false,
+"in_transformers": true
+},
+"T5ForConditionalGeneration": {
+"attn_backend": false,
+"in_transformers": true
+},
+"TLiveOmniForConditionalGeneration": {
+"attn_backend": false,
+"in_transformers": false
+},
+"TinyTimeMixerForPrediction": {
+"attn_backend": false,
+"in_transformers": false
+},
+"TransformerForCausalLM": {
+"attn_backend": false,
+"in_transformers": false
+},
+"Wav2Vec2ForCTC": {
+"attn_backend": false,
+"in_transformers": true
+},
+"XCurOSForCausalLM": {
+"attn_backend": false,
+"in_transformers": false
+},
+"XLNetLMHeadModel": {
+"attn_backend": false,
+"in_transformers": true
+},
+"Xing4_0ForCausalLM": {
+"attn_backend": false,
+"in_transformers": false
+}
+},
+"transformers": "5.15.1"
+}

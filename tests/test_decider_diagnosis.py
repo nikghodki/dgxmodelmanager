@@ -262,7 +262,7 @@ async def test_hook_never_blocks_the_caller(stack):
     ctx = make_ctx(stack, fake)
     t = time.monotonic()
     await ctx.diagnosis.on_state(1, "loading", "failed")
-    assert time.monotonic() - t < 0.1
+    assert time.monotonic() - t < 1.0  # the model takes 30 s
     for task in list(ctx.diagnosis._tasks):
         task.cancel()
 

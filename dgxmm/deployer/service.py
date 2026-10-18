@@ -94,6 +94,8 @@ class Deployer:
         self._monitors: dict[int, asyncio.Task] = {}
         self.state_hooks: list[StateHook] = []
         self.removal_hooks: list[Callable[[int], None]] = []  # fn(dep_id) after a deployment row is deleted
+        # fn(dep_id) just before (rows that cascade with it still exist, e.g. to audit their deletion)
+        self.before_removal_hooks: list[Callable[[int], None]] = []
         self.calibration = None  # set in Task 32
         self.delete_guard: Callable[[str], bool] | None = None  # WeightsDeleter.is_being_deleted
         # LiteLLMSync.error_for: why a deployment is not (correctly) registered in LiteLLM, as of the last sync
@@ -109,6 +111,8 @@ class Deployer:
         self.gate = StartupGate(lambda: self.settings.max_concurrent_startups)
         self._queued: dict[int, asyncio.Task] = {}  # dep_id -> task waiting for its start-up slot
         self._waking: dict[int, asyncio.Task] = {}  # dep_id -> wake-up waiting for its start-up slot
+        # dep_id -> (error code, message) of the last background wake-up that failed (read by the schedule runner)
+        self.wake_failures: dict[int, tuple[str, str]] = {}
 
     def _check_not_deleting(self, *refs: str | None) -> None:
         for ref in refs:
@@ -172,7 +176,8 @@ class Deployer:
         # Accept if: absolute path, has .gguf suffix, and the resolved path is under an allowed root
         return p.is_absolute() and p.suffix.lower() == ".gguf" and any(r in p_resolved.parents for r in roots)
 
-    def _transition(self, dep_id: int, to: str, message: str = "", log_tail: str | None = None, **fields) -> dict:
+    def _transition(self, dep_id: int, to: str, message: str = "", log_tail: str | None = None,
+                    actor: str | None = None, **fields) -> dict:
         with self.db.session() as s:
             dep = s.get(Deployment, dep_id)
             frm = dep.state
@@ -180,7 +185,8 @@ class Deployer:
             dep.state = to
             for k, v in fields.items():
                 setattr(dep, k, v)
-            s.add(DeploymentEvent(deployment_id=dep_id, from_state=frm, to_state=to, message=message, log_tail=log_tail))
+            s.add(DeploymentEvent(deployment_id=dep_id, from_state=frm, to_state=to, message=message, log_tail=log_tail,
+                                  actor=actor[:64] if actor else None))
         if to not in STARTUP_STATES and self.gate.holders.get(dep_id) not in (None, "wake"):
             self.gate.release(dep_id)  # the start-up is over (ready / failed / stopping ...): next in queue may go
         view = self.view(dep_id)
@@ -739,11 +745,15 @@ class Deployer:
                 return dep.state
             await asyncio.sleep(0.02)
 
-    async def stop(self, dep_id: int, user_id: int | None = None, reason: str = "user") -> dict:
+    async def stop(self, dep_id: int, user_id: int | None = None, reason: str = "user", precheck=None) -> dict:
+        """``precheck``: optional async fn -> reason or None, called under the deployment's lock before a ready
+        deployment is stopped (the schedule runner re-checks traffic there); a reason refuses with 409 ``precheck``."""
         async with self._lock(dep_id):
             dep = self._require(dep_id)
             if dep.state == "stopped":
                 return self.view(dep_id)
+            if precheck is not None and dep.state == "ready" and (why := await precheck()):
+                raise DeployError("precheck", why, 409)
             mon = self._monitors.pop(dep_id, None)
             if mon and not mon.done():
                 mon.cancel()
@@ -753,13 +763,14 @@ class Deployer:
                     q.cancel()
                 self.gate.withdraw(dep_id)
                 return self._transition(dep_id, "stopped", message=f"cancelled while queued ({reason})",
-                                        container_id=None)
+                                        actor=reason, container_id=None)
             if dep.state in ("planned", "failed"):
                 await asyncio.to_thread(self.docker.stop_and_remove, dep.container_id)
                 await self._remove_leftover(dep.name, dep_id)
-                return self._transition(dep_id, "stopped", message=f"cleaned up ({reason})", container_id=None)
+                return self._transition(dep_id, "stopped", message=f"cleaned up ({reason})", actor=reason,
+                                        container_id=None)
             if dep.state != "stopping":
-                self._transition(dep_id, "stopping", message=f"stop requested ({reason})")
+                self._transition(dep_id, "stopping", message=f"stop requested ({reason})", actor=reason)
             try:
                 await asyncio.to_thread(self.docker.stop_and_remove, dep.container_id)
             except Exception as e:
@@ -802,6 +813,11 @@ class Deployer:
                 raise DeployError("not_stopped", "stop the deployment before removing it", 409)
             await asyncio.to_thread(self.docker.stop_and_remove, dep.container_id)
             await self._remove_leftover(dep.name, dep_id)
+            for hook in self.before_removal_hooks:
+                try:
+                    hook(dep_id)
+                except Exception:
+                    log.exception("before-removal hook failed for deployment %s", dep_id)
             with self.db.session() as s:
                 s.delete(s.get(Deployment, dep_id))
             self.gate.forget(dep_id)
@@ -941,11 +957,14 @@ class Deployer:
             return MemoryEstimate.from_dict(dep.estimate)
         return MemoryEstimate(dep.reserved_bytes, 0, 0, 0, 0, 0, 0, "low")
 
-    async def sleep(self, dep_id: int, user_id: int | None = None) -> dict:
+    async def sleep(self, dep_id: int, user_id: int | None = None, precheck=None) -> dict:
+        """``precheck``: as for ``stop``."""
         async with self._lock(dep_id):
             dep = self._require(dep_id)
             if dep.state != "ready":
                 raise DeployError("not_ready", f"deployment is {dep.state}", 409)
+            if precheck is not None and (why := await precheck()):
+                raise DeployError("precheck", why, 409)
             engine = self.engines[dep.engine]
             cfg = engine.validate_config(dep.config)
             if not (engine.supports_sleep and engine.sleep_enabled(cfg)):
@@ -985,6 +1004,7 @@ class Deployer:
             return
         # nobody may be waiting any more (background wake-up): keep the reason on the deployment
         msg = e.message if isinstance(e, DeployError) else f"{type(e).__name__}: {e}"
+        self.wake_failures[dep_id] = (e.code if isinstance(e, DeployError) else "error", msg)
         try:
             with self.db.session() as s:
                 row = s.get(Deployment, dep_id)

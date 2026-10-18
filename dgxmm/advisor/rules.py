@@ -282,7 +282,7 @@ class AdvisorService:
         self.deployer, self.inventory, self.store, self.db = deployer, inventory, store, db
 
     def advise(self, dep_id: int) -> list[dict]:
-        from sqlalchemy import select
+        from sqlalchemy import or_, select
         from dgxmm.db import Benchmark
         v = self.deployer.view(dep_id)
         artifact = self.inventory.get(v["model_ref"])
@@ -293,8 +293,10 @@ class AdvisorService:
         variants = [a for a in others if a.kind == "llm" and base_model_name(a.ref) == base]
         drafts = [a for a in others if a.kind == "draft" and base_model_name(a.ref).startswith(base)]
         with self.db.session() as s:
+            # readings labelled other than plausible (dgxmm/decider/reading.py) are not advice material
             rows = s.scalars(select(Benchmark).where(Benchmark.model_ref == v["model_ref"], Benchmark.requests > 0,
-                                                    Benchmark.tps_per_req > 0)
+                                                    Benchmark.tps_per_req > 0,
+                                                    or_(Benchmark.quality.is_(None), Benchmark.quality != "disputed"))
                              .order_by(Benchmark.id.desc()))
             benches = [{"config_hash": b.config_hash, "concurrency": b.concurrency, "tps_per_req": b.tps_per_req,
                         "tps_total": b.tps_total, "requests": b.requests} for b in rows]

@@ -49,6 +49,7 @@ class BenchmarkRunner:
         self.http_factory = http_factory or (lambda: httpx.AsyncClient(timeout=httpx.Timeout(600, connect=10)))
         self._lock = asyncio.Lock()
         self._running: int | None = None
+        self.listeners: list[Callable[[int], object]] = []  # fn(benchmark row id) after a level is stored
 
     def busy(self) -> int | None:
         return self._running
@@ -143,11 +144,19 @@ class BenchmarkRunner:
                                                               "failed": True, "error": error})
                             break
                         with self.db.session() as s:
-                            s.add(Benchmark(deployment_id=deployment_id, engine=engine, model_ref=model_ref,
+                            row = Benchmark(deployment_id=deployment_id, engine=engine, model_ref=model_ref,
                                             config_hash=h, config=config, concurrency=conc,
                                             input_len=input_len, output_len=output_len, requests=r["requests"],
                                             errors=r["errors"], ttft_p50=r["ttft_p50"], ttft_p95=r["ttft_p95"],
-                                            itl_p50=r["itl_p50"], tps_total=r["tps_total"], tps_per_req=r["tps_per_req"]))
+                                            itl_p50=r["itl_p50"], tps_total=r["tps_total"], tps_per_req=r["tps_per_req"])
+                            s.add(row)
+                            s.flush()
+                            row_id = row.id
+                        for fn in self.listeners:
+                            try:
+                                fn(row_id)
+                            except Exception:  # a listener (reading labels) never breaks the benchmark
+                                pass
                         results.append(r)
                         self.events.publish("benchmark", {"deployment_id": deployment_id, "level": r,
                                                           "done": conc == levels[-1]})

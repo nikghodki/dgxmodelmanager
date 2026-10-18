@@ -50,6 +50,12 @@ class AppContext:
     diagnosis: Any = None  # DiagnosisService (failure diagnosis)
     workload: Any = None   # WorkloadService (workload label for advice ordering)
     kinds: Any = None      # KindService (model-derived artifact kinds)
+    insights: Any = None   # InsightService (dgxmm/decider/insights.py); always constructed
+    insight_engine: Any = None  # InsightEngine (dgxmm/decider/insight_engine.py); runs from ctx.background
+    health: Any = None     # HealthService (dgxmm/decider/health.py; job health_check)
+    readings: Any = None   # ReadingService (dgxmm/decider/reading.py; job reading_labels)
+    routing: Any = None    # RoutingService (dgxmm/decider/routing.py; job routing_advice)
+    schedules: Any = None  # ScheduleService (dgxmm/decider/schedule.py): sleep/wake schedules, profiles, proposals
 
     def __post_init__(self) -> None:
         if self.settings_store is None:
@@ -64,6 +70,14 @@ class AppContext:
                                                                                  None)
         if hooks is not None and on_removed is not None and on_removed not in hooks:
             hooks.append(on_removed)
+        if self.insights is None:
+            from dgxmm.decider.insights import InsightService
+            self.insights = InsightService(self.db, self.events)
+        if hooks is not None and self.insights.on_deployment_removed not in hooks:
+            hooks.append(self.insights.on_deployment_removed)  # a deployment's insights are deleted with it
+        if self.insight_engine is None:
+            from dgxmm.decider.insight_engine import InsightEngine
+            self.insight_engine = InsightEngine(self)
         if self.decider_image is None:
             from dgxmm.decider.image import DeciderImage
             self.decider_image = DeciderImage(self.settings, lambda: self.docker, self.events)
@@ -180,6 +194,7 @@ def build_context(settings: Settings) -> AppContext:
     scraper = MetricsScraper(settings, deployer, http, store, events, budget)
     from dgxmm.decider.retention import prune as prune_decider_tables
     scraper.retention.append(lambda: prune_decider_tables(db, settings))
+    scraper.retention.append(ctx.insights.prune)  # closed insights 30 days, expiries, snooze ends
     ctx.metrics = store
     ctx.background.append(scraper.run)
 

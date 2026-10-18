@@ -38,4 +38,7 @@ class ModelArtifact:
             "max_context": a.max_context if a else None, "is_moe": a.is_moe if a else None,
             "num_layers": a.num_layers if a else None, "confident": a.confident if a else None,
             "has_mtp": any("mtp" in f for f in self.files),
+            # custom code in the repo (config auto_map): trust_remote_code would run it (remote-code risk check)
+            "has_remote_code": bool(self.config and (self.config.get("auto_map") or (
+                isinstance(self.config.get("text_config"), dict) and self.config["text_config"].get("auto_map")))),
         }

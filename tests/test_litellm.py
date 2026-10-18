@@ -104,3 +104,30 @@ async def test_no_key_means_disabled(stack):
     d = await ready(stack, "a")
     assert await sync.sync()
     assert stack.deployer.view(d["id"])["litellm_status"] == "disabled"
+
+
+async def test_listeners_fire_once_per_change_of_what_the_last_sync_reports(stack):
+    """``listeners`` (routing advice) run after a successful sync whenever what ``is_registered`` reports changed:
+    a new registration, a removal, the integration switched off (nothing is registered any more), or the first
+    good sync after a failed one. Never on a sync that changed nothing, and never on a failed sync."""
+    fake = FakeLiteLLM()
+    sync = make(stack, fake)
+    fired = []
+    sync.listeners.append(lambda: fired.append(1))
+    sync.listeners.insert(0, lambda: 1 / 0)  # a failing listener does not stop the others or the sync
+    d = await ready(stack, "a")
+    assert await sync.sync() and len(fired) == 1          # registered
+    assert await sync.sync() and len(fired) == 1          # unchanged
+    fake.down = True
+    assert not await sync.sync() and len(fired) == 1      # failed: no notice
+    fake.down = False
+    assert await sync.sync() and len(fired) == 2          # known again after the failure
+    await stack.deployer.stop(d["id"])
+    assert await sync.sync() and len(fired) == 3          # removed
+    d = await ready(stack, "b")
+    assert await sync.sync() and len(fired) == 4
+    client, sync.client = sync.client, None               # integration switched off
+    assert await sync.sync() and len(fired) == 5
+    assert await sync.sync() and len(fired) == 5
+    sync.client = client
+    assert await sync.sync() and len(fired) == 6

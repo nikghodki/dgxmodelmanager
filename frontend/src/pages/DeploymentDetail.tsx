@@ -22,7 +22,7 @@ import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { engineLabel, fmtBytes, fmtMs, fmtNum } from "@/format";
 import { useActionMutation } from "@/hooks/use-action-mutation";
-import { benchmarkSeries } from "@/lib/benchmarks";
+import { benchmarkSeries, plausibleRows, readingBadge } from "@/lib/benchmarks";
 import { estimateParts } from "@/lib/estimate";
 import { SYSTEM_REMOVE_TEXT, adviceApplicable, deploymentActions } from "@/logic";
 import { useLive } from "@/stream";
@@ -30,6 +30,8 @@ import type { Deployment, Workload } from "@/types";
 import { SwitchDialog } from "@/components/app/switch-dialog";
 import { DecisionChip, SystemBadge } from "@/components/app/decision-chip";
 import { DiagnosisCard, useDiagnosis } from "@/components/app/diagnosis-card";
+import { DeploymentInsightsCard } from "@/components/app/insights-card";
+import { DeploymentSchedulesCard } from "@/components/app/schedules-card";
 
 /** How long after a failure the page says "Diagnosing…" while no (fresh) diagnosis has arrived. */
 const DIAGNOSIS_WAIT_MS = 5 * 60_000;
@@ -127,6 +129,12 @@ function Advice({ d, onApply }: { d: Deployment; onApply: (patch: Record<string,
   );
 }
 
+function ReadingBadge({ label, source }: { label?: string | null; source?: string | null }) {
+  const r = readingBadge(label, source);
+  if (!r) return <span className="text-xs text-muted-foreground">—</span>;
+  return <span title={r.hint} aria-label={`Reading: ${r.text}. ${r.hint}`} className={`inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-medium ${r.tone}`}>{r.text}</span>;
+}
+
 function Benchmarks({ d }: { d: Deployment }) {
   const admin = useIsAdmin();
   const q = useQuery({ queryKey: ["benchmarks", d.id], queryFn: () => api<any[]>(`/deployments/${d.id}/benchmarks`), refetchInterval: 10000 });
@@ -134,7 +142,7 @@ function Benchmarks({ d }: { d: Deployment }) {
     success: "Benchmark started — results appear as each level finishes (up to 4 minutes)", invalidate: [["benchmarks", d.id]],
   });
   const rows = q.data ?? [];
-  const { data, keys } = benchmarkSeries(rows);
+  const { data, keys } = benchmarkSeries(plausibleRows(rows));  // readings labelled other than plausible are not charted
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap items-center justify-between gap-2">
@@ -148,7 +156,7 @@ function Benchmarks({ d }: { d: Deployment }) {
           <Card className="shadow-card overflow-x-auto">
             <table className="w-full text-sm">
               <thead><tr className="border-b text-left text-xs uppercase tracking-wider text-muted-foreground">
-                {["When", "Config", "Concurrency", "Total tok/s", "Per-request tok/s", "TTFT p50", "ITL p50"].map((h) => <th key={h} className="px-4 py-2 font-medium">{h}</th>)}
+                {["When", "Config", "Concurrency", "Total tok/s", "Per-request tok/s", "TTFT p50", "ITL p50", "Reading"].map((h) => <th key={h} className="px-4 py-2 font-medium">{h}</th>)}
               </tr></thead>
               <tbody>
                 {rows.map((b) => (
@@ -160,6 +168,7 @@ function Benchmarks({ d }: { d: Deployment }) {
                     <td className="px-4 py-2 tabular-nums">{fmtNum(b.tps_per_req, 1)}</td>
                     <td className="px-4 py-2 tabular-nums">{fmtMs(b.ttft_p50)}</td>
                     <td className="px-4 py-2 tabular-nums">{fmtMs(b.itl_p50)}</td>
+                    <td className="px-4 py-2"><ReadingBadge label={b.label} source={b.label_source} /></td>
                   </tr>
                 ))}
               </tbody>
@@ -283,6 +292,8 @@ export function DeploymentDetail() {
         <TabsContent value="overview" className="mt-4 grid grid-cols-1 gap-4 lg:grid-cols-3">
           {currentDiagnosis && <DiagnosisCard diagnosis={currentDiagnosis} admin={admin} className="lg:col-span-3" onApplyFix={applyFix} />}
           {diagnosing && <p className="flex items-center gap-2 text-sm text-muted-foreground lg:col-span-3"><Loader2 aria-hidden className="h-4 w-4 animate-spin" />Diagnosing…</p>}
+          <DeploymentInsightsCard deploymentId={d.id} className="lg:col-span-3" />
+          <DeploymentSchedulesCard deployment={d} className="lg:col-span-3" />
           <ApiAccessCard d={d} info={litellm.data} loading={litellm.isLoading} error={litellm.error} />
           <Card className="min-w-0 shadow-card">
             <CardHeader className="pb-2"><CardTitle className="text-sm">Memory</CardTitle>

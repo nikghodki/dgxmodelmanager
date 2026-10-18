@@ -3,6 +3,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, streamUrl } from "./api";
 
 const LIVE_POINTS = 120;
+export const INSIGHTS_COALESCE_MS = 300;
 /** SSE `decider` phases that end an image build (anything else is progress). */
 export const DECIDER_BUILD_END = ["done", "complete", "completed", "ready", "error", "failed"];
 
@@ -33,12 +34,18 @@ export function useLiveUpdates(enabled: boolean) {
     on("alert", (d) => qc.setQueryData(["alert"], d));
     // Decision model: a new failure diagnosis, and progress of the decider image build.
     on("diagnosis", (d) => qc.invalidateQueries({ queryKey: ["diagnosis", d.deployment_id] }));
+    // Insights feed: the event carries only the id; every insights query re-fetches (the server filters by role).
+    // Coalesced: a job or retention pass changing many insights at once costs one re-fetch per query.
+    let insightsTimer: ReturnType<typeof setTimeout> | undefined;
+    on("insights", () => {
+      if (insightsTimer === undefined) insightsTimer = setTimeout(() => { insightsTimer = undefined; qc.invalidateQueries({ queryKey: ["insights"] }); }, INSIGHTS_COALESCE_MS);
+    });
     on("decider", (d) => {
       qc.setQueryData(["decider-build"], d);
       // A build starting or ending changes the status (the chip shows "Building" meanwhile).
       if (d?.phase === "started" || DECIDER_BUILD_END.includes(d?.phase)) qc.invalidateQueries({ queryKey: ["decider-status"] });
     });
-    return () => es.close();
+    return () => { es.close(); if (insightsTimer !== undefined) clearTimeout(insightsTimer); };
   }, [enabled, qc]);
 }
 

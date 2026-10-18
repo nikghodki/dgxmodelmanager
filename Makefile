@@ -24,4 +24,4 @@ test:               ## backend + installer tests
 	.venv/bin/pytest -q
 
 lint:               ## shellcheck the installer
-	docker run --rm -v "$(CURDIR):/mnt" -w /mnt koalaman/shellcheck:stable install.sh tests/fixtures/install_stubs/*
+	docker run --rm -v "$(CURDIR):/mnt" -w /mnt koalaman/shellcheck:v0.11.0 install.sh tests/fixtures/install_stubs/*

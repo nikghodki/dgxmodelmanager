@@ -10,6 +10,11 @@ import { ModelSelect } from "@/components/app/model-select";
 import { PageHeader } from "@/components/app/page-header";
 import { PlanChooser } from "@/components/app/plan-chooser";
 import { useParserSuggestions } from "@/components/app/parser-suggestions";
+import { CompatLine } from "@/components/app/compat-line";
+import { ConfigAdviceCard } from "@/components/app/config-advice";
+import { EngineChip } from "@/components/app/engine-chip";
+import { RemoteCodeFindings, RemoteCodeWarning } from "@/components/app/remote-code-panel";
+import { SpeculativeField } from "@/components/app/speculative-field";
 import { ErrorState } from "@/components/app/states";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -20,8 +25,10 @@ import { engineLabel, fmtBytes } from "@/format";
 import { useActionMutation } from "@/hooks/use-action-mutation";
 import { ModelNameTaken } from "@/components/app/model-name-taken";
 import { aliasProblem, suggestAlias, takenHolder } from "@/lib/litellm";
+import { changedKeys, defaultGoal, GOALS, REPO_ID } from "@/lib/advice";
 import { submitState } from "@/logic";
-import type { Artifact, EngineInfo, LiteLLMSettings, PlanAction, Preview } from "@/types";
+import { ENGINE_FIELDS } from "@/engineFields";
+import type { Artifact, DeployGoal, EngineInfo, LiteLLMSettings, PlanAction, Preview } from "@/types";
 
 const slug = (ref: string) => ref.split("/").pop()!.toLowerCase().replace(/\.gguf$/, "").replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40) || "model";
 
@@ -56,6 +63,25 @@ function DeployWizardPage() {
   const [preview, setPreview] = useState<Preview | null>(null);
   const [previewErr, setPreviewErr] = useState<unknown>(null);
   const [plan, setPlan] = useState<{ id: string; actions: PlanAction[] } | null>(null);
+  // Deploy-time advice: the goal (default from the tool parser) and the config fields the user changed (advice
+  // fills only the others; reset with the model / engine).
+  const [goalPick, setGoalPick] = useState<DeployGoal | null>(null);
+  const goal = goalPick ?? defaultGoal(config);
+  const [touched, setTouched] = useState<string[]>([]);
+  const userEdit = (c: Record<string, any>) => {
+    const keys = changedKeys(config, c);
+    if (keys.length) setTouched((t) => [...new Set([...t, ...keys])]);
+    parsers.noteChange(config, c); setConfig(c); setPlan(null);
+  };
+  // Typed values that stay valid for an engine (its own fields), carried over an engine / model switch from the chip.
+  const carryFor = (eng: string): Record<string, any> => {
+    const keys = new Set((ENGINE_FIELDS[eng] ?? []).map((f) => f.key).concat(eng === "vllm" ? ["speculative"] : []));
+    return Object.fromEntries(touched.filter((k) => keys.has(k) && k in config).map((k) => [k, config[k]]));
+  };
+  const carry = useRef<Record<string, any> | null>(null);
+  const pickEngine = (e: string, keep: Record<string, any> = {}) => {
+    setEngine(e); setConfig({ ...defaultsFor(e, artifact), ...keep }); setTouched(Object.keys(keep)); setPlan(null);
+  };
 
   const defaultsFor = (eng: string, a?: Artifact) => {
     const d = { ...(engines.data?.find((e) => e.name === eng)?.defaults ?? {}) };
@@ -68,7 +94,19 @@ function DeployWizardPage() {
   useEffect(() => {
     if (!artifact) return;
     const eng = artifact.engines[0];
-    setEngine(eng); setName(slug(artifact.ref)); setConfig(defaultsFor(eng, artifact)); setPlan(null);
+    const keep = carry.current ?? {}; // typed values carried from the engine chip's "Use"
+    carry.current = null;
+    const cfg = defaultsFor(eng, artifact);
+    // ?ctx=N (a ⌘K command "deploy X with 32k context"): the context length, capped at the model's own
+    const ctx = Number(params.get("ctx"));
+    const ctxKey = eng === "vllm" ? "max_model_len" : "ctx_size";
+    const typed = Object.keys(keep);
+    if (Number.isInteger(ctx) && ctx >= 512 && !(ctxKey in keep)) {
+      cfg[ctxKey] = artifact.max_context ? Math.min(ctx, artifact.max_context) : ctx;
+      typed.push(ctxKey); // asked for by the user: config advice never overwrites it
+    }
+    setEngine(eng); setName(slug(artifact.ref)); setConfig({ ...cfg, ...keep });
+    setTouched(typed); setPlan(null);
   }, [artifact?.ref, engines.data]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Decision-model parser suggestions (declared after the defaults effect so a reset lands before an auto-fill).
@@ -135,16 +173,29 @@ function DeployWizardPage() {
           <Section n={1} title="Model" titleId="dep-model-label" description="Only complete, downloaded models are listed.">
             <ModelSelect id="dep-model" labelledBy="dep-model-label" artifacts={deployable} value={ref} onChange={setRef} />
             {artifact && <p className="mt-2 text-xs text-muted-foreground tabular-nums">{artifact.architecture} · {artifact.quant} · {fmtBytes(artifact.weights_bytes)} weights · max context {artifact.max_context?.toLocaleString() ?? "?"}</p>}
+            {!artifact && inv.isSuccess && REPO_ID.test(ref) && !(inv.data ?? []).some((a) => a.ref === ref) && (
+              <div className="mt-3 space-y-2" data-not-downloaded>
+                <p className="text-xs text-muted-foreground">{ref} is not downloaded yet. Download it from the Catalog first; this is how it would run here:</p>
+                <CompatLine repo={ref} />
+              </div>
+            )}
           </Section>
           {artifact && (
             <>
               <Section n={2} title="Engine and name">
                 <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
                   <div className="space-y-1.5"><Label id="dep-engine-label">Engine</Label>
-                    <Select value={engine} onValueChange={(e) => { setEngine(e); setConfig(defaultsFor(e, artifact)); setPlan(null); }}>
+                    <Select value={engine} onValueChange={(e) => pickEngine(e)}>
                       <SelectTrigger id="dep-engine" aria-labelledby="dep-engine-label dep-engine-value"><SelectValue id="dep-engine-value" /></SelectTrigger>
                       <SelectContent>{artifact.engines.map((e) => <SelectItem key={e} value={e}>{engineLabel(e)}</SelectItem>)}</SelectContent>
-                    </Select></div>
+                    </Select>
+                    <EngineChip modelRef={ref} goal={goal} engine={engine}
+                      onUse={(e, r) => {
+                        if (r !== ref) {
+                          const next = deployable.find((a) => a.ref === r);
+                          carry.current = carryFor(next?.engines[0] ?? e); setRef(r);
+                        } else if (artifact.engines.includes(e)) pickEngine(e, carryFor(e));
+                      }} /></div>
                   <div className="space-y-1.5"><Label htmlFor="dep-name">Deployment name</Label><Input id="dep-name" value={name} onChange={(e) => setName(e.target.value)} /></div>
                   <div className="space-y-1.5"><Label htmlFor="dep-prio">Priority</Label><Input id="dep-prio" type="number" value={priority} onChange={(e) => { const n = parseInt(e.target.value, 10); setPriority(Number.isFinite(n) ? n : 0); }} />
                     <p className="text-xs text-muted-foreground">Lower priority is evicted first.</p></div>
@@ -161,7 +212,24 @@ function DeployWizardPage() {
                 </div>
               </Section>
               <Section n={3} title="Sizing and features">
-                <ConfigForm engine={engine} value={config} onChange={(c) => { parsers.noteChange(config, c); setConfig(c); setPlan(null); }} showAdvanced={advanced} hints={parsers.hints} />
+                <div className="mb-4 space-y-3">
+                  <div className="max-w-xs space-y-1.5"><Label id="dep-goal-label">Goal</Label>
+                    <Select value={goal} onValueChange={(g) => setGoalPick(g as DeployGoal)}>
+                      <SelectTrigger id="dep-goal" aria-labelledby="dep-goal-label dep-goal-value"><SelectValue id="dep-goal-value" /></SelectTrigger>
+                      <SelectContent>{GOALS.map((g) => <SelectItem key={g.value} value={g.value}>{g.label}</SelectItem>)}</SelectContent>
+                    </Select>
+                    <p className="text-xs text-muted-foreground">{GOALS.find((g) => g.value === goal)?.help}</p></div>
+                  <ConfigAdviceCard modelRef={ref} engine={engine} goal={goal} config={config} touched={touched}
+                    fits={preview ? preview.fit.fits : null} onFill={(c) => { setConfig(c); setPlan(null); }} />
+                </div>
+                <ConfigForm engine={engine} value={config} onChange={userEdit} showAdvanced={advanced} hints={parsers.hints} />
+                {engine === "vllm" && (
+                  <div className="mt-4"><SpeculativeField modelRef={ref} value={config.speculative} drafts={inv.data ?? []}
+                    onChange={(v) => { const { speculative: _old, ...rest } = config; userEdit(v ? { ...rest, speculative: v } : rest); }} /></div>
+                )}
+                {config.trust_remote_code === true && (
+                  <div className="mt-4 space-y-2"><RemoteCodeWarning /><RemoteCodeFindings modelRef={ref} enabled={!!artifact.has_remote_code} /></div>
+                )}
                 <Button variant="link" className="mt-3 h-auto p-0 text-xs" onClick={() => setAdvanced(!advanced)}>{advanced ? "Hide" : "Show"} advanced settings</Button>
               </Section>
             </>

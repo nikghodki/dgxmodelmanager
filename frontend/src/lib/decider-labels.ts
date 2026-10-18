@@ -2,12 +2,12 @@
  * Decision-model labels used only by lazily loaded pages (deployment detail, Decision model page): kept out of
  * `decider.ts`, which the entry chunk imports.
  */
-/** The decision model's section of the usage guide (tests/test_docs_links.py checks that the heading exists). */
 /** Measured first start-up (kernel compilation + warm-up) of each decision model, for the "starting" toast. */
 const STARTUP: Record<string, string> = { "vllm-sr/d3-nano": "about 90 seconds" };
 export const deciderStartupHint = (model: string | null | undefined) => `usually ready in ${STARTUP[model ?? ""] ?? "2–4 minutes"}`;
 
-export const DECIDER_DOCS_URL = "https://github.com/nikghodki/dgxmodelmanager/blob/main/docs/usage.md#decision-model";
+/** The decision model's page of the documentation site (tests/test_docs_links.py checks that the page exists). */
+export const DECIDER_DOCS_URL = "https://nikghodki.github.io/dgxmodelmanager/user-guide/decision-model/";
 
 const humanize = (key: string) => key.replace(/_/g, " ");
 
@@ -56,6 +56,10 @@ export const DECIDER_FEATURES: { key: string; label: string; description: string
 const FEATURE_LABEL: Record<string, string> = {
   ...Object.fromEntries(DECIDER_FEATURES.map((f) => [f.key, f.label])),
   parser_tool: "Tool-call parser", parser_reasoning: "Reasoning parser",
+  // Advanced features (the Decision model page takes labels from the server's registry; these are for other pages).
+  health: "Health triage", config: "Config advice", compat: "Compatibility check", draft: "Draft pairing", engine: "Engine choice",
+  command: "Natural-language commands", schedule: "Sleep/wake schedules", reading: "Reading labels", tuning: "Threshold tuning",
+  routing: "Routing advice", remote_code: "Remote-code risk",
 };
 export const featureLabel = (f: string) => FEATURE_LABEL[f] ?? humanize(f);
 

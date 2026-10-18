@@ -19,3 +19,16 @@ describe("benchmarkSeries", () => {
     ]);
   });
 });
+
+describe("reading labels", () => {
+  it("maps labels to badges and leaves disputed rows out of the chart", async () => {
+    const { readingBadge, plausibleRows } = await import("@/lib/benchmarks");
+    expect(readingBadge("plausible", "rules")).toEqual({ text: "Plausible", tone: "bg-status-good-bg text-status-good", hint: "Consistent with earlier readings (rules)" });
+    expect(readingBadge("cold_cache", "model")?.hint).toMatch(/not used for advice \(decision model\)$/);
+    expect(readingBadge("broken")?.tone).toContain("critical");
+    expect(readingBadge(null)).toBeNull();
+    expect(readingBadge("whatever")).toBeNull();
+    const rows = [{ id: 1, quality: "verified" }, { id: 2, quality: "disputed" }, { id: 3, quality: null }, { id: 4 }];
+    expect(plausibleRows(rows).map((r) => r.id)).toEqual([1, 3, 4]);
+  });
+});

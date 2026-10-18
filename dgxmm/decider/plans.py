@@ -31,7 +31,7 @@ import re
 import time
 from dataclasses import dataclass, field
 
-from dgxmm.decider.common import abstain, quoted_block, safe_decide, safe_record_rules
+from dgxmm.decider.common import abstain, busy_minute, gib, quoted_block, safe_decide, safe_record_rules
 from dgxmm.decider.types import Decision, Option
 
 log = logging.getLogger(__name__)
@@ -77,10 +77,6 @@ class DepFacts:
         if self.state == "ready" and not self.traffic_known:
             return f"{self.name}: traffic unknown (no metrics for {self.uncovered_min} min)"
         return None
-
-
-def _gib(n: int | float) -> str:
-    return f"{n / GIB:.1f} GiB"
 
 
 def idle_text(d: DepFacts) -> str:
@@ -132,19 +128,19 @@ def unsafe_reason(plan: dict, deps: dict[int, DepFacts], *, raw_cfg: dict, defau
 def reason_for(plan: dict, deps: dict[int, DepFacts]) -> str:
     acts = plan.get("actions") or []
     if acts:
-        parts = [f"frees {_gib(plan.get('frees') or 0)}"]
+        parts = [f"frees {gib(plan.get('frees') or 0)}"]
         parts += [idle_text(deps[a["deployment_id"]]) for a in acts if a["deployment_id"] in deps]
         return "; ".join(parts)
     if plan.get("model_ref"):
-        return f"uses {plan['model_ref']} (already on disk); needs {_gib(plan.get('new_required') or 0)}; " \
+        return f"uses {plan['model_ref']} (already on disk); needs {gib(plan.get('new_required') or 0)}; " \
                "keeps other deployments running"
     patch = plan.get("patch") or {}
     sets = ", ".join(f"{k}={v:,}" if isinstance(v, int) else f"{k}={v}" for k, v in patch.items() if v is not None)
-    return f"needs {_gib(plan.get('new_required') or 0)}; keeps other deployments running" + (f"; sets {sets}" if sets else "")
+    return f"needs {gib(plan.get('new_required') or 0)}; keeps other deployments running" + (f"; sets {sets}" if sets else "")
 
 
 def _option(plan: dict, deps: dict[int, DepFacts]) -> Option:
-    desc = f"{plan.get('detail', '')} Needs {_gib(plan.get('new_required') or 0)}."
+    desc = f"{plan.get('detail', '')} Needs {gib(plan.get('new_required') or 0)}."
     if plan.get("actions"):
         desc += " Affects: " + "; ".join(
             f"{deps[a['deployment_id']].name} ({a['type']}, {deps[a['deployment_id']].state}, priority "
@@ -156,7 +152,7 @@ def _option(plan: dict, deps: dict[int, DepFacts]) -> Option:
 
 
 def build_state(*, shortfall: int, model_ref: str, engine: str, cfg: dict, deps: dict[int, DepFacts]) -> str:
-    lines = [f"Memory shortfall: {_gib(shortfall)}", f"Engine: {engine}",
+    lines = [f"Memory shortfall: {gib(shortfall)}", f"Engine: {engine}",
              quoted_block("NEW MODEL", model_ref, max_chars=300),
              "New deployment config: " + json.dumps({k: v for k, v in sorted(cfg.items())
                                                      if isinstance(v, (int, float, bool, str)) or v is None},
@@ -241,10 +237,6 @@ async def recommend(plans: list[dict], *, deps: dict[int, DepFacts], decider, sh
 ACTIVE_VIEW_STATES = ("ready", "sleeping", "unknown", "loading", "starting")
 
 
-def _busy(s: dict) -> bool:
-    return any((s.get(k) or 0) > 0 for k in ("running", "waiting", "gen_tps", "prompt_tps"))
-
-
 @dataclass
 class Traffic:
     last_min: float | None  # minutes since the last request activity (None = none recorded)
@@ -274,7 +266,7 @@ def traffic(store, dep_id: int, now: float | None = None) -> Traffic:
         ts = smp.get("ts") or 0
         if smp.get("running") is not None and int(ts // 60) in window:
             covered.add(int(ts // 60))
-        if _busy(smp):
+        if busy_minute(smp):
             last = ts if last is None else max(last, ts)
     if ring:
         latest = ring[-1]

@@ -316,7 +316,7 @@ def test_pull_engines(box):
     assert p.returncode == 0, p.out
     calls = box.calls()
     assert "docker pull vllm/vllm-openai@sha256:22d3b1217fda569653f32f1e00a2a4e64119c1601c67ff94cc72d7ca5ef352c8" in calls
-    assert "docker pull ghcr.io/ggml-org/llama.cpp:server-cuda" in calls
+    assert "docker pull ghcr.io/ggml-org/llama.cpp@sha256:e4cfff28678327b0ae7eda129e700e56a0fa55aa23db2f016256ea155c15c2b5" in calls
 
 
 def test_loopback_bind_prints_loopback_url(box):
@@ -551,14 +551,14 @@ def test_stale_password_not_captured_when_container_not_recreated(box):
                 FAKE_LOGS=FIRST_RUN)
     assert p.returncode == 0, p.out
     assert PW not in p.out and not (box.repo / "secrets" / "admin_password").exists()
-    assert "docs/operations.md" in p.out
+    assert "docs/operations/troubleshooting.md" in p.out
 
 
 def test_password_line_older_than_this_run_not_captured(box):
     p = box.run(FAKE_LOGS=FIRST_RUN, FAKE_LOGS_OLD="1")
     assert p.returncode == 0, p.out
     assert PW not in p.out and not (box.repo / "secrets" / "admin_password").exists()
-    assert "docs/operations.md" in p.out
+    assert "docs/operations/troubleshooting.md" in p.out
 
 
 def test_password_captured_with_since_this_run(box):
@@ -911,7 +911,7 @@ def test_compose_litellm_profile_is_pinned_and_parameterised():
     assert "profiles: [litellm]" in text
     assert "dgxmm-litellm:" in text and "dgxmm-litellm-db:" in text
     assert "ghcr.io/berriai/litellm:v1." in text and "@sha256:" in text and "main-latest" not in text
-    assert "image: postgres:16" in text
+    assert "image: postgres:16." in text and "@sha256:" in text.split("image: postgres:16.")[1].split("\n")[0]
     assert "${DGXMM_BIND:-0.0.0.0}:${DGXMM_LITELLM_PORT:-4000}:4000" in text
     assert "./data/litellm-db:/var/lib/postgresql/data" in text
     # Only the dgxmm service has a fixed container name; profile services derive theirs from the project.
@@ -1015,10 +1015,17 @@ def test_bundled_key_mounted_only_into_bundled_litellm():
     assert "litellm_bundled_master_key" not in dgxmm_svc
 
 
+def _docs(*sections: str) -> str:
+    """The text of documentation-site sections: docs/<s>.md and every page under docs/<s>/ (mkdocs.yml)."""
+    docs = ROOT / "docs"
+    files = [f for s in sections for f in [docs / f"{s}.md", *sorted((docs / s).glob("*.md"))] if f.is_file()]
+    return "\n".join(f.read_text() for f in files)
+
+
 def test_docs_cover_bundled_litellm():
-    ops = (ROOT / "docs" / "operations.md").read_text()
+    ops = _docs("operations", "getting-started")
     assert "pg_dump" in ops and "dgxmm-litellm-db" in ops and "data/litellm-db" in ops
-    cfg = (ROOT / "docs" / "configuration.md").read_text()
+    cfg = _docs("configuration")
     for word in ("DGXMM_WITH_LITELLM", "DGXMM_LITELLM_PORT", "COMPOSE_PROFILES", "Bundled LiteLLM",
                  "litellm_bundled_master_key"):
         assert word in cfg
@@ -1435,11 +1442,11 @@ def test_installer_pins_the_same_decider_revision_as_the_engine():
 
 
 def test_docs_cover_decider_install_upgrade_and_backup():
-    ops = (ROOT / "docs" / "operations.md").read_text()
+    ops = _docs("operations", "getting-started")
     for needle in ("--with-decider", "decider download", "decider enable --wait", "schema_version",
                    "decider_api_key", "--purge-decider-model", "Rolling back"):
         assert needle in ops, needle
-    conf = (ROOT / "docs" / "configuration.md").read_text()
+    conf = _docs("configuration")
     assert "DGXMM_WITH_DECIDER" in conf and "DGXMM_DECIDER_TIMEOUT" in conf
     changelog = (ROOT / "CHANGELOG.md").read_text()
     # the decision-model release entry (the newest section) documents --with-decider
@@ -1512,3 +1519,68 @@ def test_private_data_and_secrets_dirs_are_not_flagged(box):
         f.chmod(0o600)
     p = box.run("--dry-run")
     assert "not readable by the container user" not in p.out
+
+
+# --- host time zone (DGXMM_TZ: wall-clock schedules inside the container) -----------------------------
+def _tz_env(box, *, tzfile=None, localtime=None):
+    env = {"DGXMM_TIMEZONE_FILE": str(box.tmp / "no-timezone"), "DGXMM_LOCALTIME": str(box.tmp / "no-localtime")}
+    if tzfile is not None:
+        (box.tmp / "timezone").write_text(tzfile)
+        env["DGXMM_TIMEZONE_FILE"] = str(box.tmp / "timezone")
+    if localtime is not None:
+        target = box.tmp / "usr/share/zoneinfo" / localtime
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(b"TZif")
+        (box.tmp / "localtime").symlink_to(target)
+        env["DGXMM_LOCALTIME"] = str(box.tmp / "localtime")
+    return env
+
+
+def test_tz_detected_from_etc_timezone(box):
+    p = box.run("--dry-run", **_tz_env(box, tzfile="Europe/Berlin\n"))
+    assert p.returncode == 0, p.out
+    assert "DGXMM_TZ=Europe/Berlin" in p.out
+
+
+def test_tz_detected_from_the_localtime_link(box):
+    p = box.run("--dry-run", **_tz_env(box, localtime="America/Los_Angeles"))
+    assert p.returncode == 0, p.out
+    assert "DGXMM_TZ=America/Los_Angeles" in p.out
+
+
+def test_tz_defaults_to_utc(box):
+    p = box.run("--dry-run", **_tz_env(box))
+    assert p.returncode == 0, p.out
+    assert "DGXMM_TZ=UTC" in p.out
+
+
+def test_tz_from_env_and_validated(box):
+    p = box.run("--dry-run", DGXMM_TZ="Asia/Tokyo", **_tz_env(box, tzfile="Europe/Berlin\n"))
+    assert p.returncode == 0 and "DGXMM_TZ=Asia/Tokyo" in p.out
+    for bad in ("../../etc/passwd", "Europe/Ber lin", "x;rm"):
+        p = box.run("--dry-run", DGXMM_TZ=bad, **_tz_env(box))
+        assert p.returncode != 0 and "DGXMM_TZ" in p.out, bad
+    p = box.run("--dry-run", **_tz_env(box, tzfile="not a zone!\n"))  # junk in the host file: UTC
+    assert p.returncode == 0 and "DGXMM_TZ=UTC" in p.out
+
+
+def test_tz_written_to_env_and_kept_on_upgrade(box):
+    p = box.run(FAKE_LOGS=FIRST_RUN, **_tz_env(box, tzfile="Europe/Berlin\n"))
+    assert p.returncode == 0, p.out
+    assert "DGXMM_TZ=Europe/Berlin" in (box.repo / ".env").read_text()
+    p2 = box.run(FAKE_LOGS="", FAKE_NETWORK="exists", FAKE_DGXMM_STATE="running",
+                 FAKE_DGXMM_WORKDIR=str(box.repo.resolve()), **_tz_env(box, tzfile="Asia/Tokyo\n"))
+    assert p2.returncode == 0, p2.out
+    assert "DGXMM_TZ=Europe/Berlin" in (box.repo / ".env").read_text()
+
+
+def test_tz_added_to_an_older_env(box):
+    (box.repo / ".env").write_text("DGXMM_UID=1234\nDGXMM_GID=2345\nDOCKER_GID=977\n")
+    p = box.run("--dry-run", **_tz_env(box, tzfile="Europe/Berlin\n"))
+    assert p.returncode == 0, p.out
+    assert "would append missing keys" in p.out and "DGXMM_TZ=Europe/Berlin" in p.out
+
+
+def test_compose_passes_the_zone_to_the_container():
+    compose = (ROOT / "docker-compose.yaml").read_text()
+    assert 'DGXMM_TZ: "${DGXMM_TZ:-}"' in compose and 'TZ: "${DGXMM_TZ:-UTC}"' in compose

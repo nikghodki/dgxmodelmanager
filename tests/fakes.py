@@ -560,6 +560,9 @@ class FakeDecider:
         none = Decision(feature=feature, subject=subject, source="none", choice=None, confidence=None)
         if not self.feature_enabled(feature) or feature in self.fail or not options:
             return none
+        from dgxmm.decider.service import take_budget
+        if not take_budget():  # like the real Decider: an insight-engine job's budget is used up
+            return none
         if self.delay_s:
             try:
                 await asyncio.wait_for(asyncio.sleep(self.delay_s), timeout_s)

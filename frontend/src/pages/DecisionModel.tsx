@@ -29,6 +29,7 @@ import { fmtConfidence } from "@/lib/decider";
 import { DECIDER_DOCS_URL, DECIDER_FEATURES, deciderStartupHint, featureLabel } from "@/lib/decider-labels";
 import { apiErrorText } from "@/lib/litellm";
 import { DECIDER_BUILD_END } from "@/stream";
+import { SchedulesPauseControl } from "@/components/app/schedules-card";
 import type { DeciderBuildProgress, DeciderKeyRotation, DeciderSettingsPatch, DeciderStatus, Deployment, DecisionRow, Fit, PlanAction, PlanOption, Preview } from "@/types";
 
 const ALL = "__all__";
@@ -191,6 +192,54 @@ function ModelCard({ s }: { s: DeciderStatus }) {
   );
 }
 
+/** Label and description per settings group: from the server's feature registry, else the built-in five. */
+/** ``needs_model: false`` (rules only, e.g. threshold tuning): never asks the model, so it has no threshold. */
+const featureMetas = (s: DeciderStatus): { key: string; label: string; description: string; needs_model?: boolean }[] =>
+  s.feature_specs?.length ? s.feature_specs.map((f) => ({ key: f.name, label: f.label, description: f.description, needs_model: f.needs_model })) : DECIDER_FEATURES;
+
+const jobWhen = (iso: string | null) => (iso ? fmtRelative(iso) : "—");
+function fmtIn(iso: string | null, now: number = Date.now()): string {
+  if (!iso) return "—";
+  const s = (Date.parse(iso) - now) / 1000;
+  if (s <= 60) return "within a minute";
+  if (s < 3600) return `in ${Math.round(s / 60)} min`;
+  if (s < 86400) return `in ${Math.round(s / 3600)} h`;
+  return `in ${Math.round(s / 86400)} d`;
+}
+/** Background insight jobs (admin part of the status): schedule, last run and result, next run. */
+function JobsCard({ s }: { s: DeciderStatus }) {
+  const jobs = s.jobs ?? [];
+  if (!jobs.length) return null;
+  return (
+    <Card data-card className="min-w-0 shadow-card lg:col-span-2">
+      <CardHeader className="pb-2">
+        <CardTitle className="text-sm"><h2>Background jobs</h2></CardTitle>
+        <CardDescription className="text-xs">Periodic checks that raise insights. They use a small budget of decision-model calls and always yield to interactive requests.</CardDescription>
+      </CardHeader>
+      <CardContent className="overflow-x-auto p-0">
+        <table className="w-full text-sm">
+          <thead><tr className="border-b text-left text-xs uppercase tracking-wider text-muted-foreground">
+            {["Job", "Feature", "Schedule", "Last run", "Duration", "Result", "Next run"].map((h) => <th key={h} className="px-4 py-2 font-medium">{h}</th>)}
+          </tr></thead>
+          <tbody>
+            {jobs.map((j) => (
+              <tr key={j.name} data-job={j.name} className="border-b last:border-0">
+                <td className="px-4 py-2 font-mono text-xs">{j.name}{j.running && <Loader2 aria-label="running" className="ml-1 inline h-3 w-3 animate-spin" />}</td>
+                <td className="px-4 py-2">{featureLabel(j.feature)}{!j.enabled && <span className="ml-1 text-xs text-muted-foreground">(off)</span>}</td>
+                <td className="whitespace-nowrap px-4 py-2 text-xs">{j.schedule}</td>
+                <td className="whitespace-nowrap px-4 py-2 text-xs text-muted-foreground">{jobWhen(j.last_run_at)}</td>
+                <td className="px-4 py-2 tabular-nums text-xs">{j.last_duration_ms != null ? `${Math.round(j.last_duration_ms)} ms` : "—"}</td>
+                <td className={`px-4 py-2 text-xs ${j.last_result?.startsWith("error") ? "text-status-critical" : ""}`}>{j.last_result ?? "—"}{j.failures > 1 ? ` (${j.failures} in a row)` : ""}</td>
+                <td className="whitespace-nowrap px-4 py-2 text-xs text-muted-foreground">{j.enabled ? fmtIn(j.next_run_at) : "—"}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </CardContent>
+    </Card>
+  );
+}
+
 type Draft = Record<string, { enabled: boolean; pct: string }>;
 const toDraft = (f: DeciderStatus["features"]): Draft =>
   Object.fromEntries(Object.entries(f).map(([k, v]) => [k, { enabled: v.enabled, pct: fmtPct(v.threshold) }]));
@@ -203,18 +252,21 @@ function FeaturesCard({ s }: { s: DeciderStatus }) {
   const [draft, setDraft] = useState<Draft>(() => toDraft(s.features));
   const serverKey = JSON.stringify(s.features);
   useEffect(() => { setDraft(toDraft(s.features)); }, [serverKey]); // eslint-disable-line react-hooks/exhaustive-deps
-  const keys = [...DECIDER_FEATURES.map((f) => f.key).filter((k) => k in s.features), ...Object.keys(s.features).filter((k) => !DECIDER_FEATURES.some((f) => f.key === k))];
+  // The server's registry order and labels (feature_specs); older servers only send `features`.
+  const metas = featureMetas(s);
+  const keys = [...metas.map((f) => f.key).filter((k) => k in s.features), ...Object.keys(s.features).filter((k) => !metas.some((f) => f.key === k))];
+  const rulesOnly = (k: string) => metas.find((f) => f.key === k)?.needs_model === false;
   const patch: DeciderSettingsPatch = { features: {} };
   for (const k of keys) {
     const d = draft[k]; const cur = s.features[k];
     if (!d) continue;
     const p: Record<string, unknown> = {};
     if (d.enabled !== cur.enabled) p.enabled = d.enabled;
-    if (pctValid(d.pct) && fmtPct(cur.threshold) !== String(+d.pct)) p.threshold = Math.round(+d.pct * 10) / 1000;
+    if (!rulesOnly(k) && pctValid(d.pct) && fmtPct(cur.threshold) !== String(+d.pct)) p.threshold = Math.round(+d.pct * 10) / 1000;
     if (Object.keys(p).length) patch.features![k] = p;
   }
   const dirty = Object.keys(patch.features!).length > 0;
-  const invalid = keys.some((k) => draft[k] && !pctValid(draft[k].pct));
+  const invalid = keys.some((k) => draft[k] && !rulesOnly(k) && !pctValid(draft[k].pct));
   const save = useActionMutation(() => api("/decider/settings", { method: "PUT", body: patch }), { success: "Decision model settings saved", invalidate: [["decider-status"]] });
   const set = (k: string, v: Partial<Draft[string]>) => setDraft((d) => ({ ...d, [k]: { ...d[k], ...v } }));
   return (
@@ -227,10 +279,11 @@ function FeaturesCard({ s }: { s: DeciderStatus }) {
         <form className="space-y-3" noValidate onSubmit={(e) => { e.preventDefault(); if (dirty && !invalid) save.mutate(undefined); }}>
           <ul className="divide-y">
             {keys.map((k) => {
-              const meta = DECIDER_FEATURES.find((f) => f.key === k);
+              const meta = metas.find((f) => f.key === k);
               const label = meta?.label ?? featureLabel(k);
               const d = draft[k] ?? { enabled: false, pct: "" };
-              const err = pctValid(d.pct) ? null : `${label}: enter a percentage from 0 to 100.`;
+              const noThreshold = rulesOnly(k);
+              const err = noThreshold || pctValid(d.pct) ? null : `${label}: enter a percentage from 0 to 100.`;
               return (
                 <li key={k} className="flex flex-col gap-2 py-3 sm:flex-row sm:items-start sm:justify-between">
                   <div className="flex min-w-0 items-start gap-3">
@@ -240,6 +293,9 @@ function FeaturesCard({ s }: { s: DeciderStatus }) {
                       {meta && <p className="text-xs text-muted-foreground">{meta.description}</p>}
                     </div>
                   </div>
+                  {noThreshold ? (
+                    <p className="shrink-0 pl-12 text-xs text-muted-foreground sm:pl-0" title="Never asks the decision model, so no threshold applies">Rules only — no threshold</p>
+                  ) : (
                   <div className="shrink-0 space-y-1 pl-12 sm:pl-0">
                     <div className="flex items-center gap-2">
                       <span aria-hidden className="text-xs text-muted-foreground">Threshold</span>
@@ -249,6 +305,7 @@ function FeaturesCard({ s }: { s: DeciderStatus }) {
                     </div>
                     {err && <p id={`thr-${k}-err`} className="text-xs text-status-critical">{err}</p>}
                   </div>
+                  )}
                 </li>
               );
             })}
@@ -268,8 +325,10 @@ function SubjectCell({ subject }: { subject: string }) {
     : <span className="block max-w-[28ch] truncate font-mono text-xs" title={subject}>{subject}</span>;
 }
 
-function DecisionsCard() {
+function DecisionsCard({ s }: { s: DeciderStatus }) {
   const [feature, setFeature] = useState(ALL);
+  // Decision features as logged: each group's members (parser -> parser_tool, parser_reasoning), else the group.
+  const decisionFeatures = s.feature_specs?.length ? s.feature_specs.flatMap((f) => (f.members.length ? f.members : [f.name])) : DECISION_FEATURES;
   const q = useQuery({
     queryKey: ["decider-decisions", feature],
     queryFn: () => api<DecisionRow[]>(`/decider/decisions?limit=100${feature === ALL ? "" : `&feature=${encodeURIComponent(feature)}`}`),
@@ -295,7 +354,7 @@ function DecisionsCard() {
         <ErrorState error={q.error} onRetry={() => q.refetch()} />
         <DataTable columns={columns} data={q.data ?? []} loading={q.isLoading} getRowId={(r) => String(r.id)}
           toolbar={<Select value={feature} onValueChange={setFeature}><SelectTrigger className="h-9 w-52" aria-label="Filter by feature"><SelectValue /></SelectTrigger>
-            <SelectContent><SelectItem value={ALL}>All features</SelectItem>{DECISION_FEATURES.map((f) => <SelectItem key={f} value={f}>{featureLabel(f)}</SelectItem>)}</SelectContent></Select>}
+            <SelectContent><SelectItem value={ALL}>All features</SelectItem>{decisionFeatures.map((f) => <SelectItem key={f} value={f}>{featureLabel(f)}</SelectItem>)}</SelectContent></Select>}
           empty={<EmptyState icon={BrainCircuit} title="No decisions yet" description="Decisions appear here as DGXMM diagnoses failures, suggests parsers and recommends plans." />} />
       </CardContent>
     </Card>
@@ -445,7 +504,13 @@ function DecisionModelPage() {
         <StatusCard s={s} onRetry={() => enable.mutate(undefined)} retrying={enable.isPending} />
         <FeaturesCard s={s} />
         <ModelCard s={s} />
-        <DecisionsCard />
+        <JobsCard s={s} />
+        <Card data-card className="min-w-0 shadow-card lg:col-span-2">
+          <CardHeader className="pb-2"><CardTitle className="text-sm"><h2>Schedules</h2></CardTitle>
+            <CardDescription className="text-xs">Sleep / wake schedules the admins own run whatever the toggles above say; this stops all of them at once.</CardDescription></CardHeader>
+          <CardContent><SchedulesPauseControl compact /></CardContent>
+        </Card>
+        <DecisionsCard s={s} />
       </div>
       {plans && <PlanDialog fit={plans.fit} plans={plans.plans} pending={enable.isPending} error={planErr}
         onSubmit={(actions) => enable.mutate(actions)} onClose={() => setPlans(null)} />}

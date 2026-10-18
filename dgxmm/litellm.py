@@ -373,6 +373,9 @@ class LiteLLMClient:
             self.invalidate_keys()
 
 
+_UNKNOWN, _OFF = object(), "off"  # LiteLLMSync._reported: before / after a failed sync; integration off
+
+
 class LiteLLMSync:
     def __init__(self, client: LiteLLMClient | None, deployer, db: Database, events):
         self.client, self.deployer, self.db, self.events = client, deployer, db, events
@@ -382,6 +385,9 @@ class LiteLLMSync:
                                      "code": None, "at": None}
         self.conflicts: dict[int, str] = {}       # deployment id -> why it is not registered (name clash)
         self.registrations: dict[int, str] = {}   # deployment id -> model name, as of the last successful sync
+        # called (no arguments) after a successful sync that changed what is_registered reports, e.g. routing advice
+        self.listeners: list[Callable[[], Any]] = []
+        self._reported: object = _UNKNOWN  # what is_registered reported after the previous sync
         if deployer is not None:
             deployer.litellm_error = self.error_for  # deployment views carry the reason (list, detail, SSE)
 
@@ -474,6 +480,7 @@ class LiteLLMSync:
             self._set_status("disabled")
             self.last = {"ok": True, "status": "disabled", "registered": 0, "removed": 0, "error": None,
                          "code": None, "at": _now()}
+            self._report(_OFF)
             return True
         added = removed = 0
         try:
@@ -510,12 +517,27 @@ class LiteLLMSync:
             self._set_status("pending")
             self.last = {"ok": False, "status": "pending", "registered": added, "removed": removed, "error": msg,
                          "code": code, "at": _now()}
+            self._reported = _UNKNOWN  # the next good sync notifies
             return False
         self.registrations = {int(k[0]): k[1] for k in want}
         self._set_status("synced")
         self.last = {"ok": True, "status": "synced", "registered": added, "removed": removed, "error": None,
                      "code": None, "at": _now()}
+        self._report(dict(self.registrations))
         return True
+
+    def _report(self, reported) -> None:
+        """After a successful sync: run the listeners if what is_registered reports (``OFF`` or the registrations)
+        changed since the previous sync, including the first good sync after a failed one. A failing listener is
+        logged and does not stop the others."""
+        if reported == self._reported:
+            return
+        self._reported = reported
+        for fn in list(self.listeners):
+            try:
+                fn()
+            except Exception:
+                log.exception("LiteLLM sync listener failed")
 
     def error_for(self, dep_id: int, state: str) -> dict | None:
         """``{code, message}`` when a ready deployment is not registered as it should be, as of the last sync: a

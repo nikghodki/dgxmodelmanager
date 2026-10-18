@@ -1,27 +1,14 @@
+---
+description: "DGXMM's threat model: assets, trust boundaries, the decision model's container, network, key and supply chain, and residual risks."
+---
+
 # Security and threat model
 
 This document describes what DGXMM protects, where the trust boundaries are, what each mitigation does and what
 risk remains. It covers the whole application and, in more detail, the decision model ("decider",
 `vllm-sr/d3-mini`). Implementation details of authentication, sessions and the container guard are in
-[architecture: security model](architecture.md#security-model); deployment advice is in
-[operations: security hardening](operations.md#security-hardening).
-
-Contents:
-- [Assets](#assets)
-- [Actors and trust boundaries](#actors-and-trust-boundaries)
-- [DGXMM application](#dgxmm-application)
-  - [Untrusted text and the event loop](#untrusted-text-and-the-event-loop)
-  - [Live updates (SSE topics)](#live-updates-sse-topics)
-- [Decision model (decider)](#decision-model-decider)
-  - [Container](#container)
-  - [Network](#network)
-  - [Bearer key](#bearer-key)
-  - [Image supply chain](#image-supply-chain)
-  - [API boundary](#api-boundary)
-  - [Untrusted input and prompt injection](#untrusted-input-and-prompt-injection)
-  - [Data at rest](#data-at-rest)
-- [Residual risks](#residual-risks)
-- [Verifying the controls](#verifying-the-controls)
+[architecture: security model](security/application.md); deployment advice is in
+[operations: security hardening](security/hardening.md).
 
 ## Assets
 
@@ -58,7 +45,7 @@ text ↔ decider prompt (quoted state blocks, redaction, closed option sets); de
 
 ## DGXMM application
 
-Summary (details in [architecture](architecture.md#security-model)):
+Summary (details in [architecture](security/application.md)):
 - argon2id passwords (≥ 12 characters), login rate limit (5/min per IP and per username), forced change of
   generated passwords;
 - HTTP-only `SameSite=Strict` session cookie (only its SHA-256 stored), CSRF header on every non-GET request;
@@ -98,6 +85,7 @@ long single lines, 1 MB logs) in a child process with a deadline: each must fini
 | `deployment`, `deployment_removed` | yes | yes | deployment views (as `GET /api/deployments`) |
 | `inventory`, `download`, `benchmark` | yes | yes | what `GET /api/inventory`, `/api/downloads`, `/deployments/{id}/benchmarks` return |
 | `diagnosis` | yes | yes | only the id of a deployment with a new diagnosis |
+| `insights` | yes | yes | only the id of an insight that changed; `GET /api/insights` filters by role (viewers: features marked viewer-visible, no action descriptors) |
 | `decider` | no | yes | decider image build progress (docker build output, the image's package list) |
 
 A viewer therefore receives nothing over SSE that it cannot read over REST. The number of SSE subscribers is not
@@ -106,10 +94,13 @@ limited (each is one in-memory queue of at most 256 events).
 ## Decision model (decider)
 
 The decider is a small classifier (`vllm-sr/d3-mini`, pinned snapshot `97dd054d…`) served by the snapshot's own
-`d3_server.py` in a container DGXMM builds and starts (`dgxmm/engines/decision.py`, `deploy/decider/`). Five
-features ask it typed questions (failure cause, tool-call / reasoning parser, plan ranking, model kind, workload
-class). It is **advisory only**: it never runs anything, and every change it informs goes through an existing
-flow that an admin confirms.
+`d3_server.py` in a container DGXMM builds and starts (`dgxmm/engines/decision.py`, `deploy/decider/`). Its 16
+features (`dgxmm/decider/registry.py`) ask it typed questions with a closed set of answers (failure cause, parser,
+plan ranking, model kind, workload class, health label, sizing, compatibility verdict, draft, engine, command
+action and target, schedule proposal, reading label, routing pick, code-scan label; threshold tuning is rules
+only). It is **advisory only**: it never runs anything, and every change it informs goes through an existing
+flow that an admin confirms. The only automation is a schedule an admin created, which runs through the
+deployer's normal paths (see [schedule runner](#schedule-runner)).
 
 ### Container
 
@@ -298,6 +289,201 @@ What reaches the decider is assembled by DGXMM, never by the untrusted source:
 - **Measured resilience** of the real d3-mini against injected text: see
   [verifying the controls](#verifying-the-controls).
 
+### Deploy-time advice: Hub fetches and the code scanner
+
+These paths are config advice, the compatibility check, draft pairing, engine choice and remote-code risk
+(`dgxmm/decider/{config,compat,draft,engine,remote_code,code_scan}.py`, routes in `dgxmm/api/deploy_advice.py`).
+
+**Roles and limits.**
+- Everything is admin-only and CSRF-checked, except `GET /api/catalog/compat`, which is viewer and read-only.
+- Each route is rate-limited from its feature-registry bucket (30 per user and 120 for all users per minute).
+- POST bodies are capped by the `/api/decider` body limit.
+- Answers carry `source: rules|model|none`. A failing decider or Hub yields verdicts `unknown`, never an error
+  status.
+
+**Compatibility fetch.**
+- It goes only through `HfHubClient.fetch_small`, to the configured endpoint (`HF_ENDPOINT`, default
+  huggingface.co).
+- An admin's check uses the configured HF token. A viewer's check is anonymous end to end: the repo metadata
+  (`model_info(token=False)`) and every file are read without the token, so a private repo the token can read
+  answers "Hub unavailable" to a viewer, and viewers cannot probe gated-repo access with the admin's token. Gated
+  and private repos are never cached, so an admin's result for them is never served to a viewer. The catalog
+  routes (`GET /api/catalog/details` and `GET /api/catalog/search`) read the Hub anonymously for viewers too, so a
+  viewer's search does not list the token owner's private repos, and a private repo's details answer the same
+  "could not load" error (502 `hub_error`) as an unknown repo.
+- Redirects: at most 3, and only to the configured endpoint's own host or to `huggingface.co` / `hf.co` hosts
+  over https (the Hub's CDN and storage). A redirect anywhere else (an engine port on 127.0.0.1, another host,
+  http, `file:`) is refused before it is followed. httpx drops the token on a redirect to another host. A
+  self-hosted Hub mirror whose files are served from a CDN host of its own is therefore refused.
+- Every Hub API call has a timeout of 20 s per connect/read (`model_info`, and huggingface_hub's shared client,
+  used by search, through `install_hub_timeout`); weight downloads run in their own process with their own
+  timeouts. The check's Hub calls run on their own 2-thread pool, so a stalled Hub cannot fill the default thread
+  pool that database work uses.
+- It fetches an allow-list of five names only: `config.json`, `tokenizer_config.json`, `chat_template.jinja`,
+  `generation_config.json` and `README.md`. Any other name raises.
+- Each file is streamed into memory with a 64 KiB cap. A larger JSON file is discarded rather than cut. The model
+  card is cut at 8 KiB.
+- Every raw read is checked against the cap and a 5 s deadline per file; the read timeout is 2.5 s, and the
+  overall limit is 25 s. A server that dribbles bytes cannot hold the thread.
+- Identity encoding is requested. gzip / deflate bodies are inflated incrementally, with the cap applied to the
+  inflated bytes, and other encodings are refused.
+- Only a 40-hex commit sha is used in URLs or as a cache key.
+- Nothing is written to the HF cache and nothing is executed.
+- A gated repo without access is reported as gated (`auth_gated`, flag `hf_token`), not as an error.
+- `compat_cache(repo, sha)` stores verdicts, reason keys and flags only, never file contents. It keeps them for 7
+  days (retention pass).
+- Results that depend on missing access or a missing decider are not cached.
+- `auto_map` is read at the top level and in `text_config`.
+
+**Remote-code scan.**
+- It runs whenever trust_remote_code would be enabled for a model with `auto_map` (top level or `text_config`, any
+  source): in the wizard, in the reconfigure dialog, and through a diagnosis patch.
+- The snapshot's `.py` files are parsed with `ast` in a separate process: `python -I -S code_scan.py`, standard
+  library only.
+- The process runs with an empty environment and `cwd=/`, in its own session (`start_new_session`; no
+  `preexec_fn`). It applies its own limits before reading any file: RLIMIT_CPU 20 s, RLIMIT_AS 1 GiB, RLIMIT_FSIZE 0
+  (it cannot write files) and no core dumps, under a 30 s wall-clock timeout.
+- If the whole-repo scan fails, each file is scanned in its own process (10 s each, at most 60). A file that still
+  fails is an `unanalysable` finding, as is a scan that could not run at all. A failed scan is remembered for
+  2 minutes (not re-run on every check), and at most one scan runs at a time across all checks.
+- `auto_map` entries that name another repository (`repo--module.Class`: transformers would fetch and run code
+  that is not in the snapshot) are `external_code` findings. Modules missing from the snapshot are `missing_code`
+  findings.
+- The scanner also flags imports by computed name, builtins access, getattr on risky modules, risky names
+  assembled from pieces, unpickling (pickle / dill / marshal / joblib / `torch.load` without
+  `weights_only=True`), code objects built or patched by hand (`types.FunctionType` / `CodeType`,
+  `code.replace(co_*=)`, `__code__`), object-graph walks (`__subclasses__`, `__globals__`, frame attributes),
+  process APIs (`asyncio.create_subprocess_*`, `multiprocessing`, `ProcessPoolExecutor`, `os.fork`, `pty`),
+  native code loaded at run time (`torch.utils.cpp_extension.load*`, `torch.ops` / `torch.classes`
+  `load_library`, ctypes `CDLL` / `cdll.LoadLibrary`, cffi `dlopen`), files or code fetched from the Hub at run
+  time (`hf_hub_download`, `snapshot_download`, `get_class_from_dynamic_module`,
+  `transformers.dynamic_module_utils`), another repository's code pulled in at run time (`from_pretrained("org/repo",
+  trust_remote_code=True)` with a literal repo id, `torch.hub.load`, `import pip`, `pip.main`, a process running
+  `pip install`), module loaders given a file path (`spec_from_file_location`, `SourceFileLoader` and the other
+  importlib loaders, `runpy.run_path` / `run_module`, `zipimport`), interactive interpreters
+  (`code.InteractiveInterpreter`, `codeop`), more unpickling paths (`pandas.read_pickle`, `np.load` with
+  `allow_pickle` not literally `False`) and `os.open` outside the model directory. Calls are recognised also when the function was
+  imported under another name (`from runpy import run_path as r`).
+- **There is no "safe" or "routine" verdict.** A complete scan without findings is `no_findings`, shown as "No
+  suspicious patterns found (static scan only)", whatever the decision model answers: the model can only add a
+  warning (`unusual`), never reassure. A scan that did not cover everything is `unknown`.
+- **Blind spots (static scan only).** The scanner reads source code; it runs nothing and follows nothing. It
+  does not see:
+  - names and code built at run time beyond simple string concatenation (formatting, encoding tricks, lookups
+    in data structures, attribute chains it cannot fold), and functions reached through assignments
+    (`f = runpy.run_path`, `self.load = torch.hub.load`, a function stored in a dict);
+  - `trust_remote_code=True` with a computed repo id or passed through `**kwargs` / `dict(...)` (how repos load
+    their own code), and other ways to pull in foreign code: `torch.hub.load_state_dict_from_url` /
+    `download_url_to_file`, entry points (`pkg_resources`, `importlib.metadata`), `setuptools` builds, and
+    `sys.path` or `.pth` changes followed by a plain import;
+  - misuse of allowed APIs (a relative `open(..., "w")` after `os.chdir`, `shutil.rmtree` or `pathlib` writes
+    of a computed path);
+  - what code fetched at run time does, when it is fetched by a mechanism the scanner already flags (the
+    finding is shown, but the fetched code is not scanned);
+  - the behaviour of native extensions (`.so` files, compiled kernels) and of the libraries the code imports
+    (transformers, torch), and bytecode in `.pyc` files;
+  - payloads in data files the code reads (JSON, text, weights), and anything the weights themselves trigger.
+
+  A clean scan is the absence of known patterns, not a review: read the code before enabling trust_remote_code.
+- The scanner never imports or executes the code (`tests/test_decider_remote_code.py` plants code that would
+  write a marker if run).
+- Files are capped at 1 MiB each, 16 MiB in total and 300 files. At most 400 findings are kept.
+- Symlinks that resolve outside the repo's cache directory are reported, not read.
+- The API returns file, line, kind and a fixed detail. Excerpts of the code go only into the decider `state`,
+  quoted as untrusted text.
+- Findings are informational and only add warnings. The model's `routine` label is logged, never returned, and the
+  generic trust_remote_code warning is always shown while the setting is on. Neither blocks a deploy, and the admin
+  still confirms.
+
+**What the advice can do.**
+- Config advice offers only sizings from the memory calculator that fit the free memory. "Fill" sets only fields
+  the user has not touched; typed values are never overwritten.
+- The engine chip and the draft suggestion change nothing until the admin clicks "Use" / "Apply".
+- Untrusted text goes only into quoted, capped, redacted `state` blocks: repo names, config excerpts, model cards
+  and code excerpts. The options are enumerated by code (verdicts, sizing keys, on-disk repo ids, engines,
+  `routine` / `unusual`), and explanations are templates.
+
+### Background job engine
+
+`dgxmm/decider/insight_engine.py` runs the decision-model features' periodic jobs (health triage, reading
+labels, threshold tuning, routing advice, traffic profiles, schedule proposals, the schedule runner).
+- One scheduler; jobs run in the engine's own 2-thread pool (`JOB_THREADS`) or as coroutines that put CPU and
+  database work through `run.to_thread`. A job is skipped while its previous run is active; a timed-out run lasts
+  until its threads really end, so runs never overlap.
+- Every model call of a job uses the decider's background lane and counts against the job's `budget_calls`;
+  beyond it the call abstains without asking. Interactive requests keep their own lane, so jobs cannot starve
+  them (tested in `tests/test_advanced_jobs.py`; the scheduled budget is under 5 % of the decider's capacity).
+- A job whose feature is switched off does not run. A failure or timeout is retried with backoff (1 min doubling,
+  at most 1 h); after 3 consecutive failures one deduplicated "feature degraded" insight is raised, with a
+  templated body (errors are logged, never shown).
+- Change notices (routing advice after deployment and LiteLLM registration changes) settle for 15 s, at most
+  60 s, into one run, so a burst of changes cannot cause a job storm.
+- Daily and weekly jobs and schedules use the box's time zone: `DGXMM_TZ`, which `install.sh` detects from the
+  host and validates against an IANA-name pattern (no `..`, no paths, no POSIX rules) before writing `.env`; an
+  unknown zone falls back to `TZ`, `/etc/localtime`, then UTC.
+
+### Insights and their actions
+
+- Insights carry a templated title and body and an optional action descriptor that the UI turns into an
+  existing dialog; the server never executes an action. Descriptors are validated on write: `reconfigure`
+  patches may not contain `model_ref` or `trust_remote_code` (`FORBIDDEN_PATCH_KEYS`; the client's
+  `parseAction` rejects the same keys), `open` paths must be app paths (no `//host`), threshold values are range
+  checked, `copy` text is capped.
+- Viewers see insights of features marked `viewer_visible` only, and never the action. Routing and tuning
+  insights (and anything from the admin-only deploy-time features) are admin-only. Dismiss, snooze and applied are admin-only. The SSE topic `insights` carries
+  ids only.
+- Insights are rendered as React text (no HTML). Closed insights are kept 30 days; a deployment's insights are
+  deleted with it.
+
+### Schedule runner
+
+- Schedules are user-owned: admin-only create, update and delete (CSRF, audited `schedule_create` /
+  `schedule_update` / `schedule_delete`), validated (`HH:MM`, IANA zone, at most 16 per deployment, no overlapping
+  slots), refused for system and decision deployments at creation and again at run time.
+- The runner (every 60 s) acts only through the deployer's own `sleep` / `stop` / `wake` / `start` paths, as the
+  system actor `schedule:<id>` (audited `schedule_run`, user "system"). A sleep or stop re-checks traffic under
+  the deployment's lock and defers while requests are running (retried for 60 minutes, then given up); a wake or
+  start uses the fit check and never evicts anything (no memory: skipped).
+- A scheduled wake starts a stopped deployment only if a schedule stopped it: the deployer records who asked for
+  every stop in the event's `actor` field; the message text is never parsed.
+- "Pause all schedules" (admin setting) stops the runner; each slot runs at most once a day, and a restart
+  re-checks pending wakes instead of repeating them.
+- Removing a deployment deletes its schedules (audited as `schedule_delete`, actor `deployment_removal`) and
+  traffic profile. Viewers can read schedules, without the creator's user id.
+- Schedule proposals are insights only: applying one opens the schedule dialog for the admin to confirm.
+
+### ⌘K natural-language commands
+
+- `POST /api/decider/command` returns interpretations only; nothing runs on the server. Choosing one opens the
+  normal confirmation or dialog (ConfirmDialog for every lifecycle action; typing the name to stop a ready
+  deployment).
+- The action set is fixed (navigate, start, stop, sleep, wake, restart, deploy, reconfigure, free memory). Viewers
+  get navigation only. Removing deployments, deleting weights and user administration are refused by rules before
+  the model sees the text (NFKC folding, confusable letters, zero-width characters and one-edit typos included).
+- Parameters (context length, GiB, a verbatim model ref) come from rules only; targets come from the app's own
+  lists; the typed text goes only into quoted, capped `state`. Labels are templates.
+- The rules' fuzzy matching runs in a worker thread, bounded (60 words, 400 targets, early exits on cheap upper
+  bounds); after the 8 s deadline the route answers with the rules result already computed, never starting over.
+- "Free N GiB" (admin): the plan is recomputed on the server and applied through the deploy plan path (system
+  deployments refused, undone if an action fails, audited `free_memory`). An unsafe plan needs an acknowledgement
+  bound to the fingerprint of the reason the admin was shown; if the reason changed, the request gets 409 and the
+  new reason.
+
+### Rate-limit buckets of the decision-model routes
+
+Per user and per minute, and for all users together where a second number is given. Over the limit: 429
+`rate_limited` (plan ranking falls back to no ranking instead).
+
+| Bucket | Routes | Per user | All users |
+|---|---|---|---|
+| `decider_admin` | settings, enable, disable, image build, key rotation, model download | 10 | — |
+| `decider_feedback` | decision feedback | 60 | — |
+| `decider_read` | the admin decision log | 120 | — |
+| `insights_read` | `GET /api/insights` | 120 | — |
+| `insights_write` | dismiss, snooze, applied | 60 | — |
+| `decider_schedule` | schedules and their settings | 60 | 240 |
+| `decider_<feature>` | each other feature's routes (diagnosis, parser `decider_suggest`, plan, kind, workload, health, config, compat, draft, engine, command, reading, tuning, routing, remote_code) | 30 | 120 |
+
 ### Data at rest
 
 - `decisions` rows hold the feature, subject, choice, probabilities, latency, model revision, the **SHA-256 of
@@ -305,7 +491,11 @@ What reaches the decider is assembled by DGXMM, never by the untrusted source:
 - `diagnoses` rows hold the cause, source, confidence, a fixed summary (plus the matched rule line, redacted, at
   most 200 characters), the fix hint, the validated patch and a **redacted** log excerpt (last 120 lines / 6 KiB).
 - `artifact_kinds` holds kind, source and confidence per artifact.
-- **Retention**: `decisions` keeps 30 days and at most 50 000 rows (`decider_retention_days`, `decider_max_rows`),
+- **Retention**: `decisions` keeps 30 days and at most 50 000 rows (`decider_retention_days`, `decider_max_rows`);
+  rows with feedback are exempt from both and kept 180 days (`decider_feedback_retention_days`; never fewer than
+  `decider_retention_days`, so a lower value cannot delete rated rows before unrated ones).
+  Rules-only answers to viewers (compat check, ⌘K) are not logged. `insights` keeps closed rows 30 days,
+  `compat_cache` 7 days (verdicts only); `traffic_profiles` and `deployment_schedules` go with their deployment.
   `diagnoses` the latest 20 per deployment (deleted with the deployment), pruned once a minute by the metrics loop,
   so neither table grows without bound however often previews, suggestions or failures happen.
 - `tests/test_decider_injection.py` plants HF, OpenAI, AWS, GitHub, bearer, database-URL, password, API-key and
@@ -345,6 +535,18 @@ What reaches the decider is assembled by DGXMM, never by the untrusted source:
   the host, not as root, but with that uid's host access.
 - **Rate limits are per process and in memory**: they reset on restart and are not shared between instances
   (DGXMM runs as a single instance).
+- **Decision-log churn from viewers.** Viewers' model consultations (compat checks the rules cannot answer) are
+  still logged, within the all-user caps (120 per minute per bucket). Feedback rows cannot be pushed out (they are
+  exempt from the row cap), but at the caps the newest-50 000 window of other rows turns over in hours, so
+  admins' unlabelled history is short on a busy instance. The viewer buckets have no separate, lower cap.
+- **⌘K CPU cost.** The rules' matching is bounded and runs off the event loop, but it is still CPU work: about
+  0.3 s for an admin with 300 models and a 300-character command (viewers, who match only pages and deployments,
+  far less), in the shared default thread pool. At the caps (30 per user, 120 for all users per minute) this is
+  bounded load, not a stall of the UI or SSE.
+- **Static code scan.** See the scanner's blind spots above: a clean scan is not a safety review.
+- **Schedules act on their own.** A schedule an admin created sleeps, stops, wakes or starts a deployment
+  without a further confirmation. It goes through the same checks as the buttons (no live traffic, fit check,
+  never evicting, system deployments excluded) and is audited, and **Pause all schedules** stops every one.
 
 ## Verifying the controls
 

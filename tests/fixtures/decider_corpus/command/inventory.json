@@ -1,0 +1,132 @@
+{
+ "deployments": [
+  {
+   "id": 1,
+   "name": "qwen3-8b",
+   "state": "ready",
+   "sleep_capable": true,
+   "model_ref": "Qwen/Qwen3-8B",
+   "engine": "vllm",
+   "system": false
+  },
+  {
+   "id": 2,
+   "name": "llama-8b",
+   "state": "sleeping",
+   "sleep_capable": true,
+   "model_ref": "meta-llama/Llama-3.1-8B-Instruct",
+   "engine": "vllm",
+   "system": false
+  },
+  {
+   "id": 3,
+   "name": "gemma-12b",
+   "state": "stopped",
+   "sleep_capable": false,
+   "model_ref": "google/gemma-3-12b-it",
+   "engine": "vllm",
+   "system": false
+  },
+  {
+   "id": 4,
+   "name": "decider",
+   "state": "ready",
+   "sleep_capable": false,
+   "model_ref": "vllm-sr/d3-mini",
+   "engine": "decision",
+   "system": true
+  },
+  {
+   "id": 5,
+   "name": "qwen-coder",
+   "state": "ready",
+   "sleep_capable": false,
+   "model_ref": "/data/gguf/0/Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf",
+   "engine": "llamacpp",
+   "system": false
+  },
+  {
+   "id": 6,
+   "name": "mistral-7b",
+   "state": "ready",
+   "sleep_capable": true,
+   "model_ref": "mistralai/Mistral-7B-Instruct-v0.3",
+   "engine": "vllm",
+   "system": false
+  },
+  {
+   "id": 7,
+   "name": "gpt-oss-20b",
+   "state": "failed",
+   "sleep_capable": false,
+   "model_ref": "openai/gpt-oss-20b",
+   "engine": "vllm",
+   "system": false
+  },
+  {
+   "id": 8,
+   "name": "phi-mini",
+   "state": "sleeping",
+   "sleep_capable": true,
+   "model_ref": "microsoft/Phi-4-mini-instruct",
+   "engine": "vllm",
+   "system": false
+  }
+ ],
+ "models": [
+  {
+   "ref": "Qwen/Qwen3-8B",
+   "engines": [
+    "vllm"
+   ]
+  },
+  {
+   "ref": "Qwen/Qwen3-4B-Instruct-2507",
+   "engines": [
+    "vllm"
+   ]
+  },
+  {
+   "ref": "meta-llama/Llama-3.1-8B-Instruct",
+   "engines": [
+    "vllm"
+   ]
+  },
+  {
+   "ref": "google/gemma-3-12b-it",
+   "engines": [
+    "vllm"
+   ]
+  },
+  {
+   "ref": "mistralai/Mistral-7B-Instruct-v0.3",
+   "engines": [
+    "vllm"
+   ]
+  },
+  {
+   "ref": "openai/gpt-oss-20b",
+   "engines": [
+    "vllm"
+   ]
+  },
+  {
+   "ref": "microsoft/Phi-4-mini-instruct",
+   "engines": [
+    "vllm"
+   ]
+  },
+  {
+   "ref": "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B",
+   "engines": [
+    "vllm"
+   ]
+  },
+  {
+   "ref": "ibm-granite/granite-3.3-8b-instruct",
+   "engines": [
+    "vllm"
+   ]
+  }
+ ]
+}

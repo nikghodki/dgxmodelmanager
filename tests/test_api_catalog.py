@@ -61,3 +61,37 @@ def test_favourite_gguf_path_url_encoded(api_stack):
     assert api_stack.delete(f"/dgxmm/api/planner/favourites/{enc}", headers=h).status_code == 204
     with api_stack.ctx.db.session() as s:
         assert s.query(Favourite).count() == 0
+
+
+class _RecordingHub(FakeHub):
+    def __init__(self):
+        self.calls = []
+
+    def search(self, q, limit=30, gguf=False, anonymous=False):
+        self.calls.append(("search", anonymous))
+        return super().search(q, limit, gguf)
+
+    def details(self, repo_id, anonymous=False):
+        self.calls.append(("details", anonymous))
+        if anonymous and repo_id == "org/private":
+            raise LookupError("org/private not found")
+        return super().details(repo_id)
+
+
+def test_catalog_lookups_are_anonymous_for_viewers_and_private_repos_are_not_served(api_stack):
+    """Review follow-up (L1): /api/catalog/details and /search for a viewer use no HF token; a private repo that
+    only the admin's token can read is not described to a viewer."""
+    admin(api_stack)
+    wire(api_stack)
+    hub = _RecordingHub()
+    api_stack.ctx.catalog.hub = hub
+    assert api_stack.get("/dgxmm/api/catalog/details", params={"repo": "org/private"}).status_code == 200
+    assert hub.calls and all(anon is False for _, anon in hub.calls)
+    r = api_stack.post("/dgxmm/api/auth/login", json={"username": "vic", "password": "viewer-password-1"})
+    assert r.status_code == 200
+    hub.calls.clear()
+    assert api_stack.get("/dgxmm/api/catalog/details", params={"repo": "Qwen/Qwen3-Tiny"}).status_code == 200
+    assert api_stack.get("/dgxmm/api/catalog/search", params={"q": "qwen"}).status_code == 200
+    assert {kind for kind, _ in hub.calls} == {"details", "search"} and all(anon for _, anon in hub.calls)
+    r = api_stack.get("/dgxmm/api/catalog/details", params={"repo": "org/private"})
+    assert r.status_code == 502 and "Qwen" not in r.text

@@ -52,4 +52,19 @@ describe("Catalog", () => {
     expect(screen.getByText("not supported")).toHaveClass("sr-only");
     expect(screen.getByText("unknown")).toHaveClass("sr-only");
   });
+
+  it("shows the compatibility check in the details and before downloading", async () => {
+    vi.mocked(apiModule.api).mockImplementation((url: string) => {
+      if (url.startsWith("/catalog/search")) return Promise.resolve({ results: [result], free_for_new: 5e9, banner: null });
+      if (url.startsWith("/catalog/details")) return Promise.resolve({ repo_id: "org/model-a", gated: false, sha: "s", files: [], architecture: "Qwen3ForCausalLM", max_context: 32768, quant: null, estimate: { total: 1e9 }, fit: { badge: "fits_now" }, gguf_files: [], support: { vllm: true, llamacpp: false }, llmfit: null, banner: null, variants: [], downloaded: false });
+      if (url.startsWith("/catalog/compat")) return Promise.resolve({ repo: "org/model-a", sha: "s", architecture: "Qwen3ForCausalLM", gated: false, vllm: { verdict: "runs_with_flags", reasons: ["supported_architecture", "trust_remote_code_required"], flags: ["trust_remote_code"] }, llamacpp: { verdict: "unsupported", reasons: ["no_gguf"], flags: [] }, source: "rules", confidence: 1, decision_id: 1, cached: false, error: null, disabled: false });
+      return Promise.reject(new Error(`unexpected ${url}`));
+    });
+    vi.mocked(auth.useIsAdmin).mockReturnValue(true);
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(<QueryClientProvider client={qc}><MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}><Catalog /></MemoryRouter></QueryClientProvider>);
+    await userEvent.click(await screen.findByRole("button", { name: "org/model-a" }));
+    expect(await screen.findByText(/vLLM: runs with extra settings \(needs trust_remote_code/)).toBeInTheDocument();
+    expect(screen.getByText(/Before downloading: vLLM: runs with extra settings · llama.cpp: not supported/)).toBeInTheDocument();
+  });
 });
