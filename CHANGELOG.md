@@ -14,11 +14,14 @@ All notable changes to DGXMM are documented in this file. The format is based on
   measured memory was its cgroup memory only, and its memory beyond the reservation read as **External**
   (on a GB10 with driver 580, a vLLM deployment reserved at 48.7 GiB measured 6.4 GiB and external read
   16.2 GiB; now 53.4 GiB measured and 11.5 GiB external). The DGXMM container now runs with `pid: host`
-  (`docker-compose.yaml`), and DGXMM logs a warning when it runs in its own PID namespace. Without NVML
+  (`docker-compose.yaml`; opt out with `DGXMM_HOST_PID=0` in `.env`, see the installer settings), and DGXMM
+  logs a warning when it runs in its own PID namespace. Without NVML
   figures (older drivers), the budget behaves as before. Calibration is unchanged: it learns the engine log
   plus the host part of the measurement. See [memory budget](docs/architecture/memory.md#budget) and
   [troubleshooting](docs/operations/troubleshooting.md#gpu-memory-of-a-deployment-is-not-counted).
 - The memory cell of the deployments table and the decision model page are labelled **Measured / Reserved**.
+- A test of the insight engine failed once the real date passed 2026-10-19 18:00 UTC: the engine used a fixed
+  fake clock but the insight store expired rows against the real clock. Both now share the fake clock.
 
 ## [2026-10-18] — Advanced decision-model features
 

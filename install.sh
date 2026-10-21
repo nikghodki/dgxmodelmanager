@@ -19,7 +19,7 @@ CONFIG_FILE="$REPO_DIR/config.yaml"
 EXAMPLE_CONFIG="$REPO_DIR/config.example.yaml"
 SECRETS_DIR="$REPO_DIR/secrets"
 DATA_DIR="$REPO_DIR/data"
-ENV_KEYS=(DGXMM_UID DGXMM_GID DOCKER_GID DGXMM_PORT DGXMM_BIND DGXMM_HF_CACHE DGXMM_MODELS_DIR DGXMM_NETWORK DGXMM_HOST_HOME DGXMM_TRUSTED_PROXIES DGXMM_INSTALL_ID DGXMM_TZ)
+ENV_KEYS=(DGXMM_UID DGXMM_GID DOCKER_GID DGXMM_PORT DGXMM_BIND DGXMM_HF_CACHE DGXMM_MODELS_DIR DGXMM_NETWORK DGXMM_HOST_HOME DGXMM_TRUSTED_PROXIES DGXMM_INSTALL_ID DGXMM_TZ DGXMM_HOST_PID)
 # Written to .env only when the bundled LiteLLM is enabled (--with-litellm / DGXMM_WITH_LITELLM=1).
 LITELLM_ENV_KEYS=(DGXMM_WITH_LITELLM DGXMM_LITELLM_PORT COMPOSE_PROFILES)
 LITELLM_SERVICE=dgxmm-litellm
@@ -117,6 +117,11 @@ Environment (all optional; non-interactive, nothing is prompted):
   DGXMM_TRUSTED_PROXIES  Comma-separated IPs/CIDRs trusted to set X-Forwarded-For (default
                        127.0.0.1,::1). Behind a reverse proxy, set to the proxy's IP or docker
                        network subnet.
+  DGXMM_HOST_PID       1 (default) runs the DGXMM container in the host PID namespace (compose
+                       pid: host), so NVML reports the GPU memory of the engine containers and it counts
+                       as the deployment's measured memory. 0: the container's own PID namespace; GPU
+                       memory of deployments is then not measured (the budget credits the reservation
+                       instead). Remembered in .env; apply a change with ./install.sh.
   DGXMM_PULL_ENGINES=1 Pre-pull the vLLM and llama.cpp engine images (large; default off).
   DGXMM_HEALTH_TIMEOUT Seconds to wait for the container to become healthy (default 300).
   DGXMM_WITH_DECIDER=1 Same as --with-decider. Every install/upgrade then makes sure the decider is
@@ -352,6 +357,8 @@ load_settings() {
   MODELS_DIR=$(expand_tilde "$(resolve DGXMM_MODELS_DIR "$FLAG_MODELS" "$HOST_HOME/models")")
   TRUSTED_PROXIES=$(resolve DGXMM_TRUSTED_PROXIES "" "")
   TZ_NAME=$(resolve DGXMM_TZ "" "$(detect_tz)")
+  HOST_PID=$(resolve DGXMM_HOST_PID "" 1)
+  HOST_PID=$(bool01 "$HOST_PID") || die "DGXMM_HOST_PID must be 1 or 0 (got '$HOST_PID')"
   WITH_LITELLM=$(resolve DGXMM_WITH_LITELLM "$FLAG_WITH_LITELLM" 0)
   WITH_LITELLM=$(bool01 "$WITH_LITELLM") || die "DGXMM_WITH_LITELLM must be 1 or 0 (got '$WITH_LITELLM')"
   LITELLM_PORT=$(resolve DGXMM_LITELLM_PORT "$FLAG_LITELLM_PORT" 4000)
@@ -430,6 +437,7 @@ env_value() {  # env_value KEY -> effective value for .env
     DGXMM_WITH_DECIDER) printf '%s' "$WITH_DECIDER" ;;
     DGXMM_INSTALL_ID) printf '%s' "$INSTALL_ID" ;;
     DGXMM_TZ) printf '%s' "$TZ_NAME" ;;
+    DGXMM_HOST_PID) printf '%s' "$HOST_PID" ;;
   esac
 }
 
@@ -440,6 +448,8 @@ export_settings() {
   for k in "${ENV_KEYS[@]}"; do
     export "$k=$(env_value "$k")"
   done
+  # docker-compose.yaml: pid: ${DGXMM_PID_MODE-host}; empty = the container's own PID namespace
+  if ((HOST_PID)); then export DGXMM_PID_MODE=host; else export DGXMM_PID_MODE=""; fi
 }
 
 # --- docker helpers ------------------------------------------------------------------------------------
@@ -1223,6 +1233,9 @@ cmd_install() {
     esac
   fi
   if ((!WITH_LITELLM)); then stop_disabled_litellm; fi
+  if ((!HOST_PID)); then
+    note "DGXMM_HOST_PID=0: DGXMM runs in its own PID namespace; NVML cannot report the GPU memory of deployments"
+  fi
   info "Building and starting DGXMM (${compose[*]} up -d --build)"
   RUN_START=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   local id_before litellm_up_failed=0

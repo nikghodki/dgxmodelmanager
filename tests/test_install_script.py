@@ -1588,8 +1588,69 @@ def test_compose_passes_the_zone_to_the_container():
 
 def test_compose_shares_the_host_pid_namespace_for_nvml():
     """NVML only lists processes of the caller's PID namespace. Without `pid: host` DGXMM sees no per-process
-    GPU memory of its own engine containers and their CUDA memory reads as reservation credit / external."""
+    GPU memory of its own engine containers and their CUDA memory reads as reservation credit / external.
+    Default on; install.sh exports DGXMM_PID_MODE="" for DGXMM_HOST_PID=0 (an empty `pid:` = own namespace)."""
     text = (ROOT / "docker-compose.yaml").read_text()
     dgxmm = text.split("\n  dgxmm-litellm-db:")[0]
-    assert "\n    pid: host" in dgxmm
-    assert text.count("pid: host") == 1  # only the DGXMM service
+    assert "\n    pid: ${DGXMM_PID_MODE-host}" in dgxmm
+    assert text.count("\n    pid:") == 1  # only the DGXMM service
+
+
+def _pid_modes(box) -> list[str]:
+    return [line.split("=", 1)[1] for line in (box.tmp / "calls.log.profiles").read_text().splitlines()
+            if line.startswith("DGXMM_PID_MODE=")]
+
+
+def test_host_pid_is_on_by_default_and_remembered(box):
+    p = box.run(FAKE_LOGS=FIRST_RUN)
+    assert p.returncode == 0, p.out
+    assert "DGXMM_HOST_PID=1" in (box.repo / ".env").read_text()
+    assert _pid_modes(box) == ["host"]
+
+
+def test_host_pid_opt_out(box):
+    p = box.run(FAKE_LOGS=FIRST_RUN, DGXMM_HOST_PID="0")
+    assert p.returncode == 0, p.out
+    assert "DGXMM_HOST_PID=0" in (box.repo / ".env").read_text()
+    assert _pid_modes(box) == [""]  # compose: `pid:` empty -> the container's own PID namespace
+    assert "GPU memory" in p.out  # says what is lost
+    # .env wins on the next run, and a stray shell DGXMM_PID_MODE never overrides it
+    p2 = box.run(FAKE_LOGS="", FAKE_NETWORK="exists", FAKE_DGXMM_STATE="running",
+                 FAKE_DGXMM_WORKDIR=str(box.repo.resolve()), DGXMM_PID_MODE="host")
+    assert p2.returncode == 0, p2.out
+    assert _pid_modes(box) == ["", ""]
+
+
+def test_host_pid_value_is_validated(box):
+    p = box.run("--dry-run", DGXMM_HOST_PID="maybe")
+    assert p.returncode != 0 and "DGXMM_HOST_PID must be 1 or 0" in p.out
+
+
+def test_host_pid_added_to_an_older_env(box):
+    (box.repo / ".env").write_text("DGXMM_UID=1234\nDGXMM_GID=2345\nDOCKER_GID=977\n")
+    p = box.run("--dry-run")
+    assert p.returncode == 0, p.out
+    assert "would append missing keys" in p.out and "DGXMM_HOST_PID=1" in p.out
+
+
+def test_help_documents_host_pid(box):
+    p = box.run("--help")
+    assert "DGXMM_HOST_PID" in p.stdout and "pid: host" in p.stdout
+
+
+@pytest.mark.skipif(not _compose_available(), reason="docker compose not available")
+@pytest.mark.parametrize("mode,want", [(None, "host"), ("host", "host"), ("", None)])
+def test_compose_pid_mode_renders(tmp_path, mode, want):
+    """`docker compose config` on both settings: unset/host -> pid host; empty -> no pid (own namespace)."""
+    import json
+    shutil.copy2(ROOT / "docker-compose.yaml", tmp_path / "docker-compose.yaml")
+    (tmp_path / ".env").write_text(
+        "DGXMM_UID=1000\nDGXMM_GID=1000\nDOCKER_GID=988\nDGXMM_HOST_HOME=/tmp\nDGXMM_HF_CACHE=/tmp/hf\n"
+        "DGXMM_MODELS_DIR=/tmp/models\nDGXMM_NETWORK=dgxmmtest\nDGXMM_BIND=127.0.0.1\n")
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("DGXMM_", "COMPOSE_"))}
+    if mode is not None:
+        env["DGXMM_PID_MODE"] = mode
+    p = subprocess.run(["docker", "compose", "config", "--format", "json"], cwd=tmp_path, env=env,
+                       capture_output=True, text=True)
+    assert p.returncode == 0, p.stderr
+    assert json.loads(p.stdout)["services"]["dgxmm"].get("pid") == want

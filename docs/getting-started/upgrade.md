@@ -68,7 +68,8 @@ What changes when an older install is upgraded with `./install.sh upgrade` (see 
 applies to you.
 
 - **GPU memory attribution (2026-10-21).** `docker-compose.yaml` now runs the DGXMM container with
-  `pid: host`; `./install.sh upgrade` recreates it. Afterwards a ready deployment's **Measured** memory
+  `pid: host`; `./install.sh upgrade` recreates it and adds `DGXMM_HOST_PID=1` to `.env` (set `0` there
+  and re-run to opt out). Afterwards a ready deployment's **Measured** memory
   includes its GPU memory and *external* drops by the part that was really the deployment's. Nothing else
   changes, and no migration runs.
 - **Advanced decision-model release (2026-10-18).**

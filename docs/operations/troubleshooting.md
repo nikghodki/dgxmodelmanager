@@ -164,8 +164,8 @@ card.
 A ready deployment's **Measured** memory is only a few GiB (its host memory) while `nvidia-smi
 --query-compute-apps=pid,used_memory --format=csv` on the host shows its engine using much more, and the
 log has "DGXMM runs in its own PID namespace". NVML only lists processes of the caller's PID namespace:
-the DGXMM container needs `pid: host`, which `docker-compose.yaml` sets. Run `./install.sh` to recreate the
-container. With an older driver that reports no per-process GPU memory, this is expected; the budget then
+the DGXMM container needs `pid: host`, which `docker-compose.yaml` sets unless `.env` has `DGXMM_HOST_PID=0`.
+Run `./install.sh` to recreate the container. With an older driver that reports no per-process GPU memory, this is expected; the budget then
 credits the rest of the reservation (see [memory budget](../architecture/memory.md#budget)).
 
 ## Download fails with "owned by root"

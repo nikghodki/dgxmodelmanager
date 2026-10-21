@@ -26,6 +26,7 @@ case "$*" in
     else exit 1; fi ;;
   "compose up -d --build"|"compose --profile litellm up -d --build")
     echo "COMPOSE_PROFILES=${COMPOSE_PROFILES-<unset>}" >> "$FAKE_LOG.profiles"
+    echo "DGXMM_PID_MODE=${DGXMM_PID_MODE-<unset>}" >> "$FAKE_LOG.profiles"
     [ "${FAKE_COMPOSE_UP:-ok}" = fail ] && { echo "failed to solve: process did not complete" >&2; exit 17; }
     [ "${FAKE_RECREATE:-1}" = 1 ] && echo "id-$RANDOM-$$" > "$FAKE_LOG.id"
     case "$*" in
