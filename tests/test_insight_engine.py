@@ -44,7 +44,30 @@ def eng(ctx):
     ctx.decider = Toggles({"health": ("a", 0.95)})
     e = InsightEngine(ctx, clock=clock, tz=timezone.utc)
     e.clock_ = clock
+    # The engine writes expires_at from its clock; the store expires rows against its own clock. In production
+    # both are utcnow. With a fixed fake engine clock and a real store clock, a 6 h degraded TTL computed from
+    # 2026-10-19 12:00 expired as soon as the real date passed 2026-10-19 18:00 UTC.
+    ctx.insights.clock = clock
     return e
+
+
+def test_engine_and_store_share_one_clock(eng):
+    assert eng.ctx.insights.clock is eng.clock
+
+
+async def test_degraded_insight_expires_by_the_shared_clock(eng):
+    async def broken(run):
+        raise RuntimeError("x")
+    eng.register_job("h", "health", 60, broken)
+    for _ in range(3):
+        eng.trigger("h")
+        await eng.tick()
+        await eng.wait_idle()
+    (row,) = [r for r in eng.ctx.insights.list() if r["status"] == "open"]
+    eng.clock_.advance(hours=5, minutes=59)
+    assert [r["status"] for r in eng.ctx.insights.list() if r["id"] == row["id"]] == ["open"]
+    eng.clock_.advance(minutes=2)
+    assert [r["status"] for r in eng.ctx.insights.list() if r["id"] == row["id"]] == ["expired"]
 
 
 def test_cadence_parsing_and_next_times():
