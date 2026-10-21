@@ -139,6 +139,31 @@ tab. Stopped deployments without an alias do not hold their served name.
 If a deployment shows the LiteLLM status `error`, two ready deployments ended up with the same name
 anyway. The oldest keeps the registration; rename the other on its LiteLLM tab.
 
+"LiteLLM already has a model named … that DGXMM didn't create" means the name belongs to an entry outside
+DGXMM (a static entry in LiteLLM's `config.yaml`, or one another tool added). See the next section.
+
+## Requests fail intermittently with "Connection error"
+
+Some requests to a model succeed and others (often a third to a half) fail with "Connection error": check
+for **duplicate model names** in LiteLLM. When LiteLLM has two entries with one model name, it
+load-balances between them, and every request sent to a backend that is gone fails. The usual cause is a
+static entry in LiteLLM's `config.yaml` pointing at an old, stopped engine, next to the entry DGXMM
+registered.
+
+DGXMM detects this: the deployment's LiteLLM status is **Name conflict** (`conflict`), its LiteLLM tab and
+the Deployments table tooltip say "LiteLLM also has a model named …", and a warning insight on the
+deployment names the other entry's host. **Models** on the LiteLLM page lists the other entry as
+"external". To fix it, either:
+
+- remove the duplicate from LiteLLM's `config.yaml` (or from the tool that added it) and restart LiteLLM.
+  Static entries cannot be deleted through LiteLLM's API, and DGXMM never changes entries it did not
+  create; or
+- give the deployment a different **Model name (LiteLLM)** on its LiteLLM tab, and point clients at it.
+
+The status and the insight clear by themselves at the next sync (within a minute, or **Sync now**) once the
+names are unique. A deployment that was not registered yet when the clash appeared stays unregistered until
+then, so no second entry is ever added.
+
 ## Clients cannot call a served name any more after an upgrade
 
 Older versions registered an aliased deployment under both its served name and its alias. Now each

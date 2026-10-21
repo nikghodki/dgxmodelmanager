@@ -5,6 +5,24 @@ All notable changes to DGXMM are documented in this file. The format is based on
 (the package version is `0.1.0`), so each section below is identified by its date. Upgrade notes for existing installs are in
 [upgrade](docs/getting-started/upgrade.md#upgrading-an-existing-install).
 
+## [2026-10-21] — LiteLLM model names DGXMM did not create
+
+### Fixed
+
+- **DGXMM no longer registers a model name LiteLLM already serves from an entry DGXMM did not create.** A
+  static entry in LiteLLM's `config.yaml` (or a DB entry another tool added) with the same model name as a
+  DGXMM deployment made LiteLLM load-balance between the two; when that other backend was down, a third to a
+  half of the requests failed with "Connection error". Deploy, start, wake and rename now check the whole
+  LiteLLM model list and refuse such a name with `409 model_name_taken` ("LiteLLM already has a model named …
+  that DGXMM didn't create"), shown in the deploy wizard and on the deployment's LiteLLM tab. DGXMM's own
+  entries are recognised by `model_info.dgxmm_id` as before. If LiteLLM's model list cannot be read, nothing
+  is blocked (as before).
+- **Existing registrations that clash are flagged.** The sync loop never adds an entry next to a foreign one,
+  keeps an existing registration as it is, and sets the LiteLLM status **Name conflict** (`conflict`) with a
+  warning insight on the deployment naming the other entry's host. Both clear by themselves once the names
+  are unique. DGXMM never changes or deletes entries it did not create. See
+  [troubleshooting](docs/operations/troubleshooting.md#requests-fail-intermittently-with-connection-error).
+
 ## [2026-10-21] — GPU memory of deployments is measured
 
 ### Fixed

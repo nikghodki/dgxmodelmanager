@@ -31,9 +31,21 @@ get `litellm_status: error` with a `model_name_conflict` reason. The last sync's
 feed `litellm_error` in deployment views and the per-deployment `GET /deployments/{id}/litellm`, so
 those read paths never call LiteLLM.
 
+**Entries DGXMM did not create** (no `dgxmm_id`: static `config.yaml` entries, `db_model: false`, or DB
+entries of other tools) are never changed or deleted. The same sync reads them from the full
+`/model/info` list: a desired name that one of them also has is a *name conflict*. An existing DGXMM
+registration is kept, an unregistered one is not added (no silent duplicate), and the ready deployment gets
+`litellm_status: conflict` with a `litellm_name_conflict` reason and a deduplicated warning insight
+(`litellm_conflict:<id>`, feature `health`, a template naming only the other entry's `api_base` host). A
+later sync without the clash resolves both; a failed sync leaves them as they were.
+
 **Model names are unique.** The deployer checks names under its memory lock when a deployment is
 deployed, started, woken or renamed: a name is taken if it is another deployment's alias (in any state)
-or the model name of another deployment that is planned, starting, loading, ready or unknown.
+or the model name of another deployment that is planned, starting, loading, ready or unknown. Before
+that (outside the lock, at most `FOREIGN_CHECK_TIMEOUT_S` = 5 s) it reads LiteLLM's model list: a name
+that an entry DGXMM did not create already has is refused with `409 model_name_taken` and no `holder`
+(`external: {host, static}` instead). An unreadable list or a disabled integration skips this check (fail
+open).
 
 **Virtual keys** are proxied to LiteLLM's `/key/*` API with the master key. Before a key operation DGXMM
 checks LiteLLM's `/health/readiness`; without a connected database it answers `409 litellm_no_db`.
