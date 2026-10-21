@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { ApiError } from "@/api";
 import {
-  ALIAS_RE, apiErrorText, keysScopedTo, nameFixHref, rewrittenCount, suggestAlias, syncMessage, takenHolder, aliasProblem, buildKeyCreateBody, buildKeyPatchBody, connectionPatch, curlSnippet, emptyKeyForm, endpointPreview,
+  ALIAS_RE, apiErrorText, isModelNameTaken, modelNameRule, MODEL_NAME_RULE, EXTERNAL_NAME_RULE, keysScopedTo, nameFixHref, rewrittenCount, suggestAlias, syncMessage, takenHolder, aliasProblem, buildKeyCreateBody, buildKeyPatchBody, connectionPatch, curlSnippet, emptyKeyForm, endpointPreview,
   isAllModels, keyFormFromKey, keyFormProblems, litellmProblem, modelNameOptions, pythonSnippet, urlProblem,
 } from "./litellm";
 
@@ -127,6 +127,17 @@ describe("model name conflicts", () => {
     const named = new ApiError(409, { code: "model_name_taken", message: "used by deployment other (ready)", holder: { id: 7, name: "other", state: "ready" } });
     expect(apiErrorText(named)).toBe("used by deployment other (ready)");
     expect(apiErrorText(new Error("boom"))).toBe("boom");
+  });
+  it("recognises a name held by a LiteLLM entry DGXMM did not create (no holder)", () => {
+    const external = new ApiError(409, { code: "model_name_taken", message: "LiteLLM already has a model named chat that DGXMM didn't create (static config or another tool). Pick another name, or remove that entry from LiteLLM first.", holder: null, external: { host: "old-engine", static: true } });
+    expect(isModelNameTaken(external)).toBe(true);
+    expect(isModelNameTaken(taken)).toBe(true);
+    expect(isModelNameTaken(new Error("x"))).toBe(false);
+    expect(takenHolder(external)).toBeNull();
+    expect(apiErrorText(external)).toMatch(/^LiteLLM already has a model named chat that DGXMM didn't create/);
+    expect(modelNameRule(external)).toBe(EXTERNAL_NAME_RULE);
+    expect(modelNameRule(taken)).toBe(MODEL_NAME_RULE);
+    expect(litellmProblem({ code: "litellm_name_conflict", message: "LiteLLM also has a model named chat" })).toEqual({ title: "Name also used outside DGXMM", description: "LiteLLM also has a model named chat" });
   });
   it("explains a sync conflict and shows the key hint for a missing key", () => {
     expect(litellmProblem({ code: "model_name_conflict", message: "model name chat is already registered for deployment a" }).description).toMatch(/registered for deployment a/);

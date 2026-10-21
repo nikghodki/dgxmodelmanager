@@ -180,6 +180,28 @@ describe("DeployWizard", () => {
     expect(screen.getByLabelText("Model name (LiteLLM)")).toHaveValue("model-a-model-a");
     expect(screen.getByLabelText("Model name (LiteLLM)")).toHaveFocus();
   });
+
+  it("explains a model name LiteLLM already has from an entry DGXMM did not create", async () => {
+    vi.mocked(auth.useIsAdmin).mockReturnValue(true);
+    vi.mocked(apiModule.api).mockImplementation((url: string) => {
+      if (url === "/inventory") return Promise.resolve([artifact]);
+      if (url === "/engines") return Promise.resolve(engines);
+      if (url === "/deployments/preview") return Promise.resolve({ ...fitsPreview, served_name: "model-a" });
+      if (url === "/deployments") return Promise.reject(new apiModule.ApiError(409, {
+        code: "model_name_taken",
+        message: "LiteLLM already has a model named model-a that DGXMM didn't create (static config or another tool). Pick another name, or remove that entry from LiteLLM first.",
+        holder: null, external: { host: "old-engine", static: true },
+      }));
+      return Promise.reject(new Error(`unexpected ${url}`));
+    });
+    renderWizard();
+    await waitFor(() => expect(screen.getAllByText("Fits").length).toBeGreaterThan(0));
+    await userEvent.click(screen.getAllByRole("button", { name: "Deploy" })[0]);
+    expect((await screen.findAllByText(/LiteLLM already has a model named model-a that DGXMM didn't create/)).length).toBeGreaterThan(0);
+    expect(screen.queryByRole("link", { name: /^Open / })).toBeNull();
+    await userEvent.click(screen.getAllByRole("button", { name: "Use model-a-model-a" })[0]);
+    expect(screen.getByLabelText("Model name (LiteLLM)")).toHaveValue("model-a-model-a");
+  });
 });
 
 describe("DeployWizard — parser suggestions", () => {

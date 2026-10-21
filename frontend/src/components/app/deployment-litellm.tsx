@@ -9,7 +9,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useActionMutation } from "@/hooks/use-action-mutation";
-import { aliasProblem, curlSnippet, keysScopedTo, litellmProblem, modelNameOptions, pythonSnippet, rewrittenCount, suggestAlias, syncMessage, takenHolder } from "@/lib/litellm";
+import { aliasProblem, curlSnippet, keysScopedTo, litellmProblem, modelNameOptions, pythonSnippet, rewrittenCount, suggestAlias, syncMessage, isModelNameTaken } from "@/lib/litellm";
 import type { AliasPatchResult, Deployment, DeploymentLiteLLM, LiteLLMSyncResult } from "@/types";
 import { CopyButton } from "./copy-button";
 import { CodeBlock, KeyManager } from "./litellm-keys";
@@ -148,7 +148,7 @@ function ModelNameForm({ d, info, suggested, onSaved }: { d: Deployment; info?: 
       </div>
       <div id="dep-model-name-help">
         {problem ? <p className="text-xs text-status-critical">{problem}</p>
-          : takenHolder(save.error) ? <ModelNameTaken error={save.error} suggestion={suggestAlias(d.served_name, d.name)}
+          : isModelNameTaken(save.error) ? <ModelNameTaken error={save.error} suggestion={suggestAlias(d.served_name, d.name)}
               onUse={(a) => { setValue(a); save.reset(); input.current?.focus(); }} />
           : save.error ? <p role="alert" className="text-xs text-status-critical">{save.error.message}</p>
           : <p className="text-xs text-muted-foreground">Clients send this as model. Leave empty to use the served name ({d.served_name ?? "—"}). Renaming re-registers it in LiteLLM; clients using the old name stop working.</p>}

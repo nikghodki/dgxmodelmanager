@@ -182,6 +182,8 @@ export function litellmProblem(err: unknown): { title: string; description: stri
       return { title: "No master key set", description: e.message || "Add the LiteLLM master key in Connection so DGXMM can manage models and keys." };
     case "model_name_conflict":
       return { title: "Model name conflict", description: message };
+    case "litellm_name_conflict":
+      return { title: "Name also used outside DGXMM", description: message };
     case "litellm_disabled":
       return { title: "Integration disabled", description: "Turn the integration on in Connection to manage LiteLLM from DGXMM." };
     case "litellm_unreachable":
@@ -214,6 +216,18 @@ export function takenHolder(err: unknown): DeploymentRef | null {
   return d && typeof d === "object" && d.code === "model_name_taken" && d.holder ? (d.holder as DeploymentRef) : null;
 }
 
+/** A 409 `model_name_taken`, held by another deployment (`takenHolder`) or by a LiteLLM entry DGXMM did not create
+ * (static config.yaml entry or another tool's; no holder). */
+export function isModelNameTaken(err: unknown): boolean {
+  const d = (err as { detail?: any } | null)?.detail;
+  return !!d && typeof d === "object" && d.code === "model_name_taken";
+}
+
+/** Why a model name may not be shared, for the kind of holder in a `model_name_taken` error. */
+export function modelNameRule(err: unknown): string {
+  return takenHolder(err) ? MODEL_NAME_RULE : EXTERNAL_NAME_RULE;
+}
+
 /** Error text for toasts: a model-name conflict always names the deployment holding the name. */
 export function apiErrorText(err: unknown): string {
   const msg = (err as Error | null)?.message || "Request failed";
@@ -225,6 +239,7 @@ export function apiErrorText(err: unknown): string {
 export const keysScopedTo = (keys: LiteLLMKey[], model: string) => keys.filter((k) => !isAllModels(k.models) && k.models.includes(model));
 
 export const MODEL_NAME_RULE = "Two deployments can't share one LiteLLM model name, otherwise LiteLLM would load-balance requests between them. Give this deployment its own model name.";
+export const EXTERNAL_NAME_RULE = "LiteLLM load-balances between entries with the same model name, so requests would also go to that other backend and fail when it is down. DGXMM never changes entries it did not create.";
 
 /** A stable alias that cannot collide: deployment names are unique. Sanitised to the alias pattern. */
 export function suggestAlias(servedName: string | null | undefined, deploymentName: string): string {

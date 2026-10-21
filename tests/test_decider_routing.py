@@ -159,6 +159,7 @@ def test_api_admin_only_rules_answer_and_never_touches_litellm(api_stack, lite):
     sync = api_stack.ctx.litellm
     sync.last = {**sync.last, "ok": True, "status": "synced"}
     sync.registrations = {d["id"]: "tiny-chat"}  # as after a successful sync (the sync itself is not under test)
+    lite.calls.clear()  # the deploy checked the model name against LiteLLM's model list; advice must not call it
     r = api_stack.get("/dgxmm/api/decider/routing-advice")
     assert r.status_code == 200, r.text
     body = r.json()
@@ -193,6 +194,7 @@ async def test_job_on_the_stack_never_touches_litellm_and_is_triggered_by_state_
                                                   config={"max_model_len": 4096, "max_num_seqs": 32}), 1)
     stack.http.healthy.add(d["port"])
     assert await stack.deployer.wait_ready(d["id"], 5) == "ready"
+    fake_lite.calls.clear()  # the deploy checked the model name against LiteLLM's model list; the job must not
     import asyncio
     ctx.litellm.last = {**ctx.litellm.last, "ok": True, "status": "synced"}
     ctx.litellm.registrations = {d["id"]: stack.deployer.view(d["id"])["served_name"]}

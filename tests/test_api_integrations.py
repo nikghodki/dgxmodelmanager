@@ -20,7 +20,8 @@ def lite(api_stack, settings):
     fake = FakeLiteLLM(master_key=MASTER)
     http = fake.client()
     c = api_stack.ctx
-    c.litellm = LiteLLMSync(LiteLLMClient(http, c.settings_store.litellm), c.deployer, c.db, c.events)
+    c.litellm = LiteLLMSync(LiteLLMClient(http, c.settings_store.litellm), c.deployer, c.db, c.events,
+                           insights=c.insights)
     api_stack.fake = fake
     api_stack.h = admin(api_stack)
     yield api_stack
@@ -481,7 +482,8 @@ def two(api_stack, settings):
     fakes = {"litellm-proxy": old, "new-litellm": new}
     http = httpx.AsyncClient(transport=httpx.MockTransport(lambda req: fakes[req.url.host].handler(req)))
     c = api_stack.ctx
-    c.litellm = LiteLLMSync(LiteLLMClient(http, c.settings_store.litellm), c.deployer, c.db, c.events)
+    c.litellm = LiteLLMSync(LiteLLMClient(http, c.settings_store.litellm), c.deployer, c.db, c.events,
+                           insights=c.insights)
     api_stack.old, api_stack.new, api_stack.fake = old, new, old
     api_stack.h = admin(api_stack)
     a = deploy(api_stack, api_stack.h, "a", alias="chat")

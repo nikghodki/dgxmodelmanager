@@ -100,6 +100,8 @@ class Deployer:
         self.delete_guard: Callable[[str], bool] | None = None  # WeightsDeleter.is_being_deleted
         # LiteLLMSync.error_for: why a deployment is not (correctly) registered in LiteLLM, as of the last sync
         self.litellm_error: Callable[[int, str], dict | None] | None = None
+        # set by LiteLLMSync: an entry LiteLLM serves under a model name that DGXMM did not create, or None
+        self.foreign_model_name: Callable[[str], Awaitable[dict | None]] | None = None
         # dep_id -> model refs while a container is being (re)launched; until it reaches "starting" the DB row may
         # still be planned/stopped/failed, so the weights deleter treats these as blocking.
         self.launching: dict[int, tuple[str, ...]] = {}
@@ -378,6 +380,7 @@ class Deployer:
         # System deployments are never registered in LiteLLM, so they neither hold nor need a model name.
         model_name = None if system else req.alias or prep.engine.served_name(prep.cfg, req.model_ref)
         self.require_model_name(model_name, None)
+        await self.require_not_foreign(model_name)
         if system:
             self._require_single_system(req.engine)
         async with self.mem_lock:
@@ -789,6 +792,8 @@ class Deployer:
             ref = model_ref or dep.model_ref
             prep = self.prepare(dep.engine, ref, config_override if config_override is not None else dep.config,
                                 existing_ref=dep.model_ref)
+            if not dep.system:
+                await self.require_not_foreign(dep.alias or prep.engine.served_name(prep.cfg, ref))
             async with self.mem_lock:
                 if not dep.system:
                     self.require_model_name(dep.alias or prep.engine.served_name(prep.cfg, ref), dep_id)
@@ -1016,6 +1021,9 @@ class Deployer:
             log.exception("could not record the failed wake of deployment %s", dep_id)
 
     async def _wake_when_free(self, dep_id: int, name: str) -> dict:
+        dep = self._get(dep_id)
+        if dep is not None and not dep.system:
+            await self.require_not_foreign(self._model_name(dep))
         timeout = self.settings.wake_queue_timeout_s
         try:
             await self.gate.acquire(dep_id, timeout, "wake", name)
@@ -1118,6 +1126,19 @@ class Deployer:
                               "choose a different model name (alias)", 409,
                               holder={"id": d.id, "name": d.name, "state": d.state})
 
+    async def require_not_foreign(self, model_name: str | None) -> None:
+        """409 ``model_name_taken`` when LiteLLM already serves ``model_name`` from an entry DGXMM did not create
+        (a static config.yaml entry or another tool's): registering next to it would make LiteLLM load-balance
+        between the two. Fails open (no LiteLLM, or its model list unreadable: not taken). No holder deployment."""
+        if not model_name or self.foreign_model_name is None:
+            return
+        found = await self.foreign_model_name(model_name)
+        if found is not None:
+            raise DeployError("model_name_taken",
+                              f"LiteLLM already has a model named {model_name} that DGXMM didn't create (static "
+                              "config or another tool). Pick another name, or remove that entry from LiteLLM first.",
+                              409, holder=None, external=found)
+
     def set_alias(self, dep_id: int, alias: str | None) -> dict:
         """Change the LiteLLM model name. Empty/None clears it (the served name is used)."""
         alias = alias or None
@@ -1134,6 +1155,11 @@ class Deployer:
     async def rename(self, dep_id: int, alias: str | None) -> dict:
         """set_alias under mem_lock: deploy/start/wake check and claim model names while holding it, so a rename
         cannot take a name inside their await window."""
+        dep = self._require(dep_id)
+        new = alias or None
+        target = new if new is not None else (self._served_name(dep) if dep.state in self.NAME_HOLDING_STATES else None)
+        if target is not None and target != self._model_name(dep) and not dep.system:
+            await self.require_not_foreign(target)  # before the lock: a LiteLLM call
         async with self.mem_lock:
             return self.set_alias(dep_id, alias)
 

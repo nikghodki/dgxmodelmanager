@@ -34,7 +34,7 @@ async def test_sync_run_survives_unexpected_exceptions(stack):
     sync = make(stack, fake)
     
     # Make sync() raise unexpected exception once
-    original_list = sync.client.list_dgxmm
+    original_list = sync.client.list_models  # the sync reads the whole model list (own + foreign entries)
     call_count = [0]
     
     async def fail_once():
@@ -43,7 +43,7 @@ async def test_sync_run_survives_unexpected_exceptions(stack):
             raise ValueError("unexpected error")
         return await original_list()
     
-    sync.client.list_dgxmm = fail_once
+    sync.client.list_models = fail_once
     
     # First sync should fail but not crash
     result = await sync.sync()

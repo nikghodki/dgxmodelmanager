@@ -13,6 +13,7 @@ import re
 import time
 from datetime import datetime, timezone
 from typing import Any, Callable
+from urllib.parse import urlsplit
 
 import httpx
 from sqlalchemy import select
@@ -30,6 +31,7 @@ _SK_RE = re.compile(r"sk-[A-Za-z0-9_.\-]{2,}")
 _HEX_RE = re.compile(r"\b[0-9a-fA-F]{40,}\b")
 NOT_CONFIGURED_MESSAGE = "no LiteLLM master key is set; add one in the LiteLLM settings or the secret file"
 UNRESTRICTED = "all-proxy-models"
+_HOST_RE = re.compile(r"[^A-Za-z0-9._\-]")
 
 
 class LiteLLMError(Exception):
@@ -47,6 +49,30 @@ def scrub(text: str, *secrets: str | None) -> str:
             text = text.replace(s, "***")
     text = _SK_RE.sub("sk-***", text)
     return _HEX_RE.sub("<hash>", text)[:300]
+
+
+def is_dgxmm_entry(m: dict) -> bool:
+    """Did DGXMM register this /model/info entry? (it marks its own with ``model_info.dgxmm_id``)"""
+    return bool((m.get("model_info") or {}).get("dgxmm_id"))
+
+
+def api_base_host(m: dict) -> str | None:
+    """The host of an entry's ``api_base`` (a container name or address) for messages: never userinfo, port, path
+    or query. None when the entry has no usable URL (e.g. ``os.environ/...`` or a hosted provider)."""
+    base = (m.get("litellm_params") or {}).get("api_base")
+    if not isinstance(base, str) or "://" not in base:
+        return None
+    try:
+        host = urlsplit(base).hostname or ""
+    except ValueError:
+        return None
+    return _HOST_RE.sub("", host)[:64] or None
+
+
+def foreign_entries(models: list[dict], model_name: str) -> list[dict]:
+    """Entries LiteLLM serves under ``model_name`` that DGXMM did not create (static config.yaml entries, or DB
+    entries some other tool added). DGXMM never changes or deletes these."""
+    return [m for m in models if m.get("model_name") == model_name and not is_dgxmm_entry(m)]
 
 
 def _now() -> str:
@@ -164,7 +190,7 @@ class LiteLLMClient:
         return list(out)
 
     async def list_dgxmm(self, *, cfg: LiteLLMConfig | None = None) -> list[dict]:
-        return [m for m in await self.list_models(cfg=cfg) if (m.get("model_info") or {}).get("dgxmm_id")]
+        return [m for m in await self.list_models(cfg=cfg) if is_dgxmm_entry(m)]
 
     async def add(self, model_name: str, api_base: str, served: str, dgxmm_id: str) -> None:
         body = {"model_name": model_name,
@@ -376,25 +402,55 @@ class LiteLLMClient:
 _UNKNOWN, _OFF = object(), "off"  # LiteLLMSync._reported: before / after a failed sync; integration off
 
 
+CONFLICT_INSIGHT_KIND = "litellm_conflict"
+
+
+def conflict_key(dep_id: int) -> str:
+    return f"{CONFLICT_INSIGHT_KIND}:{int(dep_id)}"
+
+
 class LiteLLMSync:
-    def __init__(self, client: LiteLLMClient | None, deployer, db: Database, events):
+    FOREIGN_CHECK_TIMEOUT_S = 5.0  # deploy/start/wake/rename wait at most this long for /model/info (then fail open)
+
+    def __init__(self, client: LiteLLMClient | None, deployer, db: Database, events, insights=None):
         self.client, self.deployer, self.db, self.events = client, deployer, db, events
+        self.insights = insights  # InsightService: one warning per deployment whose name LiteLLM also has elsewhere
         self._wake = asyncio.Event()
         self._lock = asyncio.Lock()
         self.last: dict[str, Any] = {"ok": None, "status": None, "registered": 0, "removed": 0, "error": None,
                                      "code": None, "at": None}
         self.conflicts: dict[int, str] = {}       # deployment id -> why it is not registered (name clash)
+        # deployment id -> {model_name, host, registered} when LiteLLM also has an entry under its model name that
+        # DGXMM did not create (as of the last successful sync)
+        self.name_conflicts: dict[int, dict] = {}
         self.registrations: dict[int, str] = {}   # deployment id -> model name, as of the last successful sync
         # called (no arguments) after a successful sync that changed what is_registered reports, e.g. routing advice
         self.listeners: list[Callable[[], Any]] = []
         self._reported: object = _UNKNOWN  # what is_registered reported after the previous sync
         if deployer is not None:
             deployer.litellm_error = self.error_for  # deployment views carry the reason (list, detail, SSE)
+            deployer.foreign_model_name = self.foreign_model  # deploy/start/wake/rename refuse foreign names
 
     def active(self) -> bool:
         return self.client is not None and self.client.config().active
 
     DEREGISTER_TIMEOUT_S = 15.0
+
+    async def foreign_model(self, model_name: str | None) -> dict | None:
+        """``{"host", "static"}`` of an entry LiteLLM already serves under ``model_name`` that DGXMM did not create,
+        else None. Fails open: integration off, LiteLLM unreachable or an unexpected answer is None (not taken)."""
+        if not model_name or not self.active():
+            return None
+        try:
+            models = await asyncio.wait_for(self.client.list_models(), self.FOREIGN_CHECK_TIMEOUT_S)
+        except (LiteLLMError, httpx.HTTPError, asyncio.TimeoutError, KeyError, ValueError, TypeError) as e:
+            log.info("LiteLLM: could not check model name %s against LiteLLM (%s); not blocking", model_name,
+                     e.message if isinstance(e, LiteLLMError) else type(e).__name__)
+            return None
+        found = foreign_entries(models, model_name)
+        if not found:
+            return None
+        return {"host": api_base_host(found[0]), "static": not (found[0].get("model_info") or {}).get("db_model")}
 
     async def leave(self, cfg: LiteLLMConfig, apply: Callable[[], Any]) -> dict:
         """Remove every DGXMM-owned model (``model_info.dgxmm_id``) from the LiteLLM described by ``cfg`` — the
@@ -465,6 +521,8 @@ class LiteLLMSync:
                     status = "none"
                 if d.state == "ready" and ready_status == "synced" and d.id in self.conflicts:
                     status = "error"
+                if d.state == "ready" and ready_status == "synced" and d.id in self.name_conflicts:
+                    status = "conflict"
                 if d.litellm_status != status:
                     d.litellm_status = status
                     changed.append(d.id)
@@ -477,7 +535,9 @@ class LiteLLMSync:
 
     async def _sync(self) -> bool:
         if not self.active():
+            self.name_conflicts = {}
             self._set_status("disabled")
+            self._conflict_insights()
             self.last = {"ok": True, "status": "disabled", "registered": 0, "removed": 0, "error": None,
                          "code": None, "at": _now()}
             self._report(_OFF)
@@ -485,7 +545,12 @@ class LiteLLMSync:
         added = removed = 0
         try:
             have: dict[tuple[str, str], list[tuple[str, str, str]]] = {}
-            for m in await self.client.list_dgxmm():
+            foreign: dict[str, dict] = {}  # model name -> first entry under it that DGXMM did not create
+            for m in await self.client.list_models():
+                if not is_dgxmm_entry(m):
+                    if isinstance(m.get("model_name"), str):
+                        foreign.setdefault(m["model_name"], m)
+                    continue
                 key = (str(m["model_info"]["dgxmm_id"]), m["model_name"])
                 have.setdefault(key, []).append((m["model_info"]["id"],
                                                 (m.get("litellm_params") or {}).get("api_base", ""),
@@ -504,8 +569,16 @@ class LiteLLMSync:
                         removed += 1
                 if target and keep is None:
                     have[key] = []
+            # A name LiteLLM also serves from an entry DGXMM did not create (static config.yaml, another tool):
+            # LiteLLM would load-balance between them, so DGXMM never adds a second entry, keeps an existing
+            # registration as it is, and reports the conflict. Foreign entries are never changed or deleted.
+            name_conflicts: dict[int, dict] = {}
+            for key in want:
+                if key[1] in foreign:
+                    name_conflicts[int(key[0])] = {"model_name": key[1], "host": api_base_host(foreign[key[1]]),
+                                                   "registered": bool(have.get(key))}
             for key, (api_base, served) in want.items():
-                if not have.get(key):
+                if not have.get(key) and int(key[0]) not in name_conflicts:
                     await self.client.add(key[1], api_base, served, key[0])
                     added += 1
         except (httpx.HTTPError, LiteLLMError, KeyError, ValueError, TypeError) as e:
@@ -519,12 +592,55 @@ class LiteLLMSync:
                          "code": code, "at": _now()}
             self._reported = _UNKNOWN  # the next good sync notifies
             return False
-        self.registrations = {int(k[0]): k[1] for k in want}
+        self.name_conflicts = name_conflicts
+        if name_conflicts:
+            log.warning("LiteLLM: %d deployment(s) share their model name with an entry DGXMM did not create",
+                        len(name_conflicts))
+        self.registrations = {int(k[0]): k[1] for k in want
+                              if int(k[0]) not in name_conflicts or name_conflicts[int(k[0])]["registered"]}
         self._set_status("synced")
+        self._conflict_insights()
         self.last = {"ok": True, "status": "synced", "registered": added, "removed": removed, "error": None,
                      "code": None, "at": _now()}
         self._report(dict(self.registrations))
         return True
+
+    def _conflict_message(self, c: dict) -> str:
+        where = f" (api_base host {c['host']})" if c["host"] else ""
+        tail = "" if c["registered"] else " DGXMM does not register this deployment until the conflict is gone."
+        return (f"LiteLLM also has a model named {c['model_name']} that DGXMM didn't create{where}; LiteLLM "
+                "load-balances between them, so requests can fail intermittently. Remove the duplicate from "
+                f"LiteLLM's config, or give this deployment a different model name.{tail}")
+
+    def _conflict_insights(self) -> None:
+        """After a successful (or disabled) sync: one deduplicated warning per deployment in ``name_conflicts``;
+        every other deployment's is resolved (also one left over from before a restart). Best effort."""
+        if self.insights is None:
+            return
+        from dgxmm.decider.insights import deployment_subject
+        try:
+            with self.db.session() as s:
+                ids = list(s.scalars(select(Deployment.id)))
+            for dep_id in ids:
+                c = self.name_conflicts.get(dep_id)
+                if c is None:
+                    self.insights.resolve(conflict_key(dep_id))
+                    continue
+                where = f" at {c['host']}" if c["host"] else ""
+                body = (f"LiteLLM serves the model name {c['model_name']} from this deployment and from another "
+                        f"entry{where} that DGXMM did not create (a static entry in LiteLLM's config.yaml, or one "
+                        "another tool added). LiteLLM load-balances requests between entries with the same name, "
+                        "so when that other backend is down, part of the requests fail with \"Connection error\". "
+                        "Fix: remove the duplicate from LiteLLM's config (or the tool that added it) and restart "
+                        "LiteLLM, or give this deployment a different model name. DGXMM never changes entries it "
+                        "did not create; this clears by itself once the names are unique.")
+                if not c["registered"]:
+                    body += " Until then this deployment is not registered in LiteLLM."
+                self.insights.upsert(CONFLICT_INSIGHT_KIND, "health", deployment_subject(dep_id), "warning",
+                                     f"LiteLLM model name {c['model_name']} is also used outside DGXMM"[:256],
+                                     body[:4000], dedupe_key=conflict_key(dep_id), source="rules")
+        except Exception:
+            log.exception("LiteLLM: could not update the model-name conflict insights")
 
     def _report(self, reported) -> None:
         """After a successful sync: run the listeners if what is_registered reports (``OFF`` or the registrations)
@@ -549,6 +665,8 @@ class LiteLLMSync:
             return {"code": "model_name_conflict", "message": self.conflicts[dep_id]}
         if self.last["ok"] is False:
             return {"code": self.last["code"] or "litellm_error", "message": self.last["error"]}
+        if dep_id in self.name_conflicts:
+            return {"code": "litellm_name_conflict", "message": self._conflict_message(self.name_conflicts[dep_id])}
         return None
 
     def is_registered(self, dep_id: int, model_name: str) -> bool | None:

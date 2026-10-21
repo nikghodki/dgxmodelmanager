@@ -24,7 +24,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { engineLabel, fmtBytes } from "@/format";
 import { useActionMutation } from "@/hooks/use-action-mutation";
 import { ModelNameTaken } from "@/components/app/model-name-taken";
-import { aliasProblem, suggestAlias, takenHolder } from "@/lib/litellm";
+import { aliasProblem, isModelNameTaken, suggestAlias } from "@/lib/litellm";
 import { changedKeys, defaultGoal, GOALS, REPO_ID } from "@/lib/advice";
 import { submitState } from "@/logic";
 import { ENGINE_FIELDS } from "@/engineFields";
@@ -202,7 +202,7 @@ function DeployWizardPage() {
                   <div className="space-y-1.5"><Label htmlFor="dep-alias">Model name (LiteLLM)</Label>
                     <Input ref={aliasInput} id="dep-alias" placeholder={preview?.served_name ?? "optional, e.g. default-chat"} value={alias} aria-invalid={!!aliasErr}
                       aria-describedby="dep-alias-help" onChange={(e) => setAlias(e.target.value)} />
-                    {takenHolder(deploy.error) && <ModelNameTaken error={deploy.error} suggestion={suggestAlias(preview?.served_name, name)}
+                    {isModelNameTaken(deploy.error) && <ModelNameTaken error={deploy.error} suggestion={suggestAlias(preview?.served_name, name)}
                       onUse={(a) => { setAlias(a); deploy.reset(); aliasInput.current?.focus(); }} />}
                     {aliasErr ? <p id="dep-alias-help" className="text-xs text-status-critical">{aliasErr}</p> : (
                       <p id="dep-alias-help" className="break-words text-xs text-muted-foreground">

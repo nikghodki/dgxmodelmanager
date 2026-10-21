@@ -307,3 +307,35 @@ def test_litellm_error_never_contains_master_key(lite):
     err = by_id(lite, a["id"])["litellm_error"]
     assert err["code"] == "litellm_auth_failed"
     assert MASTER not in r.text
+
+
+def test_deploy_and_rename_refuse_a_name_litellm_has_from_elsewhere(lite):
+    """A static config.yaml entry (no dgxmm_id) holds a name: 409 model_name_taken without a holder deployment,
+    with a message the deploy wizard / rename form show as-is."""
+    lite.fake.models.append({"model_name": "chat", "litellm_params": {"model": "openai/chat", "api_base": "http://old-engine:8000/v1"},
+                             "model_info": {"id": "static-1", "db_model": False}})
+    body = {"engine": "vllm", "model_ref": "Qwen/Qwen3-Tiny", "config": SMALL, "name": "a", "alias": "chat"}
+    r = lite.post(DEP, headers=lite.h, json=body)
+    assert r.status_code == 409, r.text
+    d = r.json()["detail"]
+    assert d["code"] == "model_name_taken" and d["holder"] is None and d["external"]["host"] == "old-engine"
+    assert d["message"].startswith("LiteLLM already has a model named chat that DGXMM didn't create")
+    assert MASTER not in r.text
+    a = deploy(lite, lite.h, "a", alias="mine")
+    r = lite.patch(f"{DEP}/{a['id']}", headers=lite.h, json={"alias": "chat"})
+    assert r.status_code == 409 and r.json()["detail"]["holder"] is None
+
+
+def test_litellm_tab_reports_name_conflict(lite):
+    a = deploy(lite, lite.h, "a", alias="chat")
+    assert wait(lite, a["id"], "ready")
+    assert lite.post(BASE + "/sync", headers=lite.h).status_code == 200
+    lite.fake.models.append({"model_name": "chat", "litellm_params": {"model": "openai/chat", "api_base": "http://old-engine:8000/v1"},
+                             "model_info": {"id": "static-1", "db_model": False}})
+    assert lite.post(BASE + "/sync", headers=lite.h).status_code == 200
+    j = lite.get(f"{DEP}/{a['id']}/litellm", headers=lite.h).json()
+    assert j["status"] == "conflict" and j["registered"] is True
+    assert j["error"]["code"] == "litellm_name_conflict" and "old-engine" in j["error"]["message"]
+    ins = lite.get("/dgxmm/api/insights", headers=lite.h).json()
+    items = ins["items"] if isinstance(ins, dict) else ins
+    assert [i["kind"] for i in items if i["status"] == "open"] == ["litellm_conflict"]

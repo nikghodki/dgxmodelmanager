@@ -151,7 +151,7 @@ def build_context(settings: Settings) -> AppContext:
     if not ctx.settings_store.litellm().master_key:
         log.warning("no LiteLLM master key (settings or %s); LiteLLM registration disabled until one is set",
                     settings.litellm_key_file)
-    litellm = LiteLLMSync(LiteLLMClient(http, ctx.settings_store.litellm), deployer, db, events)
+    litellm = LiteLLMSync(LiteLLMClient(http, ctx.settings_store.litellm), deployer, db, events, insights=ctx.insights)
     deployer.state_hooks.append(litellm.on_state)
     ctx.litellm = litellm
     ctx.background.append(litellm.run)

@@ -1,6 +1,6 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { apiErrorText, MODEL_NAME_RULE, takenHolder } from "@/lib/litellm";
+import { apiErrorText, isModelNameTaken, modelNameRule } from "@/lib/litellm";
 
 interface Options<TData, TVars> {
   success?: string | ((data: TData, vars: TVars) => string);
@@ -24,8 +24,8 @@ export function useActionMutation<TVars = void, TData = unknown>(fn: (vars: TVar
     },
     onError: (err, vars) => {
       const action = opts.errorAction?.(err, vars) || undefined;
-      const taken = !!takenHolder(err);
-      if (taken || action) toast.error(apiErrorText(err), { description: taken ? MODEL_NAME_RULE : undefined, action });
+      const taken = isModelNameTaken(err);
+      if (taken || action) toast.error(apiErrorText(err), { description: taken ? modelNameRule(err) : undefined, action });
       else toast.error(apiErrorText(err));
     },
     onSettled: () => {

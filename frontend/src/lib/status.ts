@@ -4,6 +4,7 @@ export interface StatusInfo { kind: StatusKind; label: string; spin: boolean }
 const MAP: Record<string, StatusInfo> = {
   ready: { kind: "good", label: "Ready", spin: false },
   synced: { kind: "good", label: "Synced", spin: false },
+  conflict: { kind: "warning", label: "Name conflict", spin: false },
   done: { kind: "good", label: "Done", spin: false },
   starting: { kind: "warning", label: "Starting", spin: true },
   loading: { kind: "warning", label: "Loading", spin: true },

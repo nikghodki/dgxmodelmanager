@@ -4,6 +4,7 @@ import { statusInfo } from "@/lib/status";
 describe("statusInfo", () => {
   it.each([
     ["ready", "good", "Ready", false], ["synced", "good", "Synced", false], ["done", "good", "Done", false],
+    ["conflict", "warning", "Name conflict", false],
     ["starting", "warning", "Starting", true], ["loading", "warning", "Loading", true], ["stopping", "warning", "Stopping", true],
     ["running", "warning", "Downloading", true], ["pending", "warning", "Pending", false],
     ["sleeping", "sleeping", "Sleeping", false],
