@@ -157,7 +157,11 @@ async def test_sync_flags_conflict_raises_insight_then_clears(stack):
         assert await sync.sync()
     view = stack.deployer.view(d["id"])
     assert view["litellm_status"] == "conflict"
-    assert view["litellm_error"]["code"] == "litellm_name_conflict" and "old-engine" in view["litellm_error"]["message"]
+    assert view["litellm_error"]["code"] == "litellm_name_conflict"
+    assert view["litellm_error"]["message"].startswith(
+        "LiteLLM has another entry named chat that DGXMM didn't create — see the LiteLLM page")
+    assert "old-engine" not in str(view)  # deployment views (list, detail, SSE) are viewer-readable: no host
+    assert sync.conflict_host(d["id"]) == "old-engine"  # admins get it through the LiteLLM tab
     assert sync.is_registered(d["id"], "chat") is True          # its own registration stays as it was
     assert [m["model_info"]["id"] for m in fake.models if m["model_name"] == "chat" and not
             m["model_info"].get("dgxmm_id")] == ["static-1"]    # the foreign entry is never deleted or changed
@@ -165,7 +169,10 @@ async def test_sync_flags_conflict_raises_insight_then_clears(stack):
     assert len(live) == 1
     ins = live[0]
     assert ins["severity"] == "warning" and ins["subject"] == f"deployment:{d['id']}"
-    assert "old-engine" in ins["body"] and "pw" not in ins["body"] and "user" not in ins["body"]
+    assert ins["title"] == "LiteLLM model name chat is also used outside DGXMM"
+    assert ins["body"].startswith("LiteLLM has another entry named chat that DGXMM didn't create — see the LiteLLM page")
+    for leak in ("old-engine", "pw", "user", "8000"):  # health insights are viewer-visible: no host, ever
+        assert leak not in ins["title"] and leak not in ins["body"], leak
     assert "remove" in ins["body"].lower() and "model name" in ins["body"]
 
     # the duplicate is removed from LiteLLM: status and insight clear by themselves
@@ -173,8 +180,27 @@ async def test_sync_flags_conflict_raises_insight_then_clears(stack):
     assert await sync.sync()
     assert stack.deployer.view(d["id"])["litellm_status"] == "synced"
     assert stack.deployer.view(d["id"])["litellm_error"] is None
+    assert sync.conflict_host(d["id"]) is None
     assert insights.list(kind="litellm_conflict", status=["open"]) == []
     assert [i["status"] for i in insights.list(kind="litellm_conflict")] == ["expired"]
+
+
+async def test_no_host_in_any_published_event(stack):
+    """SSE: deployment events carry the view, insight events only an id; neither may name the other host."""
+    fake = FakeLiteLLM()
+    insights = InsightService(stack.db, stack.events)
+    sync = make(stack, fake, insights)
+    q = stack.events.subscribe()
+    d = await ready(stack, "a", alias="chat")
+    assert await sync.sync()
+    fake.models.append(static("chat", "http://old-engine:8000/v1"))
+    assert await sync.sync()
+    assert stack.deployer.view(d["id"])["litellm_status"] == "conflict"
+    seen = []
+    while not q.empty():
+        seen.append(q.get_nowait())
+    assert any(t == "insights" for t, _ in seen) and any(t == "deployment" for t, _ in seen)
+    assert "old-engine" not in repr(seen)
 
 
 async def test_sync_does_not_register_next_to_a_foreign_entry(stack):

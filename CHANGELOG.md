@@ -19,7 +19,7 @@ All notable changes to DGXMM are documented in this file. The format is based on
   is blocked (as before).
 - **Existing registrations that clash are flagged.** The sync loop never adds an entry next to a foreign one,
   keeps an existing registration as it is, and sets the LiteLLM status **Name conflict** (`conflict`) with a
-  warning insight on the deployment naming the other entry's host. Both clear by themselves once the names
+  warning insight on the deployment (the other entry's host is shown to admins only). Both clear by themselves once the names
   are unique. DGXMM never changes or deletes entries it did not create. See
   [troubleshooting](docs/operations/troubleshooting.md#requests-fail-intermittently-with-connection-error).
 

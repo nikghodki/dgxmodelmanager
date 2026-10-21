@@ -36,8 +36,9 @@ entries of other tools) are never changed or deleted. The same sync reads them f
 `/model/info` list: a desired name that one of them also has is a *name conflict*. An existing DGXMM
 registration is kept, an unregistered one is not added (no silent duplicate), and the ready deployment gets
 `litellm_status: conflict` with a `litellm_name_conflict` reason and a deduplicated warning insight
-(`litellm_conflict:<id>`, feature `health`, a template naming only the other entry's `api_base` host). A
-later sync without the clash resolves both; a failed sync leaves them as they were.
+(`litellm_conflict:<id>`, feature `health`). Insights and deployment views are viewer-readable, so neither
+names the other entry; its `api_base` host is added (`error.host`) only for admins on
+`GET /deployments/{id}/litellm`. A later sync without the clash resolves both; a failed sync leaves them as they were.
 
 **Model names are unique.** The deployer checks names under its memory lock when a deployment is
 deployed, started, woken or renamed: a name is taken if it is another deployment's alias (in any state)

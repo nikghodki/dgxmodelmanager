@@ -180,6 +180,8 @@ async def deployment_litellm(dep_id: int, p: Principal = Depends(current_princip
         out["error"] = {"code": sync.last["code"] or "litellm_error", "message": sync.last["error"]}
     elif (err := sync.error_for(dep_id, view["state"])) is not None:
         out["error"] = err  # e.g. litellm_name_conflict: LiteLLM has the name from an entry DGXMM did not create
+        if err["code"] == "litellm_name_conflict" and p.user.role == "admin" and sync.conflict_host(dep_id):
+            out["error"] = {**err, "host": sync.conflict_host(dep_id)}  # the other entry's host: admins only
     elif not cfg.master_key:
         out["error"] = {"code": "litellm_not_configured", "message": cfg.master_key_hint or "no master key is set"}
     if out["keys_visible"]:

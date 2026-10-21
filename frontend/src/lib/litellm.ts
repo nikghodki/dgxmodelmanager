@@ -183,7 +183,7 @@ export function litellmProblem(err: unknown): { title: string; description: stri
     case "model_name_conflict":
       return { title: "Model name conflict", description: message };
     case "litellm_name_conflict":
-      return { title: "Name also used outside DGXMM", description: message };
+      return { title: "Name also used outside DGXMM", description: e.host ? `${message} The other entry's API base host is ${e.host}.` : message };
     case "litellm_disabled":
       return { title: "Integration disabled", description: "Turn the integration on in Connection to manage LiteLLM from DGXMM." };
     case "litellm_unreachable":

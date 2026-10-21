@@ -46,8 +46,9 @@ LiteLLM's `config.yaml` (or one another tool added) under a deployment's name wo
 requests. DGXMM therefore refuses to deploy, start, wake or rename into such a name ("LiteLLM already has a
 model named … that DGXMM didn't create (static config or another tool)"): pick another model name, or remove
 that entry from LiteLLM first. If the clash appears later (for example LiteLLM restarts with an old
-`config.yaml`), the deployment's LiteLLM status turns **Name conflict** and a warning insight names the other
-entry's host; DGXMM keeps its registration but never adds a second one, and the status and insight clear by
+`config.yaml`), the deployment's LiteLLM status turns **Name conflict** and a warning insight points to the
+LiteLLM page (the other entry's host is shown to admins only, on the deployment's LiteLLM tab and in
+**Models**); DGXMM keeps its registration but never adds a second one, and the status and insight clear by
 themselves once the duplicate is gone. DGXMM never edits or deletes entries it did not create. When LiteLLM's
 model list cannot be read, these checks are skipped and nothing is blocked.
 

@@ -324,6 +324,12 @@ def test_deploy_and_rename_refuse_a_name_litellm_has_from_elsewhere(lite):
     a = deploy(lite, lite.h, "a", alias="mine")
     r = lite.patch(f"{DEP}/{a['id']}", headers=lite.h, json={"alias": "chat"})
     assert r.status_code == 409 and r.json()["detail"]["holder"] is None
+    # every path that can answer this 409 (deploy, rename, start, wake, switch) is admin-only: viewers never get
+    # the external host
+    vh = as_viewer(lite)
+    for r in (lite.post(DEP, headers=vh, json={**body, "name": "v"}),
+              lite.patch(f"{DEP}/{a['id']}", headers=vh, json={"alias": "chat"})):
+        assert r.status_code == 403 and "old-engine" not in r.text
 
 
 def test_litellm_tab_reports_name_conflict(lite):
@@ -335,7 +341,19 @@ def test_litellm_tab_reports_name_conflict(lite):
     assert lite.post(BASE + "/sync", headers=lite.h).status_code == 200
     j = lite.get(f"{DEP}/{a['id']}/litellm", headers=lite.h).json()
     assert j["status"] == "conflict" and j["registered"] is True
-    assert j["error"]["code"] == "litellm_name_conflict" and "old-engine" in j["error"]["message"]
+    assert j["error"]["code"] == "litellm_name_conflict" and j["error"]["host"] == "old-engine"  # admin
+    assert "old-engine" not in j["error"]["message"]
     ins = lite.get("/dgxmm/api/insights", headers=lite.h).json()
     items = ins["items"] if isinstance(ins, dict) else ins
     assert [i["kind"] for i in items if i["status"] == "open"] == ["litellm_conflict"]
+    # viewers: the conflict is visible, the other entry's host is not (insights, deployment views, LiteLLM tab)
+    as_viewer(lite)
+    for path in ("/dgxmm/api/insights", DEP, f"{DEP}/{a['id']}", f"{DEP}/{a['id']}/litellm"):
+        r = lite.get(path)
+        assert r.status_code == 200, (path, r.text)
+        assert "old-engine" not in r.text, path
+    vitems = lite.get("/dgxmm/api/insights").json()
+    vitems = vitems["items"] if isinstance(vitems, dict) else vitems
+    assert [i["kind"] for i in vitems if i["status"] == "open"] == ["litellm_conflict"]
+    v = lite.get(f"{DEP}/{a['id']}/litellm").json()
+    assert v["error"]["code"] == "litellm_name_conflict" and "host" not in v["error"]

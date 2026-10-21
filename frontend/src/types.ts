@@ -120,7 +120,7 @@ export interface LiteLLMKey {
 }
 /** Only the create response carries the full key. */
 export interface LiteLLMCreatedKey extends LiteLLMKey { key: string }
-export interface ApiProblem { code: string; message: string }
+export interface ApiProblem { code: string; message: string; /** admins: the conflicting LiteLLM entry's host */ host?: string }
 export interface DeploymentRef { id: number; name: string; state: string }
 /** PATCH /deployments/{id} response: the deployment plus what happened to keys scoped to the old model name. */
 export interface AliasPatchResult extends Deployment {

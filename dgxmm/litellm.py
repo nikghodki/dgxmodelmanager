@@ -605,12 +605,22 @@ class LiteLLMSync:
         self._report(dict(self.registrations))
         return True
 
+    @staticmethod
+    def _conflict_lead(model_name: str) -> str:
+        return f"LiteLLM has another entry named {model_name} that DGXMM didn't create — see the LiteLLM page."
+
     def _conflict_message(self, c: dict) -> str:
-        where = f" (api_base host {c['host']})" if c["host"] else ""
+        """Viewer-readable (deployment views, SSE): never the other entry's host; admins get that from
+        ``conflict_host`` (the deployment's LiteLLM tab) and the LiteLLM page's model list."""
         tail = "" if c["registered"] else " DGXMM does not register this deployment until the conflict is gone."
-        return (f"LiteLLM also has a model named {c['model_name']} that DGXMM didn't create{where}; LiteLLM "
-                "load-balances between them, so requests can fail intermittently. Remove the duplicate from "
-                f"LiteLLM's config, or give this deployment a different model name.{tail}")
+        return (f"{self._conflict_lead(c['model_name'])} LiteLLM load-balances between them, so requests can fail "
+                "intermittently. Remove the duplicate from LiteLLM's config, or give this deployment a different "
+                f"model name.{tail}")
+
+    def conflict_host(self, dep_id: int) -> str | None:
+        """The api_base host of the entry a deployment's model name clashes with (admins only), as of the last sync."""
+        c = self.name_conflicts.get(dep_id)
+        return c["host"] if c else None
 
     def _conflict_insights(self) -> None:
         """After a successful (or disabled) sync: one deduplicated warning per deployment in ``name_conflicts``;
@@ -626,10 +636,10 @@ class LiteLLMSync:
                 if c is None:
                     self.insights.resolve(conflict_key(dep_id))
                     continue
-                where = f" at {c['host']}" if c["host"] else ""
-                body = (f"LiteLLM serves the model name {c['model_name']} from this deployment and from another "
-                        f"entry{where} that DGXMM did not create (a static entry in LiteLLM's config.yaml, or one "
-                        "another tool added). LiteLLM load-balances requests between entries with the same name, "
+                # Viewer-visible (feature health): never the other entry's host, which only admins see.
+                body = (f"{self._conflict_lead(c['model_name'])} It is a static entry in LiteLLM's config.yaml, or "
+                        "one another tool added, and LiteLLM serves this deployment's model name from both. "
+                        "LiteLLM load-balances requests between entries with the same name, "
                         "so when that other backend is down, part of the requests fail with \"Connection error\". "
                         "Fix: remove the duplicate from LiteLLM's config (or the tool that added it) and restart "
                         "LiteLLM, or give this deployment a different model name. DGXMM never changes entries it "

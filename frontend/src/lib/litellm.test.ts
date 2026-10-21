@@ -137,7 +137,8 @@ describe("model name conflicts", () => {
     expect(apiErrorText(external)).toMatch(/^LiteLLM already has a model named chat that DGXMM didn't create/);
     expect(modelNameRule(external)).toBe(EXTERNAL_NAME_RULE);
     expect(modelNameRule(taken)).toBe(MODEL_NAME_RULE);
-    expect(litellmProblem({ code: "litellm_name_conflict", message: "LiteLLM also has a model named chat" })).toEqual({ title: "Name also used outside DGXMM", description: "LiteLLM also has a model named chat" });
+    expect(litellmProblem({ code: "litellm_name_conflict", message: "LiteLLM has another entry named chat" })).toEqual({ title: "Name also used outside DGXMM", description: "LiteLLM has another entry named chat" });
+    expect(litellmProblem({ code: "litellm_name_conflict", message: "LiteLLM has another entry named chat", host: "old-engine" }).description).toBe("LiteLLM has another entry named chat The other entry's API base host is old-engine.");
   });
   it("explains a sync conflict and shows the key hint for a missing key", () => {
     expect(litellmProblem({ code: "model_name_conflict", message: "model name chat is already registered for deployment a" }).description).toMatch(/registered for deployment a/);

@@ -151,9 +151,9 @@ static entry in LiteLLM's `config.yaml` pointing at an old, stopped engine, next
 registered.
 
 DGXMM detects this: the deployment's LiteLLM status is **Name conflict** (`conflict`), its LiteLLM tab and
-the Deployments table tooltip say "LiteLLM also has a model named …", and a warning insight on the
-deployment names the other entry's host. **Models** on the LiteLLM page lists the other entry as
-"external". To fix it, either:
+the Deployments table tooltip say "LiteLLM has another entry named … that DGXMM didn't create", and a
+warning insight appears on the deployment. Admins see the other entry's API base host on the deployment's
+LiteLLM tab, and **Models** on the LiteLLM page lists it as "external". To fix it, either:
 
 - remove the duplicate from LiteLLM's `config.yaml` (or from the tool that added it) and restart LiteLLM.
   Static entries cannot be deleted through LiteLLM's API, and DGXMM never changes entries it did not
