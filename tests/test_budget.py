@@ -103,3 +103,39 @@ async def test_budget_service_maps_container_actuals(settings):
     svc = BudgetService(settings, FakeProbe(sample), lambda: [(1, "a", "ready", 32 * GIB, "c1")])
     b = await svc.refresh()
     assert b.deployments[0].actual == 30 * GIB and svc.current() is b and svc.last_sample is sample
+
+
+# ---- per-process GPU memory attributed (NVML works) ----
+def _used(gib):
+    return HostMemory(total=121 * GIB, available=121 * GIB - int(gib * GIB), free=0, cached=0, swap_total=0,
+                      swap_free=0)
+
+
+def test_ready_measured_above_reservation_gets_no_gap(settings):
+    """GPU 47.1 + host 6.6 GiB measured for a 48.7 GiB reservation: the whole footprint is the deployment's,
+    no reservation credit on top, and external is what is left of `used`."""
+    actual = int(53.7 * GIB)
+    u = DeploymentUsage(1, "a", "ready", int(48.7 * GIB), actual, "c1")
+    b = compute_budget(_used(64.9), [u], settings)
+    assert b.managed_actual == actual
+    assert b.external == int(64.9 * GIB) - actual  # ~11.2 GiB, not used - reserved (16.2)
+    assert b.committed == actual  # max(reserved, measured)
+    assert b.free_for_new == b.usable - actual - b.external
+
+
+def test_ready_measured_below_reservation_credits_only_the_rest(settings):
+    u = DeploymentUsage(1, "a", "ready", 60 * GIB, 50 * GIB, "c1")
+    b = compute_budget(_used(75), [u], settings)
+    assert b.external == 75 * GIB - 50 * GIB - 10 * GIB  # gap = reserved - measured, never counted twice
+    assert b.committed == 60 * GIB
+
+
+def test_gap_and_external_are_consistent_for_both_paths(settings):
+    """Same physical state, measured with and without NVML: external is the same once the deployment is fully
+    allocated (fallback credits reserved - cgroup, NVML path measures it)."""
+    reserved = 50 * GIB
+    with_nvml = DeploymentUsage(1, "a", "ready", reserved, reserved, "c1")
+    cgroup_only = DeploymentUsage(1, "a", "ready", reserved, 6 * GIB, "c1")
+    b1 = compute_budget(_used(61), [with_nvml], settings)
+    b2 = compute_budget(_used(61), [cgroup_only], settings)
+    assert b1.external == b2.external == 11 * GIB

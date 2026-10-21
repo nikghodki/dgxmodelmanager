@@ -63,7 +63,7 @@ export function DeploymentsTable({ deployments, isAdmin, loading, searchable, on
           <TooltipContent className="max-w-xs break-words">{row.original.last_error}</TooltipContent></Tooltip>
       ) : <StatusBadge state={row.original.state} />) },
     { id: "memory", header: "Memory", accessorFn: (d) => d.reserved_bytes, cell: ({ row }) => (
-      <span className="tabular-nums">{fmtBytes(row.original.actual_bytes)} <span className="text-muted-foreground">/ {fmtBytes(row.original.reserved_bytes)}</span></span>) },
+      <span className="tabular-nums" title="Measured / Reserved">{fmtBytes(row.original.actual_bytes)} <span className="text-muted-foreground">/ {fmtBytes(row.original.reserved_bytes)}</span></span>) },
     { id: "tps", header: "Tok/s", enableSorting: false, cell: ({ row }) => <Live id={row.original.id} field="gen_tps" fmt={(v) => fmtNum(v, 1)} /> },
     { id: "kv", header: "KV", enableSorting: false, meta: { hideOnMobile: true }, cell: ({ row }) => <Live id={row.original.id} field="kv_usage" fmt={fmtPct} /> },
     { id: "litellm", header: "LiteLLM", meta: { hideOnMobile: true }, accessorFn: (d) => d.model_name ?? d.alias ?? d.served_name ?? "", cell: ({ row }) => {

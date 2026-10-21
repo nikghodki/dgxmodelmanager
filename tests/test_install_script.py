@@ -1584,3 +1584,12 @@ def test_tz_added_to_an_older_env(box):
 def test_compose_passes_the_zone_to_the_container():
     compose = (ROOT / "docker-compose.yaml").read_text()
     assert 'DGXMM_TZ: "${DGXMM_TZ:-}"' in compose and 'TZ: "${DGXMM_TZ:-UTC}"' in compose
+
+
+def test_compose_shares_the_host_pid_namespace_for_nvml():
+    """NVML only lists processes of the caller's PID namespace. Without `pid: host` DGXMM sees no per-process
+    GPU memory of its own engine containers and their CUDA memory reads as reservation credit / external."""
+    text = (ROOT / "docker-compose.yaml").read_text()
+    dgxmm = text.split("\n  dgxmm-litellm-db:")[0]
+    assert "\n    pid: host" in dgxmm
+    assert text.count("pid: host") == 1  # only the DGXMM service

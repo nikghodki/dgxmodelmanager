@@ -337,3 +337,40 @@ def test_reset_removes_rows_for_one_model(db):
     assert cal.reset("a/m", engine="vllm") == 2
     assert cal.summary("vllm", "a/m") == [] and len(cal.summary("llamacpp", "a/m")) == 1
     assert cal.reset("a/m") == 1 and len(cal.summary("vllm", "b/m")) == 1
+
+
+async def test_vllm_with_nvml_gpu_in_actual_learns_host_part_only(stack):
+    """Driver 580+: `actual` = cgroup anon + NVML bytes, and NVML reads close to the --gpu-memory-utilization
+    budget. Calibration must subtract the NVML part (`managed_gpu`), so the host term stays the cgroup anon and
+    the reservation does not ratchet."""
+    from dgxmm.memory.estimate import vllm_gpu_util
+    cal = _wire(stack)
+    total = stack.probe.total
+    non_kv, host = 2.31 + 0.36 + 0.21, int(4.5 * GIB)
+
+    def make_log(d):
+        budget = vllm_gpu_util(d["reserved_bytes"], total) * total
+        gpu = int(budget * 0.97)  # NVML: what the engine core allocated of its budget
+        stack.probe.managed_gpu[d["container_id"]] = gpu
+        return vllm_log(budget / GIB - non_kv)
+
+    orig = stack.probe.sample
+
+    def sample(ids):  # _cycle sets managed_actual = host; NVML adds the GPU part, like HostProbe.sample
+        s = orig(ids)
+        s.managed = {c: v + stack.probe.managed_gpu.get(c, 0) for c, v in s.managed.items()}
+        return s
+    stack.probe.sample = sample
+    req = DeployRequest(name="a", engine="vllm", model_ref="Qwen/Qwen3-Tiny", config=SMALL)
+    dep_id, r1 = await _cycle(stack, req=req, make_log=make_log, host=host)
+    reservations = [r1]
+    for _ in range(3):
+        reservations.append((await _cycle(stack, dep_id=dep_id, make_log=make_log, host=host))[1])
+    assert reservations[1] == reservations[2] == reservations[3], [x / GIB for x in reservations]
+    rows = cal.summary("vllm", "Qwen/Qwen3-Tiny")
+    assert len(rows) == 4
+    for r in rows:
+        assert abs(r["detail"]["host_bytes"] - host) < 2**20  # not host + GPU
+        assert r["detail"]["cgroup_nvml_bytes"] > 10 * GIB  # the measured footprint includes the GPU part
+    est = stack.deployer.view(dep_id)["estimate"]
+    assert abs(rows[0]["measured"] - (int(non_kv * GIB) + est["kv_cache"] + est["state"] + host)) < 16 * 1024**2

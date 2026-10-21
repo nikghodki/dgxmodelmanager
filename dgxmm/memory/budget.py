@@ -53,10 +53,11 @@ def compute_budget(mem: HostMemory, usages: list[DeploymentUsage], settings: Set
         elif u.state in ("sleeping", "stopping"):
             committed += u.actual
     managed_actual = sum(u.actual for u in usages if u.state in MEASURED_STATES)
-    # GB10 unified memory: CUDA allocations are neither charged to the container cgroup nor reported
-    # per process by NVML, so a ready model's reservation is in `used` but only partly in `actual`.
-    # Credit that unattributed gap for READY deployments only (their allocation is complete); never for
-    # starting/loading (still growing) so the gate stays conservative.
+    # GB10 unified memory: CUDA allocations are not charged to the container cgroup. `actual` includes them
+    # when NVML reports per-process GPU memory (driver 580+, DGXMM in the host PID namespace); otherwise a
+    # ready model's reservation is in `used` but only partly in `actual`. Credit that unattributed gap for
+    # READY deployments only (their allocation is complete); never for starting/loading (still growing) so
+    # the gate stays conservative. A measured `actual` at or above the reservation leaves no gap.
     ready_gap = sum(max(u.reserved - u.actual, 0) for u in usages if u.state in CREDITED_STATES)
     external = max(mem.used - managed_actual - ready_gap, 0)
     return Budget(total=mem.total, available=mem.available, margin=settings.margin_bytes,

@@ -315,13 +315,14 @@ class FakeProbe:
     def __init__(self, total_gib: float = 121, available_gib: float = 100):
         self.total, self.available = int(total_gib * GIB), int(available_gib * GIB)
         self.managed_actual: dict[str, int] = {}
+        self.managed_gpu: dict[str, int] = {}  # NVML part (HostSample.managed_gpu); include it in managed_actual
 
     def meminfo(self) -> HostMemory:
         return HostMemory(total=self.total, available=self.available, free=0, cached=0, swap_total=0, swap_free=0)
 
     def sample(self, ids):
         return HostSample(mem=self.meminfo(), managed={c: self.managed_actual.get(c, 0) for c in ids},
-                          external_top=[], gpu={})
+                          external_top=[], gpu={}, managed_gpu={c: self.managed_gpu.get(c, 0) for c in ids})
 
     def processes(self, managed=None, names=None):
         return []

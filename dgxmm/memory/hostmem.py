@@ -163,6 +163,15 @@ class GpuSource(Protocol):
     def device_stats(self) -> dict: ...
 
 
+def nested_pid_namespace(status_text: str) -> bool:
+    """True when /proc/self/status shows this process in a nested PID namespace (NSpid has several entries).
+    NVML lists only processes of the caller's PID namespace, so it then reports nothing for engine containers."""
+    for line in status_text.splitlines():
+        if line.startswith("NSpid:"):
+            return len(line.split()) > 2
+    return False
+
+
 def parse_meminfo(text: str) -> HostMemory:
     vals: dict[str, int] = {}
     for line in text.splitlines():
@@ -215,12 +224,21 @@ class NvmlGpu:
 
 
 class HostProbe:
-    def __init__(self, settings: Settings, gpu: GpuSource | None, containers: ContainerLookup | None = None):
+    def __init__(self, settings: Settings, gpu: GpuSource | None, containers: ContainerLookup | None = None,
+                 self_status: str = "/proc/self/status"):
         self.proc = Path(settings.host_proc)
         self.cgroup = Path(settings.host_cgroup)
         self.gpu = gpu
         self.containers = containers
         self.users = UserNames(settings.host_passwd)
+        try:
+            nested = gpu is not None and nested_pid_namespace(Path(self_status).read_text())
+        except OSError:
+            nested = False
+        if nested:
+            log.warning("DGXMM runs in its own PID namespace: NVML cannot report the GPU memory of engine "
+                        "containers, so a deployment's measured memory is its cgroup memory only. Run the DGXMM "
+                        "container with `pid: host` (docker-compose.yaml).")
 
     def meminfo(self) -> HostMemory:
         return parse_meminfo((self.proc / "meminfo").read_text())
@@ -309,7 +327,9 @@ class HostProbe:
         return out
 
     def sample(self, managed_ids: set[str], top_n: int = 8) -> HostSample:
-        """Runs on the budget loop: container lookups are cache-only, so Docker latency never delays it."""
+        """Runs on the budget loop: container lookups are cache-only, so Docker latency never delays it.
+        A managed container's figure = cgroup anon + kernel + the NVML GPU bytes of every PID in it (NVML PIDs
+        are host PIDs, matched against the host /proc). Those PIDs are never external."""
         mem = self.meminfo()
         gpu_by_pid = self.gpu.process_gpu_bytes() if self.gpu else {}
         managed = {cid: self._cgroup_anon(cid) for cid in managed_ids}

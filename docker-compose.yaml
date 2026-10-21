@@ -15,6 +15,10 @@ services:
     user: "${DGXMM_UID:?set DGXMM_UID in .env (run ./install.sh)}:${DGXMM_GID:?set DGXMM_GID in .env (run ./install.sh)}"
     group_add: ["${DOCKER_GID:?set DOCKER_GID (gid of /var/run/docker.sock) in .env (run ./install.sh)}"]
     runtime: nvidia               # NVML for per-process GPU memory / util
+    # NVML lists only processes of the caller's PID namespace: without this, the GPU memory of the engine
+    # containers is invisible to DGXMM (measured memory = cgroup only). Host processes are already readable
+    # through the read-only /proc mount below; see docs/security/hardening.md.
+    pid: host
     environment:
       DGXMM_CONFIG: /app/config.yaml
       DGXMM_HOST_HOME: "${DGXMM_HOST_HOME:?set DGXMM_HOST_HOME in .env (run ./install.sh)}"

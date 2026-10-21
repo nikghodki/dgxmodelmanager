@@ -9,6 +9,20 @@ import { DeploymentsTable } from "@/components/app/deployments-table";
 const longRef = "/data/hf/hub/models--unsloth--Qwen3-0.6B-GGUF/snapshots/50968a4468ef4233ed78cd7c3de230dd1d61a56b/Qwen3-0.6B-Q8_0.gguf";
 
 describe("DeploymentsTable", () => {
+  it("labels the memory cell as measured / reserved", () => {
+    const qc = new QueryClient();
+    qc.setQueryData(["live", 1], []);
+    const GIB = 1024 ** 3;
+    render(
+      <QueryClientProvider client={qc}><MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}><TooltipProvider>
+        <DeploymentsTable isAdmin={false} onSwitch={vi.fn()} onReconfigure={vi.fn()}
+          deployments={[{ id: 1, name: "big", engine: "vllm", model_ref: "org/m", state: "ready", reserved_bytes: 48.7 * GIB, actual_bytes: 53.7 * GIB, litellm_status: "synced", sleep_capable: false, last_error: null } as any]} />
+      </TooltipProvider></MemoryRouter></QueryClientProvider>,
+    );
+    const cell = screen.getByTitle("Measured / Reserved");
+    expect(cell.textContent).toMatch(/53\.7 GiB\s*\/ 48\.7 GiB/);
+  });
+
   it("truncates long model refs but keeps the full value in a title", () => {
     const qc = new QueryClient();
     qc.setQueryData(["live", 1], []);

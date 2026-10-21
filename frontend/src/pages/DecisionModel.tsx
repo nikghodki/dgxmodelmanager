@@ -83,7 +83,7 @@ function StatusCard({ s, onRetry, retrying }: { s: DeciderStatus; onRetry: () =>
         <Row label="Deployment">{s.deployment_id != null
           ? <span className="inline-flex items-center gap-1.5"><Link className="hover:underline" to={`/deployments/${s.deployment_id}`}>{dep.data?.name ?? `#${s.deployment_id}`}</Link>{s.state && <StatusBadge state={s.state} />}</span>
           : "None"}</Row>
-        <Row label="Memory">{dep.data ? <span className="tabular-nums">{`${fmtBytes(dep.data.actual_bytes)} / ${fmtBytes(dep.data.reserved_bytes)}`}</span> : "—"}</Row>
+        <Row label="Memory">{dep.data ? <span className="tabular-nums" title="Measured / Reserved">{`${fmtBytes(dep.data.actual_bytes)} / ${fmtBytes(dep.data.reserved_bytes)}`}</span> : "—"}</Row>
         <Row label="Latency (p50)"><span className="tabular-nums">{s.p50_ms != null ? `${Math.round(s.p50_ms)} ms` : "—"}</span></Row>
         <Row label="Decisions (24 h)"><span className="tabular-nums">{s.decisions_24h}</span></Row>
         <Row label="Acceptance rate"><span className="tabular-nums">{fmtConfidence(s.accepted_rate)}</span></Row>
