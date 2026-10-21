@@ -67,6 +67,10 @@ What changes when an older install is upgraded with `./install.sh upgrade` (see 
 [changelog](../changelog.md) for each release). Nothing needs to be done by hand unless a point below
 applies to you.
 
+- **GPU memory attribution (2026-10-21).** `docker-compose.yaml` now runs the DGXMM container with
+  `pid: host`; `./install.sh upgrade` recreates it. Afterwards a ready deployment's **Measured** memory
+  includes its GPU memory and *external* drops by the part that was really the deployment's. Nothing else
+  changes, and no migration runs.
 - **Advanced decision-model release (2026-10-18).**
   - *Migrations run once at the first start*: the tables `insights`, `deployment_schedules`,
     `traffic_profiles` and `compat_cache` and the column `deployment_events.actor` are added, then

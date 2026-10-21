@@ -20,10 +20,11 @@ description: "What DGXMM does not do, or does only on a best-effort basis."
 - **Virtual-key limits cannot be cleared.** LiteLLM's key update cannot remove a budget or rate limit once it is
   set, so **Edit** can only change it. Set a higher value, or create a new key
   and revoke the old one.
-- **Per-process GPU memory on GB10.** Per-process GPU figures come from NVML. When NVML reports no value
-  for a process, DGXMM shows `0`, so the GPU column on the Processes page may read 0 for a process that
-  does use the GPU. On the GB10's unified memory, the RAM column and the deployment's measured memory
-  are the more reliable figures.
+- **Per-process GPU memory on GB10.** Per-process GPU figures come from NVML (driver 580 and later report
+  them on the GB10). When NVML reports no value for a process, DGXMM shows `0`, so the GPU column on the
+  Processes page may read 0 for a process that does use the GPU, and a deployment's measured memory is its
+  cgroup memory only. The budget then credits the rest of a ready deployment's reservation instead (see
+  [memory budget](../architecture/memory.md#budget)).
 
 ## Next steps
 

@@ -17,15 +17,34 @@ external     = max(used − measured_by_managed − ready_gap, 0)           used
 free_for_new = usable − committed − external
 ```
 
-- *measured* is the engine container's cgroup `anon` + `kernel` memory.
+- *measured* is the engine container's cgroup `anon` + `kernel` memory plus the GPU memory NVML reports
+  for every process in that container (`memory/hostmem.py`). NVML reports host PIDs; they are matched to
+  containers through the host's `/proc/<pid>/cgroup`, read from the read-only `/host/proc` mount. NVML
+  only lists processes in the caller's PID namespace, so the DGXMM container runs with `pid: host`
+  (`docker-compose.yaml`); without it, DGXMM logs a warning at start and *measured* is the cgroup part
+  only. The UI and API show it as **Measured** (`actual_bytes`), next to **Reserved**.
 - *external* is everything DGXMM does not manage (desktop, notebooks, other containers). DGXMM never
   touches it. The Dashboard lists the largest external processes with their container, user, masked
   command line, RSS and GPU memory (see [process view](processes.md)).
-- **GB10 unified memory:** CUDA allocations are not charged to the container's cgroup, so a running
-  model's memory shows up in `used` but only partly in *measured*. For `ready` deployments the gap
-  between reservation and measurement (`ready_gap`) is credited back, so it does not appear as external
-  usage. It is never credited for deployments that are still starting, which keeps the check
+- **GB10 unified memory:** CUDA allocations are not charged to the container's cgroup, but they are part
+  of `used` (`MemTotal − MemAvailable`). With per-process NVML figures (driver 580 and later) they are in
+  *measured*, so a process's GPU memory counts once, for its deployment, and is never also listed as
+  external; external processes count RSS + GPU. When NVML reports nothing (older drivers, or DGXMM not in
+  the host PID namespace), a running model's memory is only partly in *measured*. Either way, for `ready`
+  deployments the gap between reservation and measurement, `ready_gap = Σ max(reserved − measured, 0)`,
+  is credited back so it does not appear as external usage. A deployment measured above its reservation
+  gets no credit. It is never credited for deployments that are still starting, which keeps the check
   conservative while memory is still growing.
+
+Example on a GB10, one ready vLLM deployment reserved at 48.7 GiB, `used` 64.9 GiB:
+
+| | measured | ready_gap | external |
+|---|---|---|---|
+| NVML per-process figures (GPU 47.1 + cgroup 6.4 GiB) | 53.4 GiB | 0 | 11.5 GiB |
+| cgroup only (no NVML figures) | 6.4 GiB | 42.3 GiB | 16.2 GiB |
+
+Without NVML figures, the deployment's memory beyond its reservation (here about 5 GiB of host-side
+memory on top of the GPU pool vLLM sizes from the reservation) reads as external.
 
 The budget is refreshed every `budget_interval_s` (2 s) and pushed to browsers over SSE.
 
@@ -57,6 +76,10 @@ estimate (`memory/calibration.py`). Later estimates for the same model are corre
   back below 1.1 × the size that was killed.
 
 Calibration only raises estimates. It never lowers one below the formula.
+
+The recorded footprint is the engine's own accounting from its log plus the host part of *measured*
+(*measured* minus its NVML part), so per-process GPU figures do not change what is learned and a vLLM
+reservation does not grow on each restart.
 
 ## Plans when it does not fit
 

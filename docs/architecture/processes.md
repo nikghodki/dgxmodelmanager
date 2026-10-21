@@ -7,7 +7,9 @@ description: "How the process list is collected and masked."
 `memory/hostmem.py` scans `/proc` for `GET /api/host/processes` and for the external processes in the
 budget. Per process it reads `status` first and skips kernel threads, zombies and processes with no
 RSS and no GPU memory, then reads `cgroup` (to find the Docker container id) and `cmdline`.
-`/proc/<pid>/environ` is never opened. GPU memory comes from NVML.
+`/proc/<pid>/environ` is never opened. GPU memory comes from NVML, keyed by host PID; NVML only lists
+processes of the caller's PID namespace, so the DGXMM container runs with `pid: host`. A process's GPU memory
+counts for its deployment when it runs in a managed container (see [memory budget](memory.md#budget)).
 
 - **User.** Host processes get their name from the host's `/etc/passwd` (re-read when it changes).
   Processes in containers show the uid as seen inside the container, because container uids are not

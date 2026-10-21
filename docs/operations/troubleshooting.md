@@ -46,7 +46,9 @@ The memory check shows the shortfall and ways to make it fit (see
 [usage](../user-guide/deploying.md)). Check also:
 
 - **External processes** (Dashboard): notebooks, other containers or desktop apps use memory that DGXMM
-  will not hand out. Stop what you do not need.
+  will not hand out. Stop what you do not need. If *external* looks several GiB too high and a ready
+  deployment's **Measured** memory is far below its GPU use, see
+  [GPU memory not counted](#gpu-memory-of-a-deployment-is-not-counted).
 - **Sleeping deployments** still hold their weights. Stop them to free everything.
 - **Estimates** that look too high: run the model once. After it becomes ready, DGXMM measures it and
   later estimates for that configuration are based on the measurement.
@@ -156,6 +158,15 @@ card.
   accounts.
 - **Containers shown by id only** appear for a few seconds after DGXMM starts, until the container list
   is first read.
+
+## GPU memory of a deployment is not counted
+
+A ready deployment's **Measured** memory is only a few GiB (its host memory) while `nvidia-smi
+--query-compute-apps=pid,used_memory --format=csv` on the host shows its engine using much more, and the
+log has "DGXMM runs in its own PID namespace". NVML only lists processes of the caller's PID namespace:
+the DGXMM container needs `pid: host`, which `docker-compose.yaml` sets. Run `./install.sh` to recreate the
+container. With an older driver that reports no per-process GPU memory, this is expected; the budget then
+credits the rest of the reservation (see [memory budget](../architecture/memory.md#budget)).
 
 ## Download fails with "owned by root"
 

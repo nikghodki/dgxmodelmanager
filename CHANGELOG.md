@@ -5,6 +5,21 @@ All notable changes to DGXMM are documented in this file. The format is based on
 (the package version is `0.1.0`), so each section below is identified by its date. Upgrade notes for existing installs are in
 [upgrade](docs/getting-started/upgrade.md#upgrading-an-existing-install).
 
+## [2026-10-21] — GPU memory of deployments is measured
+
+### Fixed
+
+- **A deployment's GPU memory is counted in its measured memory.** NVML only lists processes in the caller's
+  PID namespace, so DGXMM saw no per-process GPU memory of its engine containers: a ready deployment's
+  measured memory was its cgroup memory only, and its memory beyond the reservation read as **External**
+  (on a GB10 with driver 580, a vLLM deployment reserved at 48.7 GiB measured 6.4 GiB and external read
+  16.2 GiB; now 53.4 GiB measured and 11.5 GiB external). The DGXMM container now runs with `pid: host`
+  (`docker-compose.yaml`), and DGXMM logs a warning when it runs in its own PID namespace. Without NVML
+  figures (older drivers), the budget behaves as before. Calibration is unchanged: it learns the engine log
+  plus the host part of the measurement. See [memory budget](docs/architecture/memory.md#budget) and
+  [troubleshooting](docs/operations/troubleshooting.md#gpu-memory-of-a-deployment-is-not-counted).
+- The memory cell of the deployments table and the decision model page are labelled **Measured / Reserved**.
+
 ## [2026-10-18] — Advanced decision-model features
 
 Eleven more advisory features of the decision model (16 in all), an Insights feed with a background job engine,
