@@ -24,6 +24,7 @@ from dgxmm.api import deploy_advice as deploy_advice_api
 from dgxmm.api import schedules as schedules_api
 from dgxmm.api import commands as commands_api
 from dgxmm.context import AppContext
+from dgxmm.ondemand import gateway as ondemand_gateway
 
 log = logging.getLogger("dgxmm")
 BACKGROUND_STOP_S = 3.0  # how long shutdown waits for cancelled background loops
@@ -100,6 +101,7 @@ def create_app(ctx: AppContext) -> FastAPI:
                         log.warning("background task %s ended with %r", t.get_name(), t.exception())
             if ctx.downloads is not None and hasattr(ctx.downloads, "close"):
                 ctx.downloads.close()  # decision-model snapshot downloads stop before their next chunk
+            await app.state.ondemand_gateway.aclose()
             if ctx.deployer is not None:
                 await ctx.deployer.aclose()
 
@@ -111,8 +113,13 @@ def create_app(ctx: AppContext) -> FastAPI:
                                           *[(re.compile(re.escape(bp) + p.pattern) if isinstance(p, re.Pattern)
                                              else f"{bp}{p}", schedules_api.MAX_REQUEST_BYTES)
                                             for p in schedules_api.BODY_PATHS]])
+    # outermost: the on-demand gateway answers only peers on DGXMM's docker networks (404 for anyone else)
+    app.add_middleware(ondemand_gateway.PeerGuard, prefix=f"{bp}/ondemand", ctx=ctx)
     for module in ROUTERS:
         app.include_router(module.router, prefix=bp)
+    # the on-demand gateway LiteLLM calls: its own bearer key, outside session auth / CSRF, its own body cap
+    app.state.ondemand_gateway = ondemand_gateway.Gateway(ctx)
+    app.include_router(ondemand_gateway.router, prefix=bp)
     if bp:
         _mount_root_redirect(app, bp)
     _mount_static(app, Path(ctx.settings.static_dir), bp)

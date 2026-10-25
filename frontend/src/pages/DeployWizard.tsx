@@ -7,6 +7,7 @@ import { useIsAdmin } from "@/auth";
 import { ConfigForm } from "@/components/app/config-form";
 import { EstimatePanel } from "@/components/app/estimate-panel";
 import { ModelSelect } from "@/components/app/model-select";
+import { ModeFields, ONDEMAND_NEEDS_LITELLM, idleInvalid, useIdleDefaultMinutes, useOnDemandReady } from "@/components/app/mode-fields";
 import { PageHeader } from "@/components/app/page-header";
 import { PlanChooser } from "@/components/app/plan-chooser";
 import { useParserSuggestions } from "@/components/app/parser-suggestions";
@@ -26,9 +27,10 @@ import { useActionMutation } from "@/hooks/use-action-mutation";
 import { ModelNameTaken } from "@/components/app/model-name-taken";
 import { aliasProblem, isModelNameTaken, suggestAlias } from "@/lib/litellm";
 import { changedKeys, defaultGoal, GOALS, REPO_ID } from "@/lib/advice";
+import { DEFAULT_IDLE_MINUTES, fmtMinutes, minutesToSeconds, parseIdleMinutes } from "@/lib/ondemand";
 import { submitState } from "@/logic";
 import { ENGINE_FIELDS } from "@/engineFields";
-import type { Artifact, DeployGoal, EngineInfo, LiteLLMSettings, PlanAction, Preview } from "@/types";
+import type { Artifact, DeployGoal, DeploymentMode, EngineInfo, LiteLLMSettings, PlanAction, Preview } from "@/types";
 
 const slug = (ref: string) => ref.split("/").pop()!.toLowerCase().replace(/\.gguf$/, "").replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40) || "model";
 
@@ -57,6 +59,14 @@ function DeployWizardPage() {
   const [name, setName] = useState("");
   const [priority, setPriority] = useState(0);
   const [alias, setAlias] = useState("");
+  // On demand by default only when LiteLLM can start it (integration on, last sync good); always on otherwise
+  const ondemandReady = useOnDemandReady();
+  const [modeChosen, setMode] = useState<DeploymentMode | null>(null);
+  const mode: DeploymentMode = modeChosen ?? (ondemandReady ? "on_demand" : "always_on");
+  // Pre-filled with the global default; sent as null (= follow the default) unless the user changes it.
+  const idleDefault = fmtMinutes(useIdleDefaultMinutes() ?? DEFAULT_IDLE_MINUTES);
+  const [idleTyped, setIdle] = useState<string | null>(null);
+  const idle = idleTyped ?? idleDefault;
   const aliasInput = useRef<HTMLInputElement>(null);
   const [config, setConfig] = useState<Record<string, any>>({});
   const [advanced, setAdvanced] = useState(false);
@@ -127,7 +137,10 @@ function DeployWizardPage() {
 
   const actions = plan?.actions ?? [];
   const deploy = useActionMutation(() => api<{ id: number }>("/deployments", {
-    method: "POST", body: { name, engine, model_ref: ref, config, priority, alias: alias.trim() || null, actions },
+    method: "POST", body: {
+      name, engine, model_ref: ref, config, priority, alias: alias.trim() || null, actions, mode,
+      idle_timeout_s: mode === "on_demand" && idle !== idleDefault ? minutesToSeconds(parseIdleMinutes(idle)!) : null,
+    },
   }), {
     success: (d: any) => `Deploying ${name} (id ${d.id})`,
     invalidate: [["deployments"], ["host"]],
@@ -146,7 +159,7 @@ function DeployWizardPage() {
 
   const aliasErr = aliasProblem(alias);
   const baseSubmit = submitState(preview, actions, deploy.isPending, "deploy");
-  const submit = { ...baseSubmit, disabled: baseSubmit.disabled || !!aliasErr };
+  const submit = { ...baseSubmit, disabled: baseSubmit.disabled || !!aliasErr || idleInvalid(mode, idle) };
   const memoryChanged = deploy.error instanceof ApiError && deploy.error.code === "insufficient_memory";
 
   const check = (
@@ -210,6 +223,7 @@ function DeployWizardPage() {
                       </p>)}
                   </div>
                 </div>
+                <div className="mt-4 border-t pt-4"><ModeFields id="dep-mode" mode={mode} onMode={setMode} idle={idle} onIdle={setIdle} hint={ondemandReady === false ? ONDEMAND_NEEDS_LITELLM : null} /></div>
               </Section>
               <Section n={3} title="Sizing and features">
                 <div className="mb-4 space-y-3">

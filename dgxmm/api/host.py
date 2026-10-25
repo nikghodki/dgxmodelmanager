@@ -25,6 +25,20 @@ def _label(label: dict | None, names: dict[int, str]) -> dict | None:
     return {"deployment_id": label["deployment_id"], "name": label.get("name") or names.get(label["deployment_id"])}
 
 
+def litellm_ready(ctx: AppContext) -> bool:
+    """The LiteLLM integration is on and its last sync succeeded (as already known, no LiteLLM call): on-demand
+    models can then be started by requests through LiteLLM."""
+    sync = getattr(ctx, "litellm", None)
+    if sync is None:
+        return False
+    try:
+        active = sync.active()
+    except Exception:
+        return False
+    last = getattr(sync, "last", None) or {}
+    return bool(active and last.get("ok") is True and last.get("status") == "synced")
+
+
 def host_payload(ctx: AppContext, budget) -> dict:
     sample = ctx.budget.last_sample
     top = sample.external_top if sample else []
@@ -36,7 +50,12 @@ def host_payload(ctx: AppContext, budget) -> dict:
                              "dgxmm_label": _label(p.dgxmm_label, names)}
                             for p in top],
            "gpu": sample.gpu if sample else {},
-           "alert": ctx.watchdog.state() if ctx.watchdog else {"level": "ok"}}
+           "alert": ctx.watchdog.state() if ctx.watchdog else {"level": "ok"},
+           # global on-demand defaults (a deployment's idle_timeout_s null = this); shown in the wizard and Mode card
+           "ondemand": {"idle_timeout_s": ctx.settings.ondemand_idle_timeout_s,
+                        "queue_timeout_s": ctx.settings.ondemand_queue_timeout_s,
+                        # the deploy wizard defaults to on demand only when LiteLLM can start the model
+                        "litellm_ready": litellm_ready(ctx)}}
     try:
         du = shutil.disk_usage(ctx.settings.hf_cache.local)
         out["disk"] = {"total": du.total, "free": du.free}

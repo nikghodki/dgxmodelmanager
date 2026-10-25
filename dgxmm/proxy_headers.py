@@ -18,6 +18,9 @@ from typing import Callable, Iterable
 from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
 log = logging.getLogger(__name__)
+# scope key: the TCP peer as uvicorn received it, before ProxyHeadersMiddleware rewrites scope["client"] (read by the
+# on-demand gateway, dgxmm/ondemand/gateway.py, which only serves peers on DGXMM's docker networks)
+RAW_PEER_KEY = "dgxmm.raw_peer"
 FORWARDING = frozenset({b"x-forwarded-for", b"x-forwarded-proto", b"x-forwarded-host", b"x-forwarded-port",
                         b"forwarded", b"x-real-ip"})
 Network = ipaddress.IPv4Network | ipaddress.IPv6Network
@@ -53,6 +56,7 @@ class GuardedProxyHeaders:
     async def __call__(self, scope, receive, send):
         if scope["type"] in ("http", "websocket"):
             client = scope.get("client")
+            scope = {**scope, RAW_PEER_KEY: client[0] if client else None}
             if in_networks(client[0] if client else None, self.untrusted()):
                 headers = [(k, v) for k, v in scope.get("headers", []) if k.lower() not in FORWARDING]
                 return await self.app({**scope, "headers": headers}, receive, send)

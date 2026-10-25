@@ -6,8 +6,12 @@ description: "Connecting DGXMM to an existing LiteLLM or the bundled one, and ru
 
 ## LiteLLM integration
 
-DGXMM registers every `ready` deployment with a [LiteLLM](https://docs.litellm.ai/) proxy and removes
-it again when the deployment stops or sleeps. Each deployment is registered **once**, under its
+DGXMM registers every `ready` always-on deployment with a [LiteLLM](https://docs.litellm.ai/) proxy and
+removes it again when the deployment stops or sleeps. [On-demand](../user-guide/on-demand.md) deployments
+are registered in every state except failed, with DGXMM's gateway as their `api_base`
+(`http://dgxmm:8090/dgxmm/ondemand/<id>/v1`), the on-demand key, `timeout`/`stream_timeout` of `ondemand_queue_timeout_s` + 600 s (at least
+1200 s), `num_retries: 0` and `model_info.health_check_params`, which marks LiteLLM's health checks so
+they never start a model (see [on-demand gateway](../architecture/ondemand.md#litellm-registration)). Each deployment is registered **once**, under its
 **model name** (the **Model name (LiteLLM)** set in the deploy wizard or on the deployment's LiteLLM tab,
 else the served name), with `model: openai/<served name>`, `api_base: http://dgxmm-<name>:<port>/v1`
 and `model_info.dgxmm_id` set to the deployment id. Clients therefore use one endpoint,
@@ -28,9 +32,11 @@ Requirements:
    the LiteLLM page.
 3. DGXMM can reach the internal URL (default `http://litellm-proxy:4000`, so a container named
    `litellm-proxy` on the DGXMM network).
-4. LiteLLM can reach the engines: put it on the same Docker network
+4. LiteLLM can reach the engines and DGXMM: put it on the same Docker network
    (`docker network connect dgxmm litellm-proxy`), or install DGXMM with `DGXMM_NETWORK=<LiteLLM's
-   network>`.
+   network>`. On-demand models need this direct connection to the `dgxmm` container; LiteLLM going
+   through a reverse proxy, or running outside Docker, is refused by the gateway (see
+   [`dgxmm_internal_url`](index.md#on-demand-models)).
 
 Example for a fresh install next to an existing LiteLLM on network `ai`:
 
@@ -43,7 +49,9 @@ connection**.
 
 Each deployment's LiteLLM status is `synced`, `pending` (the last sync failed and DGXMM retries; see
 [troubleshooting](../operations/troubleshooting.md#litellm-status-stays-pending)), `error` (not registered because another
-deployment holds its model name), `disabled` (integration off or no master key) or `none` (not ready).
+deployment holds its model name, or `ondemand_not_configured` for an on-demand deployment without the gateway
+key), `disabled` (integration off or no master key) or `none` (not registered: an always-on deployment
+that is not ready, or a failed one).
 For `pending` and `error`, the deployment's LiteLLM tab and the Deployments table tooltip give the
 exact reason. Switching models moves the model name to the new deployment, so clients keep working.
 

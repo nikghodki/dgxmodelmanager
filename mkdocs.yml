@@ -139,6 +139,7 @@ nav:
       - user-guide/models.md
       - user-guide/deploying.md
       - user-guide/deployments.md
+      - user-guide/on-demand.md
       - user-guide/insights.md
       - user-guide/schedules.md
       - user-guide/command-palette.md
@@ -157,6 +158,7 @@ nav:
       - architecture/insights-jobs.md
       - architecture/schedules.md
       - architecture/litellm.md
+      - architecture/ondemand.md
       - architecture/storage.md
       - architecture/processes.md
       - architecture/background-loops.md

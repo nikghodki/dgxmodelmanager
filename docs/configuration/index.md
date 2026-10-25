@@ -132,6 +132,21 @@ workload labels for 15 minutes.
 | `litellm_public_url` | URL | `""` | Base URL clients use to reach LiteLLM, for example `https://llm.example.com` (no `/v1`). Shown in the UI as the endpoint `<url>/v1`; empty means the internal URL is shown. Default for the LiteLLM page's **Public endpoint URL**. `./install.sh --with-litellm` sets it on a fresh `config.yaml`. |
 | `hf_token_file` | path | `/run/secrets/hf_token` | Hugging Face token file. Empty or missing means anonymous Hub access. |
 
+### On-demand models
+
+How [on-demand deployments](../user-guide/on-demand.md) behave and how LiteLLM reaches DGXMM's on-demand
+gateway. The two timeouts are the defaults; a deployment's own idle timeout (Mode card, or
+`PATCH /api/deployments/{id}/mode`) wins over `ondemand_idle_timeout_s`.
+
+| Key | Type | Default | Meaning |
+|---|---|---|---|
+| `ondemand_idle_timeout_s` | int, 60–86400 | `300` (5 min) | An on-demand deployment with no request for this long (nothing in flight, no activity in the engine's metrics) is stopped. Raise it when restarts are slow compared with the gaps between your requests; the deploy wizard pre-fills it. |
+| `ondemand_queue_timeout_s` | int, 300–3600 | `900` (15 min) | A request waiting for memory (or for its model to start) gives up after this long with 503 `ondemand_queue_timeout` and `Retry-After: 60`. The limit counts from the request's arrival, so it includes the model's start-up (about 2 minutes even for a small model); a value below 300 is raised to 300, with a warning in the log (earlier versions allowed 60, so an older config still loads). DGXMM sets the `timeout` and `stream_timeout` of the on-demand LiteLLM entries to this value plus 600 s, at least 1200 s (1500 s with the default), and re-registers the entries when it changes, so LiteLLM never gives up first; every proxy in front of LiteLLM needs a read timeout of at least that entry timeout, 1800 s with the default (see [troubleshooting](../operations/troubleshooting.md#requests-to-an-on-demand-model-fail-after-about-60-seconds)). |
+| `ondemand_max_queued` | int, 1–10000 | `64` | At most this many requests wait for on-demand models at a time, all deployments together (queued for memory or waiting for a start); each holds its request body, up to 16 MiB, in DGXMM's memory. One more is refused at once with 503 `ondemand_queue_full` and `Retry-After: 60`. Requests for a ready model are never refused. |
+| `ondemand_key_file` | path | `/run/secrets/dgxmm_ondemand_key` | Bearer key LiteLLM sends to the gateway (`secrets/dgxmm_ondemand_key`, see [secrets](#secrets)). Missing or empty: the gateway answers every request 503 `ondemand_not_configured` and on-demand deployments are not registered in LiteLLM. |
+| `ondemand_allowed_cidrs` | `auto` or comma-separated CIDRs (or a YAML list) | `auto` | Who may connect to the gateway. `auto` (or empty): the subnets of the Docker networks DGXMM's container is attached to, except the decider's network, without each network's gateway address and the first address of each subnet, where connections to published host ports arrive from. Set a list only when LiteLLM reaches DGXMM from an address auto does not cover. The listed ranges get the same exclusions as auto: the gateway and first address of every network DGXMM's container is attached to, and the whole decider network, are refused even when the list covers them (DGXMM logs one warning naming them), so the host and the LAN never reach the key check. Invalid CIDRs stop DGXMM from starting. Requests carrying `X-Forwarded-For`, `Forwarded` or `X-Real-IP` are always refused. |
+| `dgxmm_internal_url` | URL | `""` | The URL LiteLLM uses to reach DGXMM, including the base path. Empty: `http://dgxmm:8090` + `base_path`, i.e. `http://dgxmm:8090/dgxmm`, the `dgxmm` container on the Docker network. Change it only when LiteLLM reaches the DGXMM container under another name or network alias. It must be a direct connection: a URL through nginx or another proxy is refused by the gateway. |
+
 ### Web UI and sessions
 
 | Key | Type | Default | Meaning |
@@ -243,13 +258,14 @@ if the networks differ.
 
 ## Secrets
 
-`secrets/` has mode 700 and every file in it has mode 600. Compose mounts the first two files at
-`/run/secrets/`.
+`secrets/` has mode 700 and every file in it has mode 600. Compose mounts `hf_token`,
+`litellm_master_key` and `dgxmm_ondemand_key` into the `dgxmm` container at `/run/secrets/`.
 
 | File | Meaning |
 |---|---|
 | `secrets/hf_token` | Hugging Face token (optional; needed for gated repos). |
 | `secrets/litellm_master_key` | Master key of the LiteLLM DGXMM registers models with (optional). |
+| `secrets/dgxmm_ondemand_key` | Key LiteLLM uses to call DGXMM's [on-demand gateway](../architecture/ondemand.md). The installer generates it when it is missing or empty (`sk-` and 48 random letters and digits, about 286 bits) and never overwrites it. DGXMM puts it on the LiteLLM entries of on-demand deployments; you never enter it anywhere. |
 | `secrets/litellm_bundled_master_key` | Bundled LiteLLM only: its own master key. Mounted only into `dgxmm-litellm`. |
 | `secrets/litellm_salt_key` | Bundled LiteLLM only: encrypts credentials in its database. Never change it once set. |
 | `secrets/litellm_db_password` | Bundled LiteLLM only: Postgres password. |
@@ -260,6 +276,24 @@ The LiteLLM master key file is read each time DGXMM talks to LiteLLM, so a key w
 example with `printf … > secrets/litellm_master_key`) applies without a restart; an editor that
 replaces the file needs `docker restart dgxmm`. A master key entered on the LiteLLM page is stored in DGXMM's database (`data/`) instead and
 wins over the file (see [runtime settings](litellm.md#runtime-settings-and-precedence)).
+
+**Rotating the on-demand key.** Write a new key into the existing file; no restart is needed:
+
+```bash
+printf 'sk-%s' "$(head -c 4096 /dev/urandom | LC_ALL=C tr -dc A-Za-z0-9 | head -c 48)" > secrets/dgxmm_ondemand_key
+```
+
+The gateway checks the file at most once a second and re-reads it when it changed, so the old key gets
+401 from then on. When it picks up the new key it starts a LiteLLM sync, which notices the new key by its
+fingerprint and re-registers every on-demand entry with it, adding the new entry before it removes the
+old one. LiteLLM itself may keep using the old key until it reloads its model list, so expect up to about
+a minute of 401 (and, through LiteLLM, its own error or retry) for on-demand models right after a
+rotation. Requests with the previous key are not counted as failed attempts, and the rotation clears the
+failed-attempt counts, so LiteLLM's address is not rate limited (429) meanwhile. Rotate when a minute of
+errors is acceptable. Write
+the file in place as above: the file is mounted on its own, so an editor that replaces it is not seen
+inside the container until `docker restart dgxmm`. If the file goes missing or empty, the gateway refuses
+every request (503 `ondemand_not_configured`) until a key is back.
 
 ## Next steps
 

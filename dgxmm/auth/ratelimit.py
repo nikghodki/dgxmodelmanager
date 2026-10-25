@@ -21,3 +21,12 @@ class SlidingWindowLimiter:
                 return False
             q.append(now)
             return True
+
+    def blocked(self, key: str) -> bool:
+        """True when the key is at its limit (records nothing)."""
+        now = self.clock()
+        with self._lock:
+            q = self._hits.get(key)
+            while q and q[0] <= now - self.window_s:
+                q.popleft()
+            return bool(q) and len(q) >= self.limit

@@ -16,6 +16,10 @@ description: "Everything DGXMM does: memory-safe deploys, the optional decision 
   against an allowlist, and the default vLLM image is pinned by digest.
 - Switch a deployment to another model or reconfigure it, with automatic rollback if the new one does
   not become ready. Estimates are calibrated from measured memory after each start.
+- **On-demand models**: a model starts on its first request through LiteLLM and is stopped after 5 idle
+  minutes. The deploy wizard preselects it when the LiteLLM integration is enabled and synced (always on
+  otherwise; the API defaults to always on). When memory is short, idle on-demand models make room or the
+  request is queued, with a visible notice for streaming clients. See [on-demand models](../user-guide/on-demand.md).
 - Engines start one at a time: a deployment started while another one loads waits as **Queued** with
   its memory reserved, so vLLM's start-up memory check is never disturbed.
 

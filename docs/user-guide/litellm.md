@@ -5,7 +5,8 @@ description: "One OpenAI-compatible endpoint for every deployment, virtual keys,
 # LiteLLM
 
 DGXMM registers every ready deployment in [LiteLLM](https://docs.litellm.ai/) once, under its model
-name. Clients then use one OpenAI-compatible endpoint, `<LiteLLM URL>/v1`, and choose the deployment
+name. [On-demand](on-demand.md) deployments stay registered while they are stopped, so that a request can
+start them. Clients then use one OpenAI-compatible endpoint, `<LiteLLM URL>/v1`, and choose the deployment
 with `"model": "<model name>"`. LiteLLM adds API keys, budgets, rate limits and logging. To set up the
 LiteLLM side, see [configuration](../configuration/litellm.md#litellm-integration).
 

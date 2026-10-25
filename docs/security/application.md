@@ -33,13 +33,18 @@ residual risks) is in [security.md](../security.md).
 - **Audit**: logins (also failed and rate-limited ones), password changes, deploy, start, stop, remove,
   sleep, wake, switch and reconfigure (plus their failures), model name changes, adopt, downloads and
   cancellations, inventory rescans, weight deletions and clean-ups (also refused and failed ones),
-  LiteLLM settings changes, syncs and virtual-key changes, benchmarks, user changes, watchdog stops and
-  command-line password resets are written to `audit_log`. Audit rows never contain the master key or a
+  LiteLLM settings changes, syncs and virtual-key changes, benchmarks, user changes, watchdog stops,
+  command-line password resets, mode changes (`ondemand_mode`) and what the on-demand controller does
+  (`ondemand_start`, `ondemand_sleep`, `ondemand_queue_timeout`, with no user and the actor `ondemand`) are
+  written to `audit_log`. Audit rows never contain the master key or a
   virtual key.
 - **Secrets**: the LiteLLM master key is write-only (stored in `app_settings` or read from the secret
   file), bound to its URL, and never returned, logged or audited. A full virtual key appears only in the
   response that creates it. Process command lines are masked before they reach any client, and process
   environments are never read.
+- **On-demand gateway** (`/dgxmm/ondemand/…`): not part of the session-authenticated API. It answers only
+  peers on DGXMM's Docker networks that send no forwarding headers, and needs its own bearer key
+  (`secrets/dgxmm_ondemand_key`); see [on-demand gateway](../security.md#on-demand-gateway).
 - **Container guard**: `docker_ctl.py` refuses to create a container without `dgxmm.managed=true` and
   to stop or remove one that lacks it. The one exception is the delete helper it creates itself
   (`dgxmm.helper=true`, see [deleting weights](../architecture/storage.md#deleting-weights)). Containers it does not manage are

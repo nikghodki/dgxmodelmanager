@@ -465,4 +465,116 @@ describe("DeploymentDetail — decision model", () => {
     expect(screen.getByText(/1 queued ahead/)).toBeInTheDocument();
     expect(screen.getByText(/memory stays reserved/)).toBeInTheDocument();
   });
+
+  describe("on-demand mode", () => {
+    const od = { ...dep, mode: "on_demand", idle_timeout_s: 600, ondemand: { inflight: 0, queued: 0, last_request_at: null, phase: "sleeping" }, state: "stopped" };
+    const getDep = (d: any) => (url: string, opts?: any) => (url === "/deployments/1" && !opts?.method ? Promise.resolve(d)
+      : url === "/host" ? Promise.resolve({ ondemand: { idle_timeout_s: 300, queue_timeout_s: 900 } }) : undefined);
+
+    it("lets admins switch to always on and change the idle timeout through PATCH /mode", async () => {
+      const calls: any[] = [];
+      renderDetail([], { extra: (url, opts) => {
+        if (url === "/deployments/1/mode") { calls.push(opts); return Promise.resolve({ ...od, ...opts.body }); }
+        return getDep(od)(url, opts);
+      } });
+      expect(await screen.findByText("Sleeping (on demand)")).toBeInTheDocument();
+      const group = screen.getByRole("radiogroup", { name: "Mode" });
+      expect(within(group).getByRole("radio", { name: /^On demand/ })).toBeChecked();
+      const idle = screen.getByLabelText("Idle minutes before sleeping");
+      expect(idle).toHaveValue(10);
+      await userEvent.clear(idle); await userEvent.type(idle, "30");
+      await userEvent.click(screen.getByRole("button", { name: "Save mode" }));
+      await waitFor(() => expect(calls).toHaveLength(1));
+      expect(calls[0]).toEqual({ method: "PATCH", body: { mode: "on_demand", idle_timeout_s: 1800 } });
+      await userEvent.click(within(group).getByRole("radio", { name: "Always on" }));
+      expect(screen.queryByLabelText("Idle minutes before sleeping")).toBeNull();
+      await userEvent.click(screen.getByRole("button", { name: "Save mode" }));
+      await waitFor(() => expect(calls).toHaveLength(2));
+      expect(calls[1]).toEqual({ method: "PATCH", body: { mode: "always_on" } });
+    });
+
+    it("an empty idle timeout resets to the default (null)", async () => {
+      const calls: any[] = [];
+      renderDetail([], { extra: (url, opts) => {
+        if (url === "/deployments/1/mode") { calls.push(opts); return Promise.resolve(od); }
+        return getDep(od)(url, opts);
+      } });
+      const idle = await screen.findByLabelText("Idle minutes before sleeping");
+      await userEvent.clear(idle);
+      await userEvent.click(screen.getByRole("button", { name: "Save mode" }));
+      await waitFor(() => expect(calls).toHaveLength(1));
+      expect(calls[0].body).toEqual({ mode: "on_demand", idle_timeout_s: null });
+    });
+
+    it("shows a pending switch to always on as always on, with a note, while it starts", async () => {
+      const starting = { ...od, state: "starting", pending_mode: "always_on", ondemand: { ...od.ondemand, phase: "idle" } };
+      renderDetail([], { extra: getDep(starting) });
+      expect(await screen.findByText(/Switching to always on: it stays on demand until it is ready/)).toBeInTheDocument();
+      const group = screen.getByRole("radiogroup", { name: "Mode" });
+      expect(within(group).getByRole("radio", { name: "Always on" })).toBeChecked();
+      expect(screen.getByRole("button", { name: "Save mode" })).toBeDisabled();
+    });
+
+    it("shows the memory fit message when always on does not fit", async () => {
+      renderDetail([], { extra: (url, opts) => {
+        if (url === "/deployments/1/mode") return Promise.reject(new apiModule.ApiError(409, {
+          code: "insufficient_memory", message: "needs 40.0 GiB but only 10.0 GiB is free", fit: { fits: false, free_for_new: 1e10, required: 4e10 } }));
+        return getDep(od)(url, opts);
+      } });
+      await userEvent.click(await screen.findByRole("radio", { name: "Always on" }));
+      await userEvent.click(screen.getByRole("button", { name: "Save mode" }));
+      const alert = await screen.findByText(/needs 40\.0 GiB but only 10\.0 GiB is free/);
+      expect(alert.closest("[role=alert]")).not.toBeNull();
+      expect(screen.getByText(/stays on demand/)).toBeInTheDocument();
+    });
+
+    it("rejects an idle timeout outside 1–1440 minutes", async () => {
+      renderDetail([], { extra: getDep(od) });
+      const idle = await screen.findByLabelText("Idle minutes before sleeping");
+      await userEvent.clear(idle); await userEvent.type(idle, "2000");
+      expect(idle).toHaveAttribute("aria-invalid", "true");
+      expect(screen.getByRole("button", { name: "Save mode" })).toBeDisabled();
+    });
+
+    it("shows viewers the mode read-only", async () => {
+      renderDetail([], { admin: false, extra: getDep(od) });
+      expect(await screen.findByText("On demand · sleeps after 10 min idle")).toBeInTheDocument();
+      expect(screen.queryByRole("radiogroup", { name: "Mode" })).toBeNull();
+      expect(screen.queryByRole("button", { name: "Save mode" })).toBeNull();
+    });
+
+    it("says always on for viewers", async () => {
+      renderDetail([], { admin: false, extra: getDep({ ...od, mode: "always_on", ondemand: null, state: "ready" }) });
+      expect(await screen.findByText("Always on")).toBeInTheDocument();
+    });
+
+    it("shows the global default when the idle timeout is unset", async () => {
+      renderDetail([], { admin: false, extra: getDep({ ...od, idle_timeout_s: null }) });
+      expect(await screen.findByText("On demand · sleeps after default (5 min) idle")).toBeInTheDocument();
+    });
+
+    it("gives admins an empty idle field labelled with the default (N min)", async () => {
+      renderDetail([], { extra: getDep({ ...od, idle_timeout_s: null }) });
+      const idle = await screen.findByLabelText("Idle minutes before sleeping");
+      expect(idle).toHaveValue(null);
+      await waitFor(() => expect(idle).toHaveAttribute("placeholder", "default (5 min)"));
+      expect(screen.getByRole("radio", { name: /sleep after default \(5 min\) idle$/ })).toBeChecked();
+    });
+
+    it("shows no mode editor for a system deployment", async () => {
+      renderDetail([], { extra: getDep({ ...dep, system: true, mode: "always_on", idle_timeout_s: null, ondemand: null }) });
+      expect(await screen.findByText(/Used by the decision model/)).toBeInTheDocument();
+      expect(screen.queryByRole("radiogroup", { name: "Mode" })).toBeNull();
+      expect(screen.queryByRole("button", { name: "Save mode" })).toBeNull();
+    });
+
+    it("renders on-demand events as normal messages", async () => {
+      renderDetail([], { path: "/deployments/1?tab=events", extra: getDep({ ...od, events: [
+        { ts: "2026-10-24T10:00:00Z", from: "stopped", to: "starting", message: "Started for a request", log_tail: null },
+        { ts: "2026-10-24T10:20:00Z", from: "ready", to: "stopping", message: "Put to sleep after 10 min idle", log_tail: null },
+      ] }) });
+      expect(await screen.findByText("Started for a request")).toBeInTheDocument();
+      expect(screen.getByText("Put to sleep after 10 min idle")).toBeInTheDocument();
+    });
+  });
 });

@@ -23,6 +23,10 @@ your confirmation. It runs as a single container and installs with one command.
 - **vLLM and llama.cpp**, with switch and reconfigure that roll back automatically, and engines that start
   one at a time.
 - **One LiteLLM endpoint** for every deployment, with virtual keys (your LiteLLM or a bundled one).
+- **On-demand models:** a model can start on its first request and stop again after a few idle minutes,
+  making room or queueing when memory is short. It works through LiteLLM on DGXMM's Docker network, so new
+  deployments are always on unless you choose it (the deploy wizard preselects it when LiteLLM is set up).
+  See [on-demand models](https://nikghodki.github.io/dgxmodelmanager/user-guide/on-demand/).
 - **An optional decision model** for 16 advisory features, **insights** from background checks,
   **schedules** proposed from traffic, and **⌘K Ask** in the command palette.
 - **Observability and administration:** live metrics, tuning advice, a benchmark, the process list,

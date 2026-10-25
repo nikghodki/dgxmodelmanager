@@ -942,6 +942,12 @@ ensure_bundled_secrets() {
 ensure_secrets() {
   ensure_dir "$SECRETS_DIR" 700
   ensure_secret hf_token "${HF_TOKEN:-}" "from HF_TOKEN"
+  # Bearer key LiteLLM sends to DGXMM's on-demand gateway (DGXMM registers it on the entries it creates)
+  if [ -s "$SECRETS_DIR/dgxmm_ondemand_key" ]; then
+    ensure_secret dgxmm_ondemand_key "" ""
+  else
+    ensure_secret dgxmm_ondemand_key "sk-$(random_token 48)" "generated"
+  fi
   local key="${LITELLM_MASTER_KEY:-}" source="from LITELLM_MASTER_KEY"
   if ((WITH_LITELLM)); then
     ensure_bundled_secrets
@@ -1332,7 +1338,7 @@ cmd_status() {
   done
   local with_litellm
   with_litellm=$(bool01 "$(env_file_get DGXMM_WITH_LITELLM || echo 0)") || with_litellm=0
-  local secret_names=(hf_token litellm_master_key admin_password)
+  local secret_names=(hf_token litellm_master_key dgxmm_ondemand_key admin_password)
   if [ "$with_litellm" = 1 ]; then secret_names+=(litellm_bundled_master_key litellm_salt_key litellm_db_password); fi
   for f in "${secret_names[@]}"; do
     if [ -s "$SECRETS_DIR/$f" ]; then note "secrets/$f: set"; else note "secrets/$f: not set"; fi

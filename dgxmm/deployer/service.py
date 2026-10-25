@@ -10,7 +10,7 @@ import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Awaitable, Callable
+from typing import Any, Awaitable, Callable, Literal
 
 import httpx
 from pydantic import BaseModel, Field, ValidationError
@@ -35,6 +35,9 @@ from dgxmm.planner.plans import ActiveDep, PlanAction, base_model_name, build_pl
 log = logging.getLogger(__name__)
 NAME_PATTERN = r"^[a-z0-9][a-z0-9-]{0,40}$"
 ALIAS_PATTERN = r"^[A-Za-z0-9._:/-]{1,64}$"  # LiteLLM model name
+# on_demand: started by the first request, stopped after its idle timeout (dgxmm/ondemand); always_on: as before
+DeploymentMode = Literal["on_demand", "always_on"]
+IDLE_TIMEOUT_MIN_S, IDLE_TIMEOUT_MAX_S = 60, 86400  # per-deployment idle_timeout_s (None = ondemand_idle_timeout_s)
 
 
 # docker's error when the host port is bound by a process outside docker ("failed to bind host port ...: address
@@ -50,6 +53,10 @@ class DeployRequest(BaseModel):
     config: dict[str, Any] = {}
     priority: int = Field(0, ge=0, le=100)
     alias: str | None = Field(None, pattern=ALIAS_PATTERN)
+    # always_on unless asked for: on demand needs LiteLLM (it starts models on requests that come through it), so
+    # an API script gets it only when it says so (the deploy wizard picks on demand when LiteLLM is set up and synced)
+    mode: DeploymentMode = "always_on"  # system deployments are always_on whatever is sent
+    idle_timeout_s: int | None = Field(None, ge=IDLE_TIMEOUT_MIN_S, le=IDLE_TIMEOUT_MAX_S)
 
 
 class DeployError(Exception):
@@ -81,6 +88,7 @@ def config_hash(cfg: dict) -> str:
 
 StateHook = Callable[[int, str, str], Awaitable[None]]
 STARTUP_STATES = ("starting", "loading")  # states that hold a start-up slot (deployer/gate.py)
+PENDING_MODE_APPLIES = frozenset({"ready", "failed", "stopped"})  # a pending mode switch takes effect here
 GIB_F = float(1024**3)
 
 
@@ -115,6 +123,8 @@ class Deployer:
         self._waking: dict[int, asyncio.Task] = {}  # dep_id -> wake-up waiting for its start-up slot
         # dep_id -> (error code, message) of the last background wake-up that failed (read by the schedule runner)
         self.wake_failures: dict[int, tuple[str, str]] = {}
+        # OnDemandController.status (set by AppContext): in-flight / queued / phase of an on-demand deployment
+        self.ondemand_status: Callable[[int, str], dict] | None = None
 
     def _check_not_deleting(self, *refs: str | None) -> None:
         for ref in refs:
@@ -187,6 +197,8 @@ class Deployer:
             dep.state = to
             for k, v in fields.items():
                 setattr(dep, k, v)
+            if to in PENDING_MODE_APPLIES and dep.pending_mode:  # a switch that waited for the start (set_mode)
+                dep.mode, dep.pending_mode = dep.pending_mode, None
             s.add(DeploymentEvent(deployment_id=dep_id, from_state=frm, to_state=to, message=message, log_tail=log_tail,
                                   actor=actor[:64] if actor else None))
         if to not in STARTUP_STATES and self.gate.holders.get(dep_id) not in (None, "wake"):
@@ -396,7 +408,10 @@ class Deployer:
                 dep = Deployment(name=req.name, engine=req.engine, model_ref=req.model_ref,
                                  config=prep.cfg.model_dump(mode="json"), state="planned", port=port,
                                  priority=req.priority, alias=req.alias, reserved_bytes=prep.estimate.total,
-                                 estimate=prep.estimate.as_dict(), created_by=user_id, system=system or None)
+                                 estimate=prep.estimate.as_dict(), created_by=user_id, system=system or None,
+                                 # the decision model is never managed by the on-demand controller
+                                 mode="always_on" if system else req.mode,
+                                 idle_timeout_s=None if system else req.idle_timeout_s)
                 s.add(dep)
                 s.flush()
                 dep_id = dep.id
@@ -748,14 +763,21 @@ class Deployer:
                 return dep.state
             await asyncio.sleep(0.02)
 
-    async def stop(self, dep_id: int, user_id: int | None = None, reason: str = "user", precheck=None) -> dict:
+    async def stop(self, dep_id: int, user_id: int | None = None, reason: str = "user", precheck=None,
+                   message: str | None = None, require_states: tuple[str, ...] | None = None) -> dict:
         """``precheck``: optional async fn -> reason or None, called under the deployment's lock before a ready
-        deployment is stopped (the schedule runner re-checks traffic there); a reason refuses with 409 ``precheck``."""
+        deployment is stopped (the schedule runner re-checks traffic there); a reason refuses with 409 ``precheck``.
+        ``message``: the "stopping" event's text instead of "stop requested (<reason>)" (e.g. the on-demand
+        controller's "Put to sleep after 5 min idle"). ``require_states``: refuse (409 ``precheck``) unless the
+        deployment is in one of these states under the lock; the precheck then runs in any of them."""
         async with self._lock(dep_id):
             dep = self._require(dep_id)
+            if require_states is not None and dep.state not in require_states:
+                raise DeployError("precheck", f"deployment is {dep.state}", 409)
             if dep.state == "stopped":
                 return self.view(dep_id)
-            if precheck is not None and dep.state == "ready" and (why := await precheck()):
+            if precheck is not None and (dep.state == "ready" or require_states is not None) and \
+                    (why := await precheck()):
                 raise DeployError("precheck", why, 409)
             mon = self._monitors.pop(dep_id, None)
             if mon and not mon.done():
@@ -773,7 +795,7 @@ class Deployer:
                 return self._transition(dep_id, "stopped", message=f"cleaned up ({reason})", actor=reason,
                                         container_id=None)
             if dep.state != "stopping":
-                self._transition(dep_id, "stopping", message=f"stop requested ({reason})", actor=reason)
+                self._transition(dep_id, "stopping", message=message or f"stop requested ({reason})", actor=reason)
             try:
                 await asyncio.to_thread(self.docker.stop_and_remove, dep.container_id)
             except Exception as e:
@@ -879,6 +901,12 @@ class Deployer:
             "litellm_status": d.litellm_status, "last_error": d.last_error, "exit_code": d.exit_code,
             "container_id": d.container_id, "served_name": served, "adopted_from": d.adopted_from,
             "system": bool(d.system),
+            "mode": self._mode(d), "idle_timeout_s": d.idle_timeout_s,
+            # "always_on" while a switch to always on waits for the deployment to be ready (it is on demand until then)
+            "pending_mode": d.pending_mode,
+            # filled by the on-demand controller; None for always-on deployments (not managed by it)
+            "ondemand": self.ondemand_status(d.id, d.state) if self._mode(d) == "on_demand" and self.ondemand_status
+                        is not None else None,
             "startup_queue": self.gate.info(d.id),  # why it waits for a start-up slot (state queued / waking)
             "model_name": d.alias or served,  # what clients pass as "model" to the single LiteLLM endpoint
             "litellm_error": self.litellm_error(d.id, d.state) if self.litellm_error is not None else None,
@@ -1163,6 +1191,42 @@ class Deployer:
         async with self.mem_lock:
             return self.set_alias(dep_id, alias)
 
+    @staticmethod
+    def _mode(d: Deployment) -> str:
+        """NULL (a row an older DGXMM wrote after migration 40) and system deployments are always on."""
+        return "always_on" if d.system or not d.mode else d.mode
+
+    def set_mode(self, dep_id: int, mode: str, idle_timeout_s: int | None, pending_mode: str | None = None) -> dict:
+        """Persist a deployment's mode, idle timeout (None = the global default) and pending mode (None clears it;
+        applied by ``_transition`` when the deployment reaches ready, failed or stopped). Only the stored values:
+        starting or stopping, and re-registering in LiteLLM, are the on-demand controller's job
+        (OnDemandController.set_mode)."""
+        if mode not in ("on_demand", "always_on") or pending_mode not in (None, "on_demand", "always_on"):
+            raise DeployError("invalid_mode", "mode must be on_demand or always_on", 422)
+        if idle_timeout_s is not None and not IDLE_TIMEOUT_MIN_S <= idle_timeout_s <= IDLE_TIMEOUT_MAX_S:
+            raise DeployError("invalid_idle_timeout",
+                              f"idle_timeout_s must be {IDLE_TIMEOUT_MIN_S}-{IDLE_TIMEOUT_MAX_S} seconds", 422)
+        dep = self._require(dep_id)
+        if dep.system:
+            raise DeployError("system_deployment", f"{dep.name} is a system deployment and is always on", 409)
+        with self.db.session() as s:
+            row = s.get(Deployment, dep_id)
+            row.mode, row.idle_timeout_s, row.pending_mode = mode, idle_timeout_s, pending_mode
+        view = self.view(dep_id)
+        self.events.publish("deployment", view)
+        return view
+
+    def note(self, dep_id: int, message: str, actor: str | None = None) -> None:
+        """A deployment event without a state change (e.g. the on-demand controller's "Started for a request");
+        ignored for a deployment that no longer exists."""
+        with self.db.session() as s:
+            dep = s.get(Deployment, dep_id)
+            if dep is None:
+                return
+            s.add(DeploymentEvent(deployment_id=dep_id, from_state=dep.state, to_state=dep.state, message=message,
+                                  actor=actor[:64] if actor else None))
+        self.events.publish("deployment", self.view(dep_id))
+
     def _set_alias(self, dep_id: int, alias: str | None) -> None:
         with self.db.session() as s:
             s.get(Deployment, dep_id).alias = alias
@@ -1213,6 +1277,9 @@ class Deployer:
             raise InsufficientMemory(fit)
 
         alias = old.alias
+        if "mode" not in req.model_fields_set:  # the replacement keeps the old deployment's mode unless one is given
+            req = req.model_copy(update={"mode": self._mode(old), "idle_timeout_s": old.idle_timeout_s
+                                         if "idle_timeout_s" not in req.model_fields_set else req.idle_timeout_s})
         with self.db.session() as s:
             name_taken = s.scalar(select(Deployment).where(Deployment.name == req.name)) is not None
         applied = await self.apply_actions(acts, user_id)

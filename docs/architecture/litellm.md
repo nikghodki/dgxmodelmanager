@@ -20,7 +20,8 @@ logged and never audited, and error texts from LiteLLM are scrubbed of the key, 
 hashes before they are logged or returned.
 
 **One registration per deployment** (`LiteLLMSync`). The desired state is one entry per `ready`
-deployment, keyed by deployment id and model name (`alias` or served name), with
+always-on deployment and per on-demand deployment in any state but `failed` (pointing at DGXMM's gateway,
+with its key and long timeouts; see [on-demand gateway](ondemand.md#litellm-registration)), keyed by deployment id and model name (`alias` or served name), with
 `model_info.dgxmm_id` marking it as DGXMM's. Each sync lists the models carrying a `dgxmm_id`, deletes
 every one that is not desired (stopped deployments, an old model name after a rename, duplicates, and
 the second, served-name entry that older versions registered next to an alias), and adds what is

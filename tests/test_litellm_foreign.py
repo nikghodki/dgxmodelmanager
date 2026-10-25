@@ -33,7 +33,7 @@ def make(stack, fake, insights=None):
 
 
 def req(name, alias=None, **cfg):
-    return DeployRequest(name=name, engine="vllm", model_ref="Qwen/Qwen3-Tiny", config={**SMALL, **cfg}, alias=alias)
+    return DeployRequest(mode="always_on", name=name, engine="vllm", model_ref="Qwen/Qwen3-Tiny", config={**SMALL, **cfg}, alias=alias)
 
 
 async def ready(stack, name, alias=None, **cfg):

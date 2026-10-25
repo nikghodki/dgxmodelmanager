@@ -17,6 +17,11 @@ Open **Deploy model** (Dashboard, Deployments, or the command palette). It needs
    is the name clients pass as `model` to the LiteLLM endpoint, such as `default-chat`. It defaults to
    the served name. A model name is 1 to 64 letters, digits and `. _ : / -`. Model names must be unique: if another deployment already uses the name, Deploy is
    refused with a link to that deployment and a one-click suggestion (`<served name>-<deployment name>`).
+   **Mode**: *On demand — start on the first request, sleep after N min idle* or *Always on*. On demand
+   is preselected when the LiteLLM integration is enabled and its last sync succeeded; otherwise always
+   on, with the hint *On demand needs LiteLLM (it starts models on requests that come through it)*. For
+   on demand, **Idle minutes before sleeping** (1 to 1440) starts at the DGXMM default. See
+   [on-demand models](on-demand.md).
 3. **Sizing and features**: the **Goal**, then context length, concurrent sequences, KV cache dtype, the
    shared KV pool size, prefix caching, sleep mode, **Speculative decoding** and so on. Advanced options
    include tool-call and reasoning parsers, trust_remote_code, the served model name, and allowlisted
@@ -57,6 +62,7 @@ enough. Unsafe plans can still be chosen; they are only marked. When exactly one
 [decision model](decision-model.md#plan-recommendation) can pick one of them.
 
 After **Deploy** you land on the deployment's page. It moves through *Starting* → *Loading* → *Ready*.
+An on-demand deployment starts right away too, and is put to sleep once it has been idle for its timeout.
 The first vLLM start of a model can take several minutes, because it compiles kernels (cached for later
 starts) and may pull the engine image.
 
@@ -133,5 +139,6 @@ headroom. Tick **Must include** to only see combinations that contain a model. A
 ## Next steps
 
 - [Deployments](deployments.md)
+- [On-demand models](on-demand.md)
 - [Memory budget and fit planner](../architecture/memory.md)
 - [Deployer and start-up gate](../architecture/deployer.md)

@@ -5,6 +5,72 @@ All notable changes to DGXMM are documented in this file. The format is based on
 (the package version is `0.1.0`), so each section below is identified by its date. Upgrade notes for existing installs are in
 [upgrade](docs/getting-started/upgrade.md#upgrading-an-existing-install).
 
+## [Unreleased] — On-demand models
+
+### Added
+
+- **On-demand models.** A deployment can now be *on demand* or *always on*. An on-demand model starts on the
+  first request through LiteLLM, which waits on its open connection and then gets the normal answer, and is
+  stopped after 5 minutes without requests (`ondemand_idle_timeout_s`, or per deployment). It stays registered
+  in LiteLLM under the same model name while stopped, so clients change nothing. It needs LiteLLM on DGXMM's
+  Docker network: the deploy wizard preselects on demand only when the LiteLLM integration is enabled and its
+  last sync succeeded, and the API (`POST /api/deployments`) defaults to always on unless `"mode": "on_demand"`
+  is sent. See [on-demand models](docs/user-guide/on-demand.md).
+- **Making room and queueing.** When a model does not fit, DGXMM stops idle on-demand models (least recently
+  used first, whatever their size; never always-on deployments, the decision model or a model with requests in
+  flight) and starts it through the usual memory check. When the memory is held by busy models, the request is
+  queued, first come first served: a streaming chat or completions request immediately gets a visible
+  "⏳ Your message is queued …" chunk, a non-streaming one gets the same line in front of its answer, and a
+  request that asks for structured output (`response_format`, `tools`, `tool_choice`, `functions`, `guided_*`,
+  `structured_outputs`) just waits, unchanged. The queue limit (`ondemand_queue_timeout_s`, 15 minutes, at
+  least 300 s) counts from the request's arrival and includes the cold start; then the request gets HTTP 503
+  with `Retry-After: 60` (`ondemand_queue_timeout`). A model that can never fit is refused at once
+  (`does_not_fit`), at most `ondemand_max_queued` (64) requests wait at a time (`ondemand_queue_full`), and an
+  administrator's Stop of a model that is starting for requests answers them `ondemand_stopped`.
+- **All inference endpoints.** Every inference endpoint the engine serves under `/v1` starts an on-demand
+  model: chat, completions, embeddings, `responses` (LiteLLM uses it for Anthropic Messages API clients such
+  as Claude Code), `messages`, `chat/completions/batch`, `audio/transcriptions`, `audio/translations`, `rerank`
+  and `score`. Request bodies, audio uploads included, are capped at 16 MiB (413).
+- **LiteLLM health checks never start a model.** On-demand entries carry `model_info.health_check_params`
+  with an `x-dgxmm-health-check` header; the gateway answers those probes itself with an empty answer, in
+  every state, and never forwards them or counts them as activity. LiteLLM's `/health` therefore shows a
+  sleeping on-demand model as healthy; it does not prove the engine is serving.
+- **Mode in the UI and API.** A **Mode** choice with the idle minutes in the deploy wizard, a **Mode** card on
+  the deployment page (admins), `PATCH /api/deployments/{id}/mode`, and the badges *Sleeping (on demand)*,
+  *Starting for a request* and *N queued* in the deployment lists, updated live. Switching a stopped or asleep
+  deployment to always on starts it and keeps it on demand until it is ready, so its LiteLLM entry never
+  disappears. Events and audit entries with the actor `ondemand`: *Started for a request*, *Put to sleep after
+  N min idle*, *Put to sleep to make room for X*, *Queued request timed out*.
+- **On-demand gateway.** LiteLLM reaches on-demand deployments through DGXMM (`/dgxmm/ondemand/{id}/v1`) with
+  long timeouts (the queue limit plus 600 s, at least 1200 s) and no retries, set on the entries automatically
+  and updated when the limit changes. A rotated on-demand key applies without a restart. New settings
+  `ondemand_max_queued`, `ondemand_allowed_cidrs` and `dgxmm_internal_url`; see
+  [configuration](docs/configuration/index.md#on-demand-models) and [how it works](docs/architecture/ondemand.md).
+
+### Security
+
+- The gateway answers only direct connections from DGXMM's own Docker networks (never the host, the LAN, the
+  decider's network or anything with forwarding headers) and needs a generated bearer key
+  (`secrets/dgxmm_ondemand_key`, about 286 bits, mode 600). Only the inference routes and `models` reach the
+  engine; its admin endpoints stay unreachable, and requests carrying the health-check header are never
+  forwarded. Request bodies and the key are never logged. The shipped nginx example returns 404 for
+  `/dgxmm/ondemand/`. See [security](docs/security.md#on-demand-gateway).
+
+### Upgrade notes
+
+- Migration 40 adds `deployments.mode` and `idle_timeout_s` (and `pending_mode` is added automatically);
+  **every existing deployment becomes always on**, so nothing changes until you switch one. New deployments are
+  always on unless you choose on demand.
+- Run `./install.sh upgrade` (or `./install.sh`): it generates `secrets/dgxmm_ondemand_key` and mounts it into
+  the container. Without the key, on-demand deployments are not registered in LiteLLM.
+- LiteLLM must reach the `dgxmm` container directly on the Docker network. Before relying on on-demand models,
+  raise the read timeouts of reverse proxies in front of LiteLLM (nginx, Caddy) to at least LiteLLM's entry
+  timeout (queue limit plus 600 s, 1500 s by default; 30 minutes recommended) and turn off their buffering.
+  Behind LiteLLM, the 503 loses `Retry-After` and gets LiteLLM's body, and a queued stream that times out ends
+  with LiteLLM's error events and no `[DONE]` (LiteLLM's behaviour); see [troubleshooting](docs/operations/troubleshooting.md#requests-to-an-on-demand-model-fail-after-about-60-seconds).
+- Rotating the on-demand key can cause up to about a minute of 401 errors for on-demand models until LiteLLM
+  uses the re-registered entries.
+
 ## [2026-10-21] — LiteLLM model names DGXMM did not create
 
 ### Fixed

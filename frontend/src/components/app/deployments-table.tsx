@@ -12,6 +12,7 @@ import { engineLabel, fmtBytes, fmtNum, fmtPct, shortRef } from "@/format";
 import { useActionMutation } from "@/hooks/use-action-mutation";
 import { nameFixHref, takenHolder } from "@/lib/litellm";
 import { SYSTEM_REMOVE_TEXT, deploymentActions, queueShort } from "@/logic";
+import { ondemandBadge } from "@/lib/ondemand";
 import { useLive } from "@/stream";
 import type { Deployment } from "@/types";
 import { ConfirmDialog } from "./confirm-dialog";
@@ -25,6 +26,12 @@ function Live({ id, field, fmt }: { id: number; field: string; fmt: (v: any) => 
   const last = q.data?.[q.data.length - 1];
   const v = last?.[field];
   return <span className="tabular-nums">{typeof v === "number" && Number.isFinite(v) ? fmt(v) : "—"}</span>;
+}
+
+/** The state badge, or the on-demand phase in its place. */
+export function DeploymentStateBadge({ d, className }: { d: Deployment; className?: string }) {
+  const od = ondemandBadge(d);
+  return od ? <StatusBadge state={od.state} label={od.label} className={className} /> : <StatusBadge state={d.state} className={className} />;
 }
 
 type Pending = { kind: "stop" | "remove"; d: Deployment } | null;
@@ -54,14 +61,14 @@ export function DeploymentsTable({ deployments, isAdmin, loading, searchable, on
     { accessorKey: "state", header: "State", cell: ({ row }) => (
       row.original.startup_queue ? (
         <span className="flex flex-col items-start gap-0.5">
-          <Tooltip><TooltipTrigger asChild><span tabIndex={0} className="rounded-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"><StatusBadge state={row.original.state} /></span></TooltipTrigger>
+          <Tooltip><TooltipTrigger asChild><span tabIndex={0} className="rounded-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"><DeploymentStateBadge d={row.original} /></span></TooltipTrigger>
             <TooltipContent className="max-w-xs break-words">{row.original.startup_queue.reason}</TooltipContent></Tooltip>
           <span className="max-w-[22ch] truncate text-xs text-muted-foreground" title={row.original.startup_queue.reason}>{queueShort(row.original.startup_queue)}</span>
         </span>
       ) : row.original.last_error ? (
-        <Tooltip><TooltipTrigger asChild><span><StatusBadge state={row.original.state} /></span></TooltipTrigger>
+        <Tooltip><TooltipTrigger asChild><span><DeploymentStateBadge d={row.original} /></span></TooltipTrigger>
           <TooltipContent className="max-w-xs break-words">{row.original.last_error}</TooltipContent></Tooltip>
-      ) : <StatusBadge state={row.original.state} />) },
+      ) : <DeploymentStateBadge d={row.original} />) },
     { id: "memory", header: "Memory", accessorFn: (d) => d.reserved_bytes, cell: ({ row }) => (
       <span className="tabular-nums" title="Measured / Reserved">{fmtBytes(row.original.actual_bytes)} <span className="text-muted-foreground">/ {fmtBytes(row.original.reserved_bytes)}</span></span>) },
     { id: "tps", header: "Tok/s", enableSorting: false, cell: ({ row }) => <Live id={row.original.id} field="gen_tps" fmt={(v) => fmtNum(v, 1)} /> },

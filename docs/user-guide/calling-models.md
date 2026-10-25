@@ -30,6 +30,9 @@ Each deployment is registered once, under its model name: the **Model name (Lite
 the served name. A stable model name makes model changes invisible to clients: deploy with model name
 `default-chat`, and use **Switch model…** later. The name moves to the new deployment once it is ready.
 
+An [on-demand](on-demand.md) model that is asleep is started by the request: the first answer can take a
+few minutes, so give your client a long timeout (for example `OpenAI(..., timeout=1200)`).
+
 **Directly** (advanced): each engine also serves the same API under its served model name, without
 keys, budgets or rate limits. The engines have no authentication, which is why their ports are only
 published on the host's loopback interface.
@@ -38,7 +41,8 @@ published on the host's loopback interface.
   `curl http://127.0.0.1:8100/v1/chat/completions -H 'Content-Type: application/json' -d '{"model": "qwen3-0.6b", "messages": [{"role": "user", "content": "Hello!"}]}'`.
 - From another container on the DGXMM Docker network, use `http://dgxmm-<deployment name>:<port>/v1`.
 
-Both are listed under **Direct engine endpoints (advanced)** on the Overview tab.
+Both are listed under **Direct engine endpoints (advanced)** on the Overview tab. Direct calls never start an
+on-demand model that is asleep; while one is being answered, it keeps the model from being put to sleep.
 
 ## Next steps
 

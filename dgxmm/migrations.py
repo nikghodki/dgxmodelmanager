@@ -163,6 +163,21 @@ def _deployment_ids_never_reused(conn: sqlite3.Connection) -> None:
         conn.execute("UPDATE sqlite_sequence SET seq = ? WHERE name = 'deployments'", (seq,))
 
 
+def _ondemand_mode(conn: sqlite3.Connection) -> None:
+    """Version 40: deployments get a mode (on_demand | always_on) and an optional idle timeout. ``add_missing_columns``
+    normally adds the columns first; they are added here too when missing. Existing deployments become
+    ``always_on``, so nothing changes for them until an admin switches them; new ones are ``always_on`` unless
+    the request asks for ``on_demand`` (DeployRequest)."""
+    if not _table_exists(conn, "deployments"):
+        return
+    cols = {r[1] for r in conn.execute('PRAGMA table_info("deployments")')}
+    if "mode" not in cols:
+        conn.execute('ALTER TABLE deployments ADD COLUMN "mode" VARCHAR(16)')
+    if "idle_timeout_s" not in cols:
+        conn.execute('ALTER TABLE deployments ADD COLUMN "idle_timeout_s" INTEGER')
+    conn.execute("UPDATE deployments SET mode = 'always_on' WHERE mode IS NULL")
+
+
 # Version numbers reserved for the parallel feature lanes of the advanced decision-model features, so their
 # branches merge without renumbering: 4-9 deploy-time features, 10-19 operations features, 20-29 schedules/commands;
 # fixes after them from 30 on.
@@ -172,6 +187,7 @@ MIGRATIONS: list[Migration] = [
     Migration(3, "insights: one live insight per dedupe_key", _insights_live_dedupe),
     Migration(20, "traffic_profiles: unique (deployment_id, hour_of_week)", _traffic_profiles_unique_hour),
     Migration(30, "deployments: ids are never reused (AUTOINCREMENT)", _deployment_ids_never_reused, rebuilds=True),
+    Migration(40, "deployments: on-demand mode", _ondemand_mode),
 ]
 LATEST = max(m.version for m in MIGRATIONS)
 

@@ -113,7 +113,7 @@ these routes, so this is also the API for scripts.
 | Auth | `POST /auth/login`, `POST /auth/logout`, `GET /auth/me`, `POST /auth/change-password` | login: none; others: user |
 | Host | `GET /host` (budget, GPU, disk), `GET /host/processes?scope=all\|external\|managed&limit=50` | user |
 | Deployments | `GET /deployments`, `GET /deployments/{id}`, `GET /deployments/{id}/litellm` | user |
-| | `POST /deployments/preview`, `POST /deployments`, `PATCH /deployments/{id}` (`{"alias": …, "rewrite_keys": true}`), `POST /deployments/{id}/start\|stop\|sleep\|wake\|switch\|reconfigure`, `DELETE /deployments/{id}`, `GET /deployments/{id}/logs` | admin |
+| | `POST /deployments/preview`, `POST /deployments` (with `mode` and `idle_timeout_s`), `PATCH /deployments/{id}` (`{"alias": …, "rewrite_keys": true}`), `PATCH /deployments/{id}/mode` (`{"mode": "on_demand"\|"always_on", "idle_timeout_s": …}`), `POST /deployments/{id}/start\|stop\|sleep\|wake\|switch\|reconfigure`, `DELETE /deployments/{id}`, `GET /deployments/{id}/logs` | admin |
 | Metrics and advice | `GET /deployments/{id}/metrics`, `GET /host/metrics`, `GET /deployments/{id}/advice`, `GET /deployments/{id}/benchmarks` | user |
 | | `POST /deployments/{id}/benchmark` | admin |
 | Inventory | `GET /inventory` | user |
@@ -138,6 +138,12 @@ these routes, so this is also the API for scripts.
 | Commands | `POST /decider/command` (`{"text": …}`, ≤ 300 characters; viewers get navigation only) | user |
 | | `GET /decider/free-plans?gib=`, `POST /decider/free-memory` | admin |
 | Events | `GET /stream` (server-sent events) | user |
+
+The [on-demand gateway](ondemand.md#gateway) (`/dgxmm/ondemand/{id}/v1/…`) is not part of this API: it
+takes no session, only LiteLLM's bearer key from the Docker network, and answers OpenAI-style errors.
+`GET /host` also returns the global on-demand defaults (`ondemand: {idle_timeout_s, queue_timeout_s}`), and
+deployment views carry `mode`, `idle_timeout_s` and `ondemand` (`inflight`, `queued`, `last_request_at`,
+`phase`; `null` for always-on deployments).
 
 Errors are JSON, `{"detail": {"code": …, "message": …}}`, with a stable `code` (for example
 `model_name_taken`, `model_in_use`, `insufficient_memory`, `litellm_no_db`, `image_missing`,

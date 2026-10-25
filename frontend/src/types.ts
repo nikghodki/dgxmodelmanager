@@ -22,7 +22,15 @@ export interface ProcessesResponse {
   host: { rss: number; gpu: number; process_count: number }; duration_ms: number;
 }
 export interface Alert { level: "ok" | "warning" | "critical"; message?: string; since?: string; action?: string }
-export interface HostInfo { budget: Budget; external_top: ProcMem[]; gpu: Record<string, number | null>; alert: Alert; disk: { total: number; free: number } | null }
+export interface HostInfo {
+  budget: Budget; external_top: ProcMem[]; gpu: Record<string, number | null>; alert: Alert; disk: { total: number; free: number } | null;
+  /** Global on-demand defaults (seconds): a deployment's idle_timeout_s null means this idle timeout. */
+  ondemand?: {
+    idle_timeout_s: number; queue_timeout_s: number;
+    /** The LiteLLM integration is on and its last sync succeeded: requests through it can start on-demand models. */
+    litellm_ready?: boolean;
+  };
+}
 export interface Artifact {
   ref: string; source: "hf" | "gguf"; revision: string | null; format: string; weights_bytes: number; size_bytes: number;
   complete: boolean; kind: "llm" | "draft" | "embedding" | "reranker" | "vision-llm" | "speech" | "decision" | "other"; architecture: string | null; quant: string | null; problems: string[];
@@ -87,6 +95,18 @@ export interface Deployment {
   system?: boolean;
   /** Set while it waits for a start-up slot (state "queued", or a wake-up waiting): at most N engines start at once. */
   startup_queue?: StartupQueue | null;
+  /** on_demand: started by the first request, put to sleep after idle_timeout_s (null = the DGXMM default). */
+  mode?: DeploymentMode;
+  idle_timeout_s?: number | null;
+  /** "always_on" while a switch to always on waits for the deployment to be ready (it is on demand until then). */
+  pending_mode?: DeploymentMode | null;
+  /** On-demand controller status (on-demand deployments only). */
+  ondemand?: OnDemandStatus | null;
+}
+export type DeploymentMode = "on_demand" | "always_on";
+export interface OnDemandStatus {
+  inflight: number; queued: number; last_request_at: number | null;
+  phase: "queued" | "starting_for_request" | "serving" | "sleeping" | "idle" | "failed";
 }
 export interface StartupQueue {
   position: number | null; waiting_for: string[]; reason: string; kind: "launch" | "wake"; since: number; limit: number;

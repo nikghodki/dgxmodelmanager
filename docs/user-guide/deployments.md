@@ -16,7 +16,7 @@ Header actions depend on the state (admins only):
 | **Reconfigure** | ready, sleeping, stopped, failed | Change the configuration with a live memory check. Applying it restarts the deployment. If the new configuration does not come up, the old one is restored. |
 | **Logs** | any | The last lines of the engine container log. |
 | **Switch model…** (`⋯` menu) | ready or sleeping | Replace this deployment with another model. DGXMM sleeps or stops this one as needed, moves the LiteLLM model name, and rolls back if the new model does not become ready. |
-| **Stop** (`⋯`) | running and queued states | Stops and removes the engine container (a queued deployment just leaves the queue). The deployment and its settings are kept. |
+| **Stop** (`⋯`) | running and queued states | Stops and removes the engine container (a queued deployment just leaves the queue). The deployment and its settings are kept. An [on-demand](on-demand.md) deployment is started again by its next request. |
 | **Remove** (`⋯`) | stopped or failed | Deletes the deployment record. |
 
 Stop and Remove ask for confirmation. **Start** and **Wake** are refused when another running
@@ -28,7 +28,9 @@ Tabs:
 - **Overview**: for a failed deployment, a **Diagnosis** card first (see
   [failure diagnosis](decision-model.md#failure-diagnosis)); then the **Insights** card with the open
   [insights](insights.md) about this deployment (when there are any), the **Schedules** card (see
-  [schedules](schedules.md)), the **API access** card, memory (reserved, measured, estimate parts and
+  [schedules](schedules.md)), the **Mode** card (*On demand* or *Always on* and the idle minutes; admins
+  change them with **Save mode**, see [on-demand models](on-demand.md#choosing-and-changing-the-mode)),
+  the **API access** card, memory (reserved, measured, estimate parts and
   confidence), and the full configuration. API access shows how clients call this deployment: the single LiteLLM
   **Endpoint** (`…/v1`) and the **Model** name, each with a copy button, the LiteLLM status, and
   ready-to-copy `curl` and Python (OpenAI SDK) snippets that read the key from `LITELLM_API_KEY`. A
@@ -65,6 +67,7 @@ Tabs:
 
 ## Next steps
 
+- [On-demand models](on-demand.md)
 - [Insights](insights.md)
 - [Schedules](schedules.md)
 - [Calling your models](calling-models.md)

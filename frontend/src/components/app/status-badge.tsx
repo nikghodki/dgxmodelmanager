@@ -10,7 +10,8 @@ const STYLES: Record<StatusKind, string> = {
   neutral: "bg-status-neutral-bg text-status-neutral",
 };
 
-export function StatusBadge({ state, className }: { state: string; className?: string }) {
+/** `label` overrides the state's text, keeping its colour and icon (e.g. on-demand phases). */
+export function StatusBadge({ state, label, className }: { state: string; label?: string; className?: string }) {
   const s = statusInfo(state);
   const Icon = s.kind === "good" ? CheckCircle2 : s.kind === "critical" ? XCircle : s.kind === "sleeping" ? Moon
     : s.kind === "warning" ? (s.spin ? Loader2 : AlertTriangle) : Circle;
@@ -18,7 +19,7 @@ export function StatusBadge({ state, className }: { state: string; className?: s
     <span data-status={s.kind}
       className={cn("inline-flex items-center gap-1 whitespace-nowrap rounded-full px-2 py-0.5 text-xs font-medium", STYLES[s.kind], className)}>
       <Icon aria-hidden className={cn("h-3 w-3", s.spin && "animate-spin")} />
-      {s.label}
+      {label ?? s.label}
     </span>
   );
 }

@@ -164,6 +164,125 @@ The status and the insight clear by themselves at the next sync (within a minute
 names are unique. A deployment that was not registered yet when the clash appeared stays unregistered until
 then, so no second entry is ever added.
 
+## Requests to an on-demand model fail after about 60 seconds
+
+A request for a stopped [on-demand model](../user-guide/on-demand.md) waits while the model starts (1 to 3
+minutes for a large model) and, when memory is short, up to 15 minutes in the queue. A request that fails
+after a round number of seconds (60 s is nginx's default) was cut off by a proxy between the client and
+DGXMM, not by DGXMM. Every hop must allow a response that starts late and then streams, with a read
+timeout of at least LiteLLM's entry timeout (`ondemand_queue_timeout_s` plus 600 s, at least 1200 s:
+1500 s by default). **1800 s (30 minutes)** covers the default with a margin:
+
+- **LiteLLM**: nothing to do. DGXMM registers on-demand entries with `num_retries: 0` and `timeout` and
+  `stream_timeout` of `ondemand_queue_timeout_s` plus 600 s, at least 1200 s (1500 s by default), and
+  re-registers them when the setting changes.
+- **nginx in front of LiteLLM** (the `/v1/` location; not the `/dgxmm/` one):
+
+  ```nginx
+  location /v1/ {
+      proxy_pass http://litellm-proxy:4000;
+      proxy_http_version 1.1;
+      proxy_read_timeout 1800s;
+      proxy_send_timeout 1800s;
+      proxy_buffering off;
+  }
+  ```
+
+  `proxy_buffering off` lets the queued notice and the streamed tokens through as they are produced.
+- **Caddy** (for example an edge proxy on another host):
+
+  ```caddy
+  llm.example.com {
+      reverse_proxy 127.0.0.1:4000 {
+          transport http {
+              read_timeout 30m
+          }
+          flush_interval -1
+      }
+  }
+  ```
+
+- **Clients**: SDKs have their own timeouts (the OpenAI Python SDK waits 10 minutes by default). Pass a
+  longer one, for example `OpenAI(..., timeout=1200)`, or use `"stream": true`, which also shows the
+  queued notice.
+
+Reload the proxy after the change. The 1800 s above is more than LiteLLM's 1500 s entry timeout for the
+default 15-minute queue limit, so LiteLLM, not the proxy, ends a request that waited too long. A proxy
+timeout below the entry timeout (for example nginx at 1200 s) cuts off requests LiteLLM would still have
+answered. If you lower `ondemand_queue_timeout_s`, requests give up sooner; if you raise it, raise these
+proxy and client timeouts to at least the new value plus 600 s too (LiteLLM follows automatically).
+
+### What the errors look like through LiteLLM
+
+The gateway's errors are described in the [user guide](../user-guide/on-demand.md#what-callers-see).
+LiteLLM, not DGXMM, changes them on their way to the client:
+
+- **The 503 loses `Retry-After`**, and its body is LiteLLM's own: the status stays 503 for a
+  non-streaming request, but the body reads
+  `{"error": {"message": "litellm.ServiceUnavailableError: … model <model> is busy; try again later …",
+  "type": null, "param": null, "code": "503"}}`. Clients should back off on the 503 itself.
+- **A queued stream that times out** after its queued notice ends with LiteLLM's error events
+  (`litellm.APIConnectionError … is busy; try again later`, code `"500"`, possibly twice) and **no**
+  `data: [DONE]`. The gateway itself sends one error event and `[DONE]`; LiteLLM replaces them.
+
+## On-demand models fail with `ondemand_not_configured`
+
+The on-demand gateway has no key: `secrets/dgxmm_ondemand_key` is missing or empty (`./install.sh status`
+lists it). The gateway answers every request 503 `ondemand_not_configured` and logs "on-demand gateway
+refuses every request" once; on-demand deployments are not registered in LiteLLM and show the LiteLLM
+status `error` with the same code. Run `./install.sh` (or `./install.sh upgrade`), which generates the key
+and recreates the container with it mounted. DGXMM picks the key up without a further restart, and the next
+sync registers the deployments.
+
+## On-demand requests get 404 or 401 from DGXMM
+
+LiteLLM's error then names the gateway's answer.
+
+- **404 `not_found`** for every request: the request did not come straight from a container on one of
+  DGXMM's Docker networks. LiteLLM must be attached to DGXMM's network
+  (`docker network connect <DGXMM_NETWORK> <litellm container>`), and
+  [`dgxmm_internal_url`](../configuration/index.md#on-demand-models) must point at the DGXMM container
+  directly (default `http://dgxmm:8090/dgxmm`), not through nginx or another proxy, whose forwarding
+  headers make the gateway refuse the request. A LiteLLM running on the host itself, outside Docker, is
+  not supported for on-demand models. After attaching a network, allow up to 30 s for DGXMM to notice it.
+- **401 `invalid_api_key`**: the key on the LiteLLM entry differs from the one in
+  `secrets/dgxmm_ondemand_key`. Right after a [key rotation](../configuration/index.md#secrets) this can
+  last up to about a minute, until LiteLLM uses the entries the gateway's sync re-registered; requests
+  with the previous key do not count towards the 429 limit below. If it
+  persists, check the deployment's LiteLLM tab for a sync error, and whether the file was replaced by an
+  editor instead of written in place (the container then still sees the old file; run
+  `docker restart dgxmm`). Twenty failed attempts from one address in a
+  minute get 429 `rate_limited` for the rest of that minute.
+
+## An on-demand model never goes to sleep
+
+It is stopped only when nothing is in flight, its last request ended at least its idle timeout ago, and
+its engine's metrics show no running or waiting requests. Check:
+
+- **Traffic**: the deployment's **Performance** tab. Steady requests, even a few a minute, restart the idle
+  timer each time. Raise or lower the idle minutes on the deployment's **Mode** card.
+- **Calls that bypass LiteLLM**: clients calling the engine port directly (`http://dgxmm-<name>:<port>/v1`
+  or the published host port) are not seen by the gateway, but they show up in the engine's metrics and
+  keep it awake. Point them at LiteLLM.
+- **A stuck engine queue**: the engine reporting running or waiting requests that never finish keeps it
+  awake too. Its metrics show it; restarting the deployment clears it.
+- **The mode**: the Mode card must say *On demand*. Deployments from before the upgrade are always on.
+
+The deployment's Events tab shows *Put to sleep after N min idle* each time it is stopped.
+
+## A request waits 15 minutes and then fails with `ondemand_queue_timeout`
+
+The model did not fit, and the memory it needs was held the whole time by models that were busy or used
+within their idle timeout, or by always-on deployments. The dashboard and the deployments list show
+**N queued** on the waiting model. Options: lower the idle minutes of the other on-demand models, switch
+an always-on deployment you rarely use to on demand, or make the model smaller (a shorter context or an
+fp8 KV cache).
+
+A request that can never fit is normally refused at once with `does_not_fit`. That check counts only
+DGXMM's own deployments, not memory used by other processes on the host (**External** on the dashboard),
+so when other programs hold a lot of memory, a request that cannot fit waits for the full 15 minutes
+before it fails (see [known limitations](known-limitations.md)).
+
 ## Clients cannot call a served name any more after an upgrade
 
 Older versions registered an aliased deployment under both its served name and its alias. Now each

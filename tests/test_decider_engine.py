@@ -141,7 +141,7 @@ async def test_deploy_marks_system_and_view_shows_it(d3):
     d3.http.healthy.add(dep["port"])
     assert await d3.deployer.wait_ready(dep["id"], 5) == "ready"
     assert d3.http.systemone_auth[-1] == f"Bearer {d3.settings.decider_key_path.read_text()}"
-    other = await d3.deployer.deploy(DeployRequest(name="tiny", engine="vllm", model_ref="Qwen/Qwen3-Tiny",
+    other = await d3.deployer.deploy(DeployRequest(mode="always_on", name="tiny", engine="vllm", model_ref="Qwen/Qwen3-Tiny",
                                                    config=SMALL), 1)
     assert other["system"] is False
 
@@ -161,7 +161,7 @@ async def test_decider_does_not_hold_a_litellm_model_name(d3):
 async def test_system_deployment_never_a_plan_candidate(d3):
     d3.http.all_healthy = True
     dec = await deploy_decider(d3)
-    tiny = await d3.deployer.deploy(DeployRequest(name="tiny", engine="vllm", model_ref="Qwen/Qwen3-Tiny",
+    tiny = await d3.deployer.deploy(DeployRequest(mode="always_on", name="tiny", engine="vllm", model_ref="Qwen/Qwen3-Tiny",
                                                   config={**SMALL, "enable_sleep_mode": True}), 1)
     for d in (dec, tiny):
         assert await d3.deployer.wait_ready(d["id"], 5) == "ready"
@@ -196,7 +196,7 @@ async def test_litellm_never_registers_the_decider(d3):
     from tests.fakes import FakeLiteLLM
     d3.http.all_healthy = True
     dec = await deploy_decider(d3)
-    tiny = await d3.deployer.deploy(DeployRequest(name="tiny", engine="vllm", model_ref="Qwen/Qwen3-Tiny",
+    tiny = await d3.deployer.deploy(DeployRequest(mode="always_on", name="tiny", engine="vllm", model_ref="Qwen/Qwen3-Tiny",
                                                   config=SMALL), 1)
     for d in (dec, tiny):
         await d3.deployer.wait_ready(d["id"], 5)

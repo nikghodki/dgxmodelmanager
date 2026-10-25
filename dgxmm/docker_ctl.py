@@ -348,6 +348,36 @@ class DockerController:
         cfg = ((net.attrs or {}).get("IPAM") or {}).get("Config") or []
         return [c["Subnet"] for c in cfg if isinstance(c, dict) and c.get("Subnet")]
 
+    def own_networks(self) -> list[dict]:
+        """The docker networks DGXMM's own container is attached to: ``[{"name", "subnets", "gateways"}]`` (IPAM
+        subnets, or the container's own address/prefix when the network cannot be inspected). [] on the host."""
+        me = self.own_container_id()
+        if not me:
+            return []
+        try:
+            c = self.client.containers.get(me)
+        except docker.errors.NotFound:
+            return []
+        nets = ((c.attrs or {}).get("NetworkSettings") or {}).get("Networks") or {}
+        out = []
+        for name, info in nets.items():
+            info = info or {}
+            gateways = [g for g in (info.get("Gateway"), info.get("IPv6Gateway")) if g]
+            subnets: list[str] = []
+            try:
+                cfg = ((self.client.networks.get(name).attrs or {}).get("IPAM") or {}).get("Config") or []
+            except docker.errors.NotFound:
+                cfg = []
+            for entry in cfg:
+                if isinstance(entry, dict) and entry.get("Subnet"):
+                    subnets.append(entry["Subnet"])
+                    if entry.get("Gateway") and entry["Gateway"] not in gateways:
+                        gateways.append(entry["Gateway"])
+            if not subnets and info.get("IPAddress") and info.get("IPPrefixLen"):
+                subnets.append(f"{info['IPAddress']}/{info['IPPrefixLen']}")
+            out.append({"name": name, "subnets": subnets, "gateways": gateways})
+        return out
+
     def attach_self(self, name: str) -> bool:
         """Startup: join the decider network if it exists (never creates it). True if attached."""
         if not name:

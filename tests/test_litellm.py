@@ -14,7 +14,7 @@ def make(stack, fake):
 
 async def ready(stack, name, alias=None):
     stack.http.all_healthy = True
-    d = await stack.deployer.deploy(DeployRequest(name=name, engine="vllm", model_ref="Qwen/Qwen3-Tiny",
+    d = await stack.deployer.deploy(DeployRequest(mode="always_on", name=name, engine="vllm", model_ref="Qwen/Qwen3-Tiny",
                                                   config=SMALL, alias=alias), 1)
     await stack.deployer.wait_ready(d["id"], 5)
     return d

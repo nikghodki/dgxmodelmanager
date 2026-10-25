@@ -56,6 +56,8 @@ class AppContext:
     readings: Any = None   # ReadingService (dgxmm/decider/reading.py; job reading_labels)
     routing: Any = None    # RoutingService (dgxmm/decider/routing.py; job routing_advice)
     schedules: Any = None  # ScheduleService (dgxmm/decider/schedule.py): sleep/wake schedules, profiles, proposals
+    ondemand: Any = None   # OnDemandController (dgxmm/ondemand/controller.py); always constructed
+    ondemand_peers: Any = None  # PeerPolicy (dgxmm/ondemand/gateway.py): who may call the gateway; None = nobody
 
     def __post_init__(self) -> None:
         if self.settings_store is None:
@@ -78,6 +80,13 @@ class AppContext:
         if self.insight_engine is None:
             from dgxmm.decider.insight_engine import InsightEngine
             self.insight_engine = InsightEngine(self)
+        if self.ondemand is None:
+            from dgxmm.ondemand.controller import OnDemandController
+            self.ondemand = OnDemandController(self)
+        if self.deployer is not None and hasattr(self.deployer, "ondemand_status"):
+            self.deployer.ondemand_status = self.ondemand.status  # the "ondemand" field of deployment views
+        if self.deployer is not None:
+            self.ondemand.attach(self.deployer)  # state hook (starts ending, wake-ups) + removal hook
         if self.decider_image is None:
             from dgxmm.decider.image import DeciderImage
             self.decider_image = DeciderImage(self.settings, lambda: self.docker, self.events)
@@ -153,6 +162,7 @@ def build_context(settings: Settings) -> AppContext:
                     settings.litellm_key_file)
     litellm = LiteLLMSync(LiteLLMClient(http, ctx.settings_store.litellm), deployer, db, events, insights=ctx.insights)
     deployer.state_hooks.append(litellm.on_state)
+    deployer.removal_hooks.append(litellm.on_removed)
     ctx.litellm = litellm
     ctx.background.append(litellm.run)
 
@@ -233,6 +243,17 @@ def build_context(settings: Settings) -> AppContext:
                 await asyncio.to_thread(docker.network_subnets, settings.decider_network))
         except Exception:
             log.debug("could not read the decider network's subnets", exc_info=True)
+        await refresh_ondemand_peers()
+
+    async def refresh_ondemand_peers():
+        # the on-demand gateway serves only peers on DGXMM's own docker networks (dgxmm/ondemand/gateway.py). The
+        # attached networks are read whatever ondemand_allowed_cidrs says: an explicit list is still cut by their
+        # gateway / first-host addresses (docker-proxy, hairpin NAT) and the decider's network.
+        from dgxmm.ondemand.gateway import peer_policy
+        try:
+            ctx.ondemand_peers = peer_policy(settings, await asyncio.to_thread(docker.own_networks))
+        except Exception:
+            log.debug("could not read DGXMM's docker networks for the on-demand gateway", exc_info=True)
 
     async def _untrusted_proxies_loop():
         # the decider's network is never a proxy (dgxmm/proxy_headers.py); it is created at the first decider start
@@ -257,5 +278,6 @@ def build_context(settings: Settings) -> AppContext:
     async def _decider_rotation():
         await rotation.watch(ctx)  # admin CLI rotate-decider-key requests
 
-    ctx.background += [_budget_loop, _inventory_loop, _containers_loop, _decider_rotation, _untrusted_proxies_loop]
+    ctx.background += [_budget_loop, _inventory_loop, _containers_loop, _decider_rotation, _untrusted_proxies_loop,
+                       ctx.ondemand.run]  # the on-demand idle reaper
     return ctx

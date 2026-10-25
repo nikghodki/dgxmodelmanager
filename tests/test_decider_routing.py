@@ -190,7 +190,7 @@ async def test_job_on_the_stack_never_touches_litellm_and_is_triggered_by_state_
     wire_features(ctx)
     job = next(j for j in ctx.insight_engine.status() if j["name"] == rt.JOB)
     assert job["schedule"] == "daily 05:15" and job["feature"] == "routing" and job["budget_calls"] == rt.BUDGET_CALLS
-    d = await stack.deployer.deploy(DeployRequest(name="r", engine="vllm", model_ref="Qwen/Qwen3-Tiny",
+    d = await stack.deployer.deploy(DeployRequest(mode="always_on", name="r", engine="vllm", model_ref="Qwen/Qwen3-Tiny",
                                                   config={"max_model_len": 4096, "max_num_seqs": 32}), 1)
     stack.http.healthy.add(d["port"])
     assert await stack.deployer.wait_ready(d["id"], 5) == "ready"
@@ -257,7 +257,7 @@ async def test_advice_is_refreshed_after_litellm_registers_a_new_deployment(stac
     now = [utcnow()]
     ctx.insight_engine = InsightEngine(ctx, tz=timezone.utc, clock=lambda: now[0])
     wire_features(ctx)
-    d = await stack.deployer.deploy(DeployRequest(name="r", engine="vllm", model_ref="Qwen/Qwen3-Tiny",
+    d = await stack.deployer.deploy(DeployRequest(mode="always_on", name="r", engine="vllm", model_ref="Qwen/Qwen3-Tiny",
                                                   config={"max_model_len": 4096, "max_num_seqs": 32}), 1)
     stack.http.healthy.add(d["port"])
     assert await stack.deployer.wait_ready(d["id"], 5) == "ready"
@@ -302,7 +302,7 @@ async def test_a_storm_of_deployment_and_registration_changes_runs_the_advice_on
     stack.http.all_healthy = True
     ids = []
     for i in range(6):
-        d = await stack.deployer.deploy(DeployRequest(name=f"r{i}", engine="vllm", model_ref="Qwen/Qwen3-Tiny",
+        d = await stack.deployer.deploy(DeployRequest(mode="always_on", name=f"r{i}", engine="vllm", model_ref="Qwen/Qwen3-Tiny",
                                                       config={"max_model_len": 4096, "max_num_seqs": 32},
                                                       alias=f"m{i}"), 1)
         assert await stack.deployer.wait_ready(d["id"], 5) == "ready"

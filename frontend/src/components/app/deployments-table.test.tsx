@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter } from "react-router-dom";
@@ -134,5 +134,34 @@ describe("DeploymentsTable", () => {
     expect(screen.getByText(/Waiting for decider/)).toBeInTheDocument();
     await userEvent.hover(screen.getByText("Queued"));
     expect((await screen.findAllByText(/one engine starts at a time/)).length).toBeGreaterThan(0);
+  });
+
+  it.each([
+    ["sleeping", "stopped", 0, "Sleeping (on demand)"],
+    ["starting_for_request", "loading", 0, "Starting for a request"],
+    ["serving", "ready", 0, "Ready"],
+    ["idle", "ready", 0, "Ready"],
+    ["queued", "stopped", 3, "3 queued"],
+  ])("shows the on-demand phase %s as its badge", (phase, state, queued, text) => {
+    renderRow({ state, litellm_status: "synced", mode: "on_demand", idle_timeout_s: null,
+      ondemand: { inflight: 0, queued, last_request_at: null, phase } });
+    const row = screen.getByText("dup").closest("tr")!;
+    expect(within(row).getByText(text)).toBeInTheDocument();
+    if (state === "stopped") expect(within(row).queryByText("Stopped")).toBeNull();
+  });
+
+  it.each(["failed", "sleeping"])("shows the normal Failed badge for a failed on-demand deployment (phase %s), never Sleeping", (phase) => {
+    renderRow({ state: "failed", litellm_status: "none", mode: "on_demand", idle_timeout_s: null,
+      ondemand: { inflight: 0, queued: 0, last_request_at: null, phase } });
+    const row = screen.getByText("dup").closest("tr")!;
+    expect(within(row).getByText("Failed")).toBeInTheDocument();
+    expect(within(row).queryByText(/Sleeping/)).toBeNull();
+  });
+
+  it("keeps the plain state badge for always-on deployments", () => {
+    renderRow({ state: "stopped", litellm_status: "none", mode: "always_on", idle_timeout_s: null, ondemand: null });
+    const row = screen.getByText("dup").closest("tr")!;
+    expect(within(row).getByText("Stopped")).toBeInTheDocument();
+    expect(within(row).queryByText(/on demand/)).toBeNull();
   });
 });

@@ -8,7 +8,12 @@ from dgxmm.db import AuditLog
 from dgxmm.litellm import LiteLLMClient, LiteLLMSync
 from tests.fakes import FakeLiteLLM
 from tests.test_api_deployments import admin
-from tests.test_api_switch import deploy, wait
+from tests.test_api_switch import deploy as _deploy, wait
+
+
+def deploy(c, h, name, **extra):
+    """These tests are about always-on registration (on-demand ones: tests/test_litellm_ondemand.py)."""
+    return _deploy(c, h, name, **{"mode": "always_on", **extra})
 
 MASTER = "sk-master-TOPSECRET-4242"
 BASE = "/dgxmm/api/integrations/litellm"

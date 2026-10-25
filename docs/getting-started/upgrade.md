@@ -67,6 +67,14 @@ What changes when an older install is upgraded with `./install.sh upgrade` (see 
 [changelog](../changelog.md) for each release). Nothing needs to be done by hand unless a point below
 applies to you.
 
+- **On-demand models (unreleased).** Migration 40 adds `deployments.mode` and `idle_timeout_s` at the
+  first start; every existing deployment becomes *always on*, so nothing changes until you switch one.
+  New deployments are always on unless you pick on demand (the deploy wizard preselects it when LiteLLM
+  is enabled and synced; the API needs `"mode": "on_demand"`). `./install.sh upgrade` generates `secrets/dgxmm_ondemand_key` and
+  mounts it into the container. If LiteLLM reaches DGXMM through a reverse proxy rather than on the Docker
+  network, or proxies in front of LiteLLM have short read timeouts, read
+  [on-demand troubleshooting](../operations/troubleshooting.md#requests-to-an-on-demand-model-fail-after-about-60-seconds)
+  before you switch a deployment to on demand.
 - **GPU memory attribution (2026-10-21).** `docker-compose.yaml` now runs the DGXMM container with
   `pid: host`; `./install.sh upgrade` recreates it and adds `DGXMM_HOST_PID=1` to `.env` (set `0` there
   and re-run to opt out). Afterwards a ready deployment's **Measured** memory

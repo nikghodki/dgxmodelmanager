@@ -1,5 +1,9 @@
-"""LiteLLM integration: keep LiteLLM's DB-backed model list in sync with ready deployments (one entry per
+"""LiteLLM integration: keep LiteLLM's DB-backed model list in sync with the deployments (one entry per
 deployment, under its model name = alias or served name) and proxy the admin API (models, virtual keys).
+
+Always-on deployments are registered while ready, pointing at the engine container. On-demand deployments are
+registered in every state except failed, pointing at DGXMM's gateway (dgxmm/ondemand/gateway.py), which starts the
+engine on the first request; their entry carries the on-demand key, which is never logged, returned or published.
 
 The URL and master key are resolved at call time from the runtime settings store, so changes made in the UI
 apply without a restart. The master key is never logged, returned or put into error messages.
@@ -7,6 +11,7 @@ apply without a restart. The master key is never logged, returned or put into er
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import re
@@ -18,7 +23,9 @@ from urllib.parse import urlsplit
 import httpx
 from sqlalchemy import select
 
+from dgxmm.config import load_ondemand_key
 from dgxmm.db import Database, Deployment
+from dgxmm.ondemand import HEALTH_HEADER
 from dgxmm.settings_store import LiteLLMConfig
 
 log = logging.getLogger(__name__)
@@ -32,6 +39,61 @@ _HEX_RE = re.compile(r"\b[0-9a-fA-F]{40,}\b")
 NOT_CONFIGURED_MESSAGE = "no LiteLLM master key is set; add one in the LiteLLM settings or the secret file"
 UNRESTRICTED = "all-proxy-models"
 _HOST_RE = re.compile(r"[^A-Za-z0-9._\-]")
+# on-demand entries' timeout/stream_timeout: a request may wait ondemand_queue_timeout_s for memory plus the start-up
+ONDEMAND_MIN_TIMEOUT_S = 1200
+ONDEMAND_START_MARGIN_S = 600
+ONDEMAND_NOT_CONFIGURED = "ondemand_not_configured"
+
+
+def ondemand_params(settings) -> dict:
+    """litellm_params of on-demand entries: LiteLLM must not give up before the gateway's queue limit plus a start
+    (max(ONDEMAND_MIN_TIMEOUT_S, ondemand_queue_timeout_s + ONDEMAND_START_MARGIN_S)), and must neither retry nor fail
+    over a held request."""
+    t = max(ONDEMAND_MIN_TIMEOUT_S, settings.ondemand_queue_timeout_s + ONDEMAND_START_MARGIN_S)
+    return {"timeout": t, "stream_timeout": t, "num_retries": 0}
+
+
+def ondemand_info() -> dict:
+    """Extra model_info of on-demand entries. LiteLLM's health checks (``/health``, background checks) send a real
+    completion; ``health_check_params`` is merged into that probe only, so it carries HEALTH_HEADER and the gateway
+    answers it without waking the model (dgxmm/ondemand/gateway.py)."""
+    return {"health_check_params": {"extra_headers": {HEALTH_HEADER: "1"}}}
+
+
+def params_fingerprint(params: dict, info: dict | None = None) -> str:
+    """Fingerprint of an entry's extra litellm_params and model_info (model_info.dgxmm_params_fp): a sync replaces an
+    on-demand entry whose timeouts or health-check settings no longer match, and leaves it alone otherwise."""
+    payload = {**params, "model_info": info} if info else params
+    return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()[:12]
+
+
+def _params_match(fp: str | None, litellm_params: dict, params: dict | None, info: dict | None = None,
+                  model_info: dict | None = None) -> bool:
+    if not params:
+        return True
+    if fp is not None:
+        return fp == params_fingerprint(params, info)
+    if any((model_info or {}).get(k) != v for k, v in (info or {}).items()):
+        return False
+    try:  # registered before params fingerprints: compare what /model/info shows
+        return all(litellm_params.get(k) is not None and float(litellm_params[k]) == float(v)
+                   for k, v in params.items())
+    except (TypeError, ValueError):
+        return False
+
+
+def key_fingerprint(api_key: str) -> str:
+    """Non-reversible fingerprint of an entry's api_key (model_info.dgxmm_key_fp): LiteLLM's /model/info does not
+    return the key, so this is how a sync notices that the on-demand key was rotated."""
+    return hashlib.sha256(api_key.encode()).hexdigest()[:12]
+
+
+def registers(state: str, mode: str | None, system: bool) -> bool:
+    """Should a deployment in ``state`` have a LiteLLM entry? Always-on (or unset mode): while ready. On-demand:
+    in every state except failed (the gateway wakes it). System deployments: never."""
+    if system:
+        return False
+    return state == "ready" or (mode == "on_demand" and state != "failed")
 
 
 class LiteLLMError(Exception):
@@ -192,12 +254,27 @@ class LiteLLMClient:
     async def list_dgxmm(self, *, cfg: LiteLLMConfig | None = None) -> list[dict]:
         return [m for m in await self.list_models(cfg=cfg) if is_dgxmm_entry(m)]
 
-    async def add(self, model_name: str, api_base: str, served: str, dgxmm_id: str) -> None:
+    async def add(self, model_name: str, api_base: str, served: str, dgxmm_id: str, *, api_key: str = "none",
+                  params: dict | None = None, extra_info: dict | None = None) -> None:
+        """Register one entry. ``api_key`` (sent to ``api_base``), extra ``params`` (litellm_params, e.g.
+        timeouts) and ``extra_info`` (model_info, e.g. health-check settings) are optional; the key is scrubbed from
+        any error and never logged. An entry with a real key carries its fingerprint (``model_info.dgxmm_key_fp``),
+        never the key; ``params`` and ``extra_info`` their fingerprint (``model_info.dgxmm_params_fp``)."""
+        info = {**(extra_info or {}), "dgxmm_id": dgxmm_id}
+        if api_key != "none":
+            info["dgxmm_key_fp"] = key_fingerprint(api_key)
+        if params:
+            info["dgxmm_params_fp"] = params_fingerprint(params, extra_info)
         body = {"model_name": model_name,
-                "litellm_params": {"model": f"openai/{served}", "api_base": api_base, "api_key": "none"},
-                "model_info": {"dgxmm_id": dgxmm_id}}
+                "litellm_params": {"model": f"openai/{served}", "api_base": api_base, "api_key": api_key,
+                                   **(params or {})},
+                "model_info": info}
         try:
             await self._json("POST", "/model/new", json=body)
+        except LiteLLMError as e:
+            if api_key != "none" and api_key in e.message:
+                raise LiteLLMError(e.status, e.code, scrub(e.message, api_key)) from None
+            raise
         finally:
             self.invalidate_models()
 
@@ -424,6 +501,10 @@ class LiteLLMSync:
         # DGXMM did not create (as of the last successful sync)
         self.name_conflicts: dict[int, dict] = {}
         self.registrations: dict[int, str] = {}   # deployment id -> model name, as of the last successful sync
+        # on-demand deployments that should be registered, as of the last desired(): id -> None, or why they are
+        # not (no on-demand key: their existing entries are left as they are, nothing is added)
+        self.ondemand: dict[int, str | None] = {}
+        self._key_error: str | None = None  # last on-demand key problem logged (logged once per change)
         # called (no arguments) after a successful sync that changed what is_registered reports, e.g. routing advice
         self.listeners: list[Callable[[], Any]] = []
         self._reported: object = _UNKNOWN  # what is_registered reported after the previous sync
@@ -489,25 +570,59 @@ class LiteLLMSync:
             apply()
             return {"deregistered": removed, "deregister_error": error, "warning": warning}
 
-    def desired(self) -> dict[tuple[str, str], tuple[str, str]]:
-        """(deployment id, model name) -> (api_base, served name). Exactly one entry per ready deployment, and
-        never two backends under one model name: the Deployer prevents that, but if it happens anyway the
-        oldest deployment keeps the name and the others are recorded in ``self.conflicts``."""
-        want: dict[tuple[str, str], tuple[str, str]] = {}
+    def _ondemand_key(self) -> tuple[str | None, str | None]:
+        """(key, None) or (None, why not). Read on every sync, so a key installed later needs no restart."""
+        try:
+            key, err = load_ondemand_key(self.deployer.settings), None
+        except RuntimeError as e:
+            key, err = None, f"on-demand models are not registered in LiteLLM: {e}"
+        if err != self._key_error:
+            self._key_error = err
+            if err:
+                log.warning("LiteLLM: %s", err)
+        return key, err
+
+    def desired(self) -> dict[tuple[str, str], tuple[str, str, str, dict | None]]:
+        """(deployment id, model name) -> (api_base, served name, api_key, extra litellm_params). One entry per
+        deployment that ``registers``: always-on ones point at the engine, on-demand ones at the gateway. Never two
+        backends under one model name: the Deployer prevents that, but if it happens anyway the oldest deployment
+        keeps the name and the others are recorded in ``self.conflicts``. On-demand deployments are left out while
+        the on-demand key is missing (``self.ondemand`` says why); ``_sync`` leaves their entries untouched."""
+        want: dict[tuple[str, str], tuple[str, str, str, dict | None]] = {}
         owner: dict[str, dict] = {}
         conflicts: dict[int, str] = {}
+        ondemand: dict[int, str | None] = {}
+        key: str | None = None
+        key_err: str | None = None
+        key_read = False
+        settings = self.deployer.settings
         for v in sorted(self.deployer.list_views(), key=lambda v: v["id"]):
-            if v["state"] != "ready" or not v["served_name"] or not v["port"] or v.get("system"):
+            on_demand = v.get("mode") == "on_demand"
+            if not registers(v["state"], v.get("mode"), bool(v.get("system"))) or not v["served_name"]:
                 continue  # system deployments (the decision model) are never LiteLLM models
+            if not on_demand and not v["port"]:
+                continue
             name = v["alias"] or v["served_name"]
             if name in owner:
                 conflicts[v["id"]] = (f"model name {name} is already registered for deployment {owner[name]['name']}; "
                                       "give this deployment a different model name")
                 continue
             owner[name] = v
-            api_base = self.deployer.base_url(v["name"], v["port"]) + "/v1"
-            want[(str(v["id"]), name)] = (api_base, v["served_name"])
+            if on_demand:
+                if not key_read:
+                    key, key_err = self._ondemand_key()
+                    key_read = True
+                ondemand[v["id"]] = key_err
+                if key is None:
+                    continue
+                api_base = f"{settings.dgxmm_internal_url}/ondemand/{v['id']}/v1"
+                want[(str(v["id"]), name)] = (api_base, v["served_name"], key, ondemand_params(settings),
+                                                ondemand_info())
+            else:
+                api_base = self.deployer.base_url(v["name"], v["port"]) + "/v1"
+                want[(str(v["id"]), name)] = (api_base, v["served_name"], "none", None, None)
         self.conflicts = conflicts
+        self.ondemand = ondemand
         if conflicts:
             log.warning("LiteLLM: %d deployment(s) not registered because of a model name clash", len(conflicts))
         return want
@@ -516,12 +631,13 @@ class LiteLLMSync:
         changed = []
         with self.db.session() as s:
             for d in s.scalars(select(Deployment)):
-                status = ready_status if d.state == "ready" else ("disabled" if ready_status == "disabled" else "none")
+                reg = registers(d.state, d.mode, bool(d.system))
+                status = ready_status if reg else ("disabled" if ready_status == "disabled" else "none")
                 if d.system:
                     status = "none"
-                if d.state == "ready" and ready_status == "synced" and d.id in self.conflicts:
+                if reg and ready_status == "synced" and (d.id in self.conflicts or self.ondemand.get(d.id)):
                     status = "error"
-                if d.state == "ready" and ready_status == "synced" and d.id in self.name_conflicts:
+                if reg and ready_status == "synced" and d.id in self.name_conflicts:
                     status = "conflict"
                 if d.litellm_status != status:
                     d.litellm_status = status
@@ -544,7 +660,7 @@ class LiteLLMSync:
             return True
         added = removed = 0
         try:
-            have: dict[tuple[str, str], list[tuple[str, str, str]]] = {}
+            have: dict[tuple[str, str], list[tuple[str, str, str, str | None, str | None, dict, dict]]] = {}
             foreign: dict[str, dict] = {}  # model name -> first entry under it that DGXMM did not create
             for m in await self.client.list_models():
                 if not is_dgxmm_entry(m):
@@ -552,21 +668,31 @@ class LiteLLMSync:
                         foreign.setdefault(m["model_name"], m)
                     continue
                 key = (str(m["model_info"]["dgxmm_id"]), m["model_name"])
-                have.setdefault(key, []).append((m["model_info"]["id"],
-                                                (m.get("litellm_params") or {}).get("api_base", ""),
-                                                (m.get("litellm_params") or {}).get("model", "")))
+                lp = m.get("litellm_params") or {}
+                have.setdefault(key, []).append((m["model_info"]["id"], lp.get("api_base", ""), lp.get("model", ""),
+                                                m["model_info"].get("dgxmm_key_fp"),
+                                                m["model_info"].get("dgxmm_params_fp"), lp, m["model_info"]))
             want = self.desired()
-            # Anything marked as ours that is not wanted (stopped deployment, old alias, or the served-name entry
-            # older DGXMM versions registered next to the alias) is deleted; duplicates are collapsed.
+            held = {i for i, why in self.ondemand.items() if why}  # no on-demand key: leave their entries alone
+            # Anything marked as ours that is not wanted (stopped deployment, old alias, a mode switch's old
+            # api_base, or the served-name entry older DGXMM versions registered next to the alias) is deleted;
+            # duplicates are collapsed. An on-demand entry whose key fingerprint is missing (registered before
+            # fingerprints) or differs (key rotated), or whose timeouts or health-check settings differ
+            # (ondemand_queue_timeout_s changed, an upgrade), is replaced. Deletes run after the adds, so a deployment whose entry is replaced (mode switch, rename, key
+            # rotation, new timeouts) is never without one.
+            stale: list[str] = []
             for key, entries in have.items():
+                if int(key[0]) in held:
+                    continue
                 target = want.get(key)
                 keep = None
                 if target:
-                    keep = next((e for e in entries if e[1] == target[0] and e[2] == f"openai/{target[1]}"), None)
-                for model_id, _, _ in entries:
+                    fp = key_fingerprint(target[2]) if target[2] != "none" else None
+                    keep = next((e for e in entries if e[1] == target[0] and e[2] == f"openai/{target[1]}"
+                                 and (fp is None or e[3] == fp) and _params_match(e[4], e[5], target[3], target[4], e[6])), None)
+                for model_id, *_ in entries:
                     if keep is None or model_id != keep[0]:
-                        await self.client.delete(model_id)
-                        removed += 1
+                        stale.append(model_id)
                 if target and keep is None:
                     have[key] = []
             # A name LiteLLM also serves from an entry DGXMM did not create (static config.yaml, another tool):
@@ -577,10 +703,14 @@ class LiteLLMSync:
                 if key[1] in foreign:
                     name_conflicts[int(key[0])] = {"model_name": key[1], "host": api_base_host(foreign[key[1]]),
                                                    "registered": bool(have.get(key))}
-            for key, (api_base, served) in want.items():
+            for key, (api_base, served, api_key, params, extra_info) in want.items():
                 if not have.get(key) and int(key[0]) not in name_conflicts:
-                    await self.client.add(key[1], api_base, served, key[0])
+                    await self.client.add(key[1], api_base, served, key[0], api_key=api_key, params=params,
+                                          extra_info=extra_info)
                     added += 1
+            for model_id in stale:
+                await self.client.delete(model_id)
+                removed += 1
         except (httpx.HTTPError, LiteLLMError, KeyError, ValueError, TypeError) as e:
             if isinstance(e, LiteLLMError):
                 code, msg = e.code, e.message
@@ -598,6 +728,9 @@ class LiteLLMSync:
                         len(name_conflicts))
         self.registrations = {int(k[0]): k[1] for k in want
                               if int(k[0]) not in name_conflicts or name_conflicts[int(k[0])]["registered"]}
+        for k, entries in have.items():  # held on-demand deployments keep what they had
+            if int(k[0]) in held and entries:
+                self.registrations.setdefault(int(k[0]), k[1])
         self._set_status("synced")
         self._conflict_insights()
         self.last = {"ok": True, "status": "synced", "registered": added, "removed": removed, "error": None,
@@ -666,13 +799,16 @@ class LiteLLMSync:
                 log.exception("LiteLLM sync listener failed")
 
     def error_for(self, dep_id: int, state: str) -> dict | None:
-        """``{code, message}`` when a ready deployment is not registered as it should be, as of the last sync: a
-        model-name clash, or the sync itself failing (messages are already scrubbed of keys). None otherwise;
-        non-ready deployments are not registered anyway, so a failing sync is not their problem."""
-        if state != "ready":
+        """``{code, message}`` when a deployment that should be registered (ready, or on demand and not failed) is
+        not registered as it should be, as of the last sync: a model-name clash, a missing on-demand key, or the
+        sync itself failing (messages are already scrubbed of keys). None otherwise; deployments that are not
+        registered anyway don't have a LiteLLM problem."""
+        if state == "failed" or (state != "ready" and dep_id not in self.ondemand):
             return None
         if dep_id in self.conflicts:
             return {"code": "model_name_conflict", "message": self.conflicts[dep_id]}
+        if self.ondemand.get(dep_id):
+            return {"code": ONDEMAND_NOT_CONFIGURED, "message": self.ondemand[dep_id]}
         if self.last["ok"] is False:
             return {"code": self.last["code"] or "litellm_error", "message": self.last["error"]}
         if dep_id in self.name_conflicts:
@@ -689,8 +825,12 @@ class LiteLLMSync:
         self._wake.set()
 
     async def on_state(self, dep_id: int, frm: str, to: str) -> None:
-        if "ready" in (frm, to):
+        # ready: always-on entries come and go; failed / a fresh deployment: on-demand entries do
+        if {"ready", "failed", "planned"} & {frm, to}:
             self.trigger()
+
+    def on_removed(self, dep_id: int) -> None:
+        self.trigger()  # a removed on-demand deployment was registered whatever its state
 
     async def run(self) -> None:
         failure_delay = 5.0

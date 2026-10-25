@@ -2,8 +2,8 @@
 import pytest
 
 from tests.test_api_deployments import SMALL
-from tests.test_api_integrations import BASE, MASTER, as_viewer, audit_rows, lite  # noqa: F401  (fixture)
-from tests.test_api_switch import deploy, wait
+from tests.test_api_integrations import BASE, MASTER, as_viewer, audit_rows, deploy, lite  # noqa: F401  (fixture)
+from tests.test_api_switch import wait
 
 DEP = "/dgxmm/api/deployments"
 
@@ -93,7 +93,7 @@ async def test_concurrent_deploys_cannot_share_a_name(stack):
     import asyncio
     from dgxmm.deployer.service import DeployError, DeployRequest
     stack.http.all_healthy = True
-    reqs = [DeployRequest(name=n, engine="vllm", model_ref="Qwen/Qwen3-Tiny", config=SMALL, alias="chat") for n in "xy"]
+    reqs = [DeployRequest(mode="always_on", name=n, engine="vllm", model_ref="Qwen/Qwen3-Tiny", config=SMALL, alias="chat") for n in "xy"]
     out = await asyncio.gather(*(stack.deployer.deploy(r, 1) for r in reqs), return_exceptions=True)
     errors = [o for o in out if isinstance(o, DeployError)]
     assert len(errors) == 1 and errors[0].code == "model_name_taken"
@@ -167,7 +167,7 @@ async def test_rename_waits_for_name_reservation_lock(stack):
     import asyncio
     from dgxmm.deployer.service import DeployRequest
     stack.http.all_healthy = True
-    d = await stack.deployer.deploy(DeployRequest(name="a", engine="vllm", model_ref="Qwen/Qwen3-Tiny", config=SMALL), 1)
+    d = await stack.deployer.deploy(DeployRequest(mode="always_on", name="a", engine="vllm", model_ref="Qwen/Qwen3-Tiny", config=SMALL), 1)
     async with stack.deployer.mem_lock:  # held by deploy/wake/start while they check and claim names
         t = asyncio.create_task(stack.deployer.rename(d["id"], "chat"))
         await asyncio.sleep(0.05)

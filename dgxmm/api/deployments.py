@@ -10,7 +10,8 @@ from dgxmm.api.ratelimit import allow
 from dgxmm.audit import audit
 from dgxmm.auth.deps import Principal, current_principal, get_ctx, require_admin
 from dgxmm.context import AppContext
-from dgxmm.deployer.service import DeployError, DeployRequest, InsufficientMemory
+from dgxmm.deployer.service import (IDLE_TIMEOUT_MAX_S, IDLE_TIMEOUT_MIN_S, DeployError, DeploymentMode,
+                                    DeployRequest, InsufficientMemory)
 from dgxmm.litellm import LiteLLMError
 from dgxmm.memory.redact import redact_log
 from dgxmm.planner.plans import PlanAction
@@ -150,6 +151,27 @@ async def patch_deployment(dep_id: int, body: DeploymentPatch, p: Principal = De
         if ctx.litellm is not None:
             ctx.litellm.trigger()  # re-register under the new name, drop the old one
     return {**view, "affected_keys": affected, "keys_rewritten": rewritten, "keys_error": keys_error}
+
+
+class ModeIn(BaseModel):
+    mode: DeploymentMode
+    # omitted = keep the current value; null = the global default (ondemand_idle_timeout_s)
+    idle_timeout_s: int | None = Field(None, ge=IDLE_TIMEOUT_MIN_S, le=IDLE_TIMEOUT_MAX_S)
+
+
+@router.patch("/{dep_id}/mode")
+async def set_mode(dep_id: int, body: ModeIn, p: Principal = Depends(require_admin), ctx: AppContext = Depends(get_ctx)):
+    """Switch between on_demand and always_on (system deployments are always on: 409)."""
+    try:
+        before = ctx.deployer.view(dep_id)
+        idle = body.idle_timeout_s if "idle_timeout_s" in body.model_fields_set else before["idle_timeout_s"]
+        view = await ctx.ondemand.set_mode(dep_id, body.mode, idle, p.user.id)
+    except DeployError as e:
+        raise deploy_error(e)
+    audit(ctx.db, p.user.id, "ondemand_mode", view["name"],
+          {"from": {"mode": before["mode"], "idle_timeout_s": before["idle_timeout_s"]},
+           "to": {"mode": view["mode"], "idle_timeout_s": view["idle_timeout_s"]}})
+    return view
 
 
 KEY_CACHE_S = 15.0  # per-deployment key listing may be this stale (API key writes invalidate it)

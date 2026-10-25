@@ -82,6 +82,14 @@ class Deployment(Base):
     # first under memory pressure, and whenever its own memory runs away (dgxmm/watchdog.py).
     # A real column, not a config key: config is user-visible and editable. NULL on rows from older versions.
     system: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    # "on_demand" (started by the first request, stopped after idle_timeout_s without one; dgxmm/ondemand) or
+    # "always_on". Nullable for add_missing_columns; migration 40 sets "always_on" on older rows, and a NULL
+    # (a row written later by an older DGXMM) reads as "always_on".
+    mode: Mapped[str | None] = mapped_column(String(16), nullable=True, default="always_on")
+    idle_timeout_s: Mapped[int | None] = mapped_column(Integer, nullable=True)  # NULL = ondemand_idle_timeout_s
+    # A switch from on demand to always on that waits for the deployment to be ready: until then it stays on demand
+    # (registered through the gateway), and the deployer applies this mode when it reaches ready, failed or stopped.
+    pending_mode: Mapped[str | None] = mapped_column(String(16), nullable=True)
     created_by: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)

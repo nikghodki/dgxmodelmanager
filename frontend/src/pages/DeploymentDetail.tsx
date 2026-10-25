@@ -32,6 +32,8 @@ import { DecisionChip, SystemBadge } from "@/components/app/decision-chip";
 import { DiagnosisCard, useDiagnosis } from "@/components/app/diagnosis-card";
 import { DeploymentInsightsCard } from "@/components/app/insights-card";
 import { DeploymentSchedulesCard } from "@/components/app/schedules-card";
+import { DeploymentModeCard } from "@/components/app/mode-card";
+import { DeploymentStateBadge } from "@/components/app/deployments-table";
 
 /** How long after a failure the page says "Diagnosing…" while no (fresh) diagnosis has arrived. */
 const DIAGNOSIS_WAIT_MS = 5 * 60_000;
@@ -240,7 +242,7 @@ export function DeploymentDetail() {
   return (
     <div className="space-y-6">
       <PageHeader
-        title={<span className="flex items-center gap-3">{d.name}<StatusBadge state={d.state} />{d.system && <SystemBadge />}</span>}
+        title={<span className="flex items-center gap-3">{d.name}<DeploymentStateBadge d={d} />{d.system && <SystemBadge />}</span>}
         description={<span className="break-all">{d.model_ref} · {engineLabel(d.engine)}</span>}
         actions={<>
           {acts.includes("sleep") && <Button variant="outline" size="sm" disabled={busy} onClick={() => act.mutate("sleep")}>{icon("sleep", Moon)}Sleep</Button>}
@@ -295,6 +297,7 @@ export function DeploymentDetail() {
           <DeploymentInsightsCard deploymentId={d.id} className="lg:col-span-3" />
           <DeploymentSchedulesCard deployment={d} className="lg:col-span-3" />
           <ApiAccessCard d={d} info={litellm.data} loading={litellm.isLoading} error={litellm.error} />
+          <DeploymentModeCard d={d} admin={admin} />
           <Card className="min-w-0 shadow-card">
             <CardHeader className="pb-2"><CardTitle className="text-sm">Memory</CardTitle>
               <CardDescription className="text-xs">confidence: {(d.estimate as any)?.confidence ?? "—"}</CardDescription></CardHeader>

@@ -59,6 +59,8 @@ flowchart LR
   clients -- "one /v1 endpoint,<br/>model = model name" --> litellm
   litellm -- "OpenAI API" --> vllm
   litellm -- "OpenAI API" --> llama
+  litellm -- "on-demand models:<br/>/dgxmm/ondemand/{id}/v1 (bearer key)" --> api
+  api -- "proxied requests" --> vllm
   api -- "search, download,<br/>compat: a few small files" --> hub
   scan["code scanner<br/>(subprocess, no import)"]
   api -- "remote-code check" --> scan
@@ -89,9 +91,14 @@ flowchart LR
 - **Delete helper.** To delete model files that engine containers left owned by root, DGXMM starts a
   short-lived, locked-down container that runs `rm` on one bind-mounted directory (see
   [deleting weights](storage.md#deleting-weights)).
-- **LiteLLM** (optional; an existing proxy or the bundled one). Each ready deployment is registered once
+- **LiteLLM** (optional; an existing proxy or the bundled one). Each ready always-on deployment, and each
+  on-demand deployment in any state but failed, is registered once
   through LiteLLM's model management API, so clients use a single OpenAI-compatible endpoint. DGXMM
   also proxies LiteLLM's virtual-key API for the UI (see [LiteLLM integration](litellm.md)).
+- **On-demand gateway.** Routes under `/dgxmm/ondemand/{id}/v1` in the same process, called by LiteLLM
+  over the Docker network for on-demand deployments. They start a stopped deployment for a request (or
+  queue it until memory frees), stream the engine's answer through, and stop idle ones (see
+  [on-demand gateway](ondemand.md)).
 - **Hugging Face Hub.** Catalog search, model details and downloads (with the optional HF token), and the
   compatibility check's bounded reads of a few small files per repo.
 - **Code scanner.** A short-lived Python subprocess (`dgxmm/decider/code_scan.py`, standard library only,
@@ -147,7 +154,8 @@ flowchart LR
 | `advisor/` | Tuning rules (`rules`) and the built-in load test (`benchmark`). |
 | `watchdog.py` | Memory alerts and optional automatic protection. |
 | `decider/` | The decision model: `service.py` (the `Decider`: settings, thresholds, decision log), `client.py` (`SystemOneClient`: back-pressure, circuit breaker, answer validation), `supervisor.py` (probes and restarts), `image.py` (in-app image build), `snapshot.py` (verified snapshot download), `secret.py` / `rotation.py` (bearer key), `upgrade.py` (detects a decider from an older build), `retention.py`, `cli.py` (`admin decider …`), `registry.py` (the feature registry), `insights.py` (insights feed), `insight_engine.py` (background jobs), `features.py` / `operations.py` (wiring), and one module per feature: `diagnosis.py`, `config_suggest.py`, `plans.py`, `kind.py`, `workload.py`, `health.py`, `config.py`, `compat.py`, `draft.py`, `engine.py`, `command.py`, `schedule.py`, `reading.py`, `tuning.py`, `routing.py`, `remote_code.py` (with the scanner `code_scan.py`). |
-| `litellm.py` | LiteLLM client (URL and key resolved per call, errors scrubbed of keys, cached status) and the sync that keeps LiteLLM's model list in line with ready deployments. |
+| `litellm.py` | LiteLLM client (URL and key resolved per call, errors scrubbed of keys, cached status) and the sync that keeps LiteLLM's model list in line with the deployments (always-on while ready, on-demand through the gateway). |
+| `ondemand/` | On-demand deployments: `controller.py` (slots, queue, make-room, idle reaper) and `gateway.py` (the routes LiteLLM calls, peer guard, streaming proxy). |
 
 ## Next steps
 

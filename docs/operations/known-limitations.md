@@ -25,6 +25,13 @@ description: "What DGXMM does not do, or does only on a best-effort basis."
   Processes page may read 0 for a process that does use the GPU, and a deployment's measured memory is its
   cgroup memory only. The budget then credits the rest of a ready deployment's reservation instead (see
   [memory budget](../architecture/memory.md#budget)).
+- **An on-demand request that cannot fit may wait the full queue limit.** The immediate `does_not_fit`
+  answer compares the model with the memory DGXMM's deployments could free; memory held by other programs
+  on the host is not counted. With a lot of such memory in use, a request whose model can never fit is
+  queued and fails only after `ondemand_queue_timeout_s` (15 minutes) with `ondemand_queue_timeout`.
+- **The on-demand queue does not survive a restart.** Restarting DGXMM drops waiting requests (their
+  connections close) and resets the in-flight counters; ready on-demand models then wait a full idle
+  timeout before they are stopped.
 
 ## Next steps
 
