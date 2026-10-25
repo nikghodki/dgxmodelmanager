@@ -249,7 +249,8 @@ class OnDemandController:
                         or dep_id in self._switching:
                     # started by someone else (or by a switch to always on), being stopped, or switched to always
                     # on: wait, never start it here
-                    entry = self._leave(entry)
+                    self._leave(entry)
+                    entry = None
                     await self._wait(changed, deadline)
                     continue
                 entry = self._join(dep_id, entry)
@@ -623,7 +624,8 @@ class OnDemandController:
             else:
                 await deployer.restart(dep_id, user_id)
         except Exception as e:
-            if not (isinstance(e, DeployError) and e.code in ("not_stopped", "not_sleeping")):
+            code = e.code if isinstance(e, DeployError) else None
+            if code not in ("not_stopped", "not_sleeping"):
                 try:
                     deployer.set_mode(dep_id, "on_demand", v.get("idle_timeout_s"))  # refused: nothing changes
                 except DeployError:
