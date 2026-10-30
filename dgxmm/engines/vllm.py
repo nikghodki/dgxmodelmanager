@@ -163,6 +163,10 @@ class VllmEngine:
                                   "num_speculative_tokens": cfg.speculative.num_speculative_tokens}
             if cfg.speculative.model:
                 sc["model"] = cfg.speculative.model
+                # pinned like --revision: HF_HUB_OFFLINE resolves a bare repo id only through refs/main, which a
+                # pinned download never writes
+                if draft is not None and draft.revision:
+                    sc["revision"] = draft.revision
             cmd += ["--speculative-config", json.dumps(sc)]
         if cfg.enable_sleep_mode:
             cmd.append("--enable-sleep-mode")

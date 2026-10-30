@@ -85,7 +85,8 @@ def parse_vllm_command(cmd: list[str]) -> tuple[str, dict, list[str]]:
                 spec = None
             if not isinstance(spec, dict):
                 raise AdoptError("invalid_value", "cannot adopt: --speculative-config is not a JSON object", 422)
-            cfg["speculative"] = spec
+            # the draft's revision is DGXMM's to pin (from the inventory, like --revision), not part of the config
+            cfg["speculative"] = {k: v for k, v in spec.items() if k not in ("revision", "code_revision")}
         elif flag in VLLM_EXTRA_FLAGS:
             extra += [flag] + ([val] if VLLM_EXTRA_FLAGS[flag] is not None else [])
         else:

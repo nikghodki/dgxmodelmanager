@@ -47,6 +47,15 @@ All notable changes to DGXMM are documented in this file. The format is based on
   `ondemand_max_queued`, `ondemand_allowed_cidrs` and `dgxmm_internal_url`; see
   [configuration](docs/configuration/index.md#on-demand-models) and [how it works](docs/architecture/ondemand.md).
 
+### Fixed
+
+- **Speculative decoding with a draft model DGXMM downloaded.** A vLLM deployment with a draft (`dflash`, `eagle`,
+  `eagle3`, `draft_model`) failed at start with `Invalid repository ID or local directory specified` when the draft
+  was downloaded through DGXMM: a pinned download has no `refs/main`, and under `HF_HUB_OFFLINE` vLLM resolves a
+  bare repo id only through it. DGXMM now passes the draft's revision in `--speculative-config`, as it passes the
+  model's `--revision`. Adopting an external container drops a `revision` in its `--speculative-config` the same
+  way it drops `--revision`.
+
 ### Security
 
 - The gateway answers only direct connections from DGXMM's own Docker networks (never the host, the LAN, the

@@ -24,6 +24,14 @@ def test_parse_real_command():
     assert set(ignored) == {"--host", "--port", "--gpu-memory-utilization"}
 
 
+
+def test_parse_drops_draft_revision():
+    # DGXMM pins the draft's revision itself at launch (from the inventory), as it does the target's --revision
+    spec = {"method": "dflash", "model": "Org/Draft", "num_speculative_tokens": 3, "revision": "b" * 40,
+            "code_revision": "c" * 40}
+    _, cfg, _ = parse_vllm_command(["--model", "a/b", "--speculative-config", json.dumps(spec)])
+    assert cfg["speculative"] == {"method": "dflash", "model": "Org/Draft", "num_speculative_tokens": 3}
+
 def test_parse_variants():
     ref, cfg, _ = parse_vllm_command(["vllm", "serve", "nvidia/X", "--safetensors-load-strategy=prefetch", "--enable-sleep-mode"])
     assert ref == "nvidia/X" and cfg["safetensors_load_strategy"] == "prefetch" and cfg["enable_sleep_mode"] is True

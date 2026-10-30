@@ -81,6 +81,22 @@ def test_container_spec(settings, tiny):
     assert spec.publish_bind == "127.0.0.1" and spec.network == settings.docker_network == "dgxmm"
 
 
+
+def test_container_spec_pins_draft_revision(settings, fake_hf_repo):
+    # a pinned download (DGXMM's) has snapshots/<rev> and no refs/main: under HF_HUB_OFFLINE vLLM can resolve the
+    # draft only through its revision, as it does the target's through --revision
+    fake_hf_repo("Qwen/Qwen3-Tiny", config=QWEN_TINY, files={"model.safetensors": 2 * GIB})
+    fake_hf_repo("Org/Tiny-DFlash", rev="b" * 40, config=QWEN_TINY, files={"model.safetensors": GIB}, main=False)
+    arts = {a.ref: a for a in scan_hf_cache(Path(settings.hf_cache.local) / "hub")}
+    target, draft = arts["Qwen/Qwen3-Tiny"], arts["Org/Tiny-DFlash"]
+    assert draft.revision == "b" * 40
+    e = VllmEngine(settings)
+    cfg = e.validate_config({"max_model_len": 4096,
+                             "speculative": {"method": "dflash", "model": "Org/Tiny-DFlash", "num_speculative_tokens": 3}})
+    c = e.container_spec(target, cfg, draft, LaunchContext(7, "q", 8105, 30 * GIB, 120 * GIB), settings).command
+    assert json.loads(c[c.index("--speculative-config") + 1]) == {
+        "method": "dflash", "num_speculative_tokens": 3, "model": "Org/Tiny-DFlash", "revision": "b" * 40}
+
 def test_parse_metrics(settings):
     m = VllmEngine(settings).parse_metrics(VLLM_METRICS)
     assert m.gauges == {"running": 2.0, "waiting": 1.0, "kv_usage": 0.25}
