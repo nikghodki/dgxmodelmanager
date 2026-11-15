@@ -347,6 +347,27 @@ def deployer_two_nodes(two_node_registry, tmp_path, fake_hf_repo):
     deployer.monitor_tick = monitor_tick
     deployer.monitor_states = ticks
     deployer.state = lambda dep_id: deployer._get(dep_id).state
+
+    def count_rows() -> int:
+        from sqlalchemy import func, select
+        from dgxmm.db import Deployment
+        with deployer.db.session() as s:
+            return s.scalar(select(func.count()).select_from(Deployment))
+    deployer.count_rows = count_rows
+    deployer.row = deployer._get
+
+    def insert_row(*, node: str, state: str, container_id: str | None = None, name: str | None = None,
+                   port: int = 8150) -> int:
+        """A deployment row as a dgxmm restart finds it (no monitor, no start-up slot)."""
+        from dgxmm.db import Deployment
+        with deployer.db.session() as s:
+            row = Deployment(name=name or f"dep-{node}-{state}", engine="vllm", model_ref="Qwen/Qwen3-Tiny",
+                             config=dict(SMALL_VLLM), state=state, container_id=container_id, port=port,
+                             reserved_bytes=4 * GIB, estimate={}, node=node)
+            s.add(row)
+            s.flush()
+            return row.id
+    deployer.insert_row = insert_row
     return deployer
 
 
@@ -402,3 +423,45 @@ def row(db_path, query: str):
     result = conn.execute(query).fetchone()
     conn.close()
     return result
+
+
+@pytest.fixture
+def starting_remote_dep(deployer_two_nodes):
+    """A deployment on dgx-2 found "starting" after a dgxmm restart, whose container id was never recorded (the
+    restart came between the remote docker run and the transition that stores it)."""
+    from types import SimpleNamespace
+    dep_id = deployer_two_nodes.insert_row(node="dgx-2", state="starting", name="q2")
+    return SimpleNamespace(id=dep_id, name="q2")
+
+
+@pytest.fixture
+async def watchdog_two_nodes(deployer_two_nodes, qwen_req, ready_remote_dep):
+    """A Watchdog (auto-protect on) over one ready deployment per node. tick(): one budget refresh plus one
+    watchdog pass (as the budget loop runs it); returns the deployments it stopped (id, name, node)."""
+    from types import SimpleNamespace
+    from dgxmm.watchdog import Watchdog
+    d = deployer_two_nodes
+    v = await d.deploy(qwen_req.model_copy(update={"name": "qwen-local", "alias": "qwen-local"}), user_id=1)
+    d.engines_http.healthy.add(v["port"])
+    assert await d.wait_ready(v["id"], 5) == "ready"
+    d.settings.auto_protect = True
+    w = Watchdog(d.settings, d, d.events, d.db)
+
+    async def tick():
+        before = {x["id"]: x["state"] for x in d.list_views()}
+        await w.check_nodes(await d.budget.refresh())
+        return [SimpleNamespace(id=x["id"], name=x["name"], node=d._get(x["id"]).node or "local")
+                for x in d.list_views() if x["state"] == "stopped" and before.get(x["id"]) != "stopped"]
+    w.tick = tick
+    w.set_available = d.set_free
+    w.state_of = d.state
+    w.local_dep, w.remote_dep = v["id"], ready_remote_dep.id
+    yield w
+    await d.aclose()
+
+
+@pytest.fixture
+def litellm_sync_two_nodes(deployer_two_nodes):
+    from dgxmm.litellm import LiteLLMSync
+    d = deployer_two_nodes
+    return LiteLLMSync(None, d, d.db, d.events)

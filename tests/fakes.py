@@ -352,6 +352,12 @@ class FakeDockerClient:
         self._containers[cid] = c
         return c
 
+    def add_managed(self, deployment_id, name, engine="vllm", command=None, ports=(), status="running", labels=None):
+        """A container DGXMM started for ``deployment_id`` (managed labels), e.g. found by reconcile."""
+        from dgxmm.engines.base import managed_labels
+        return self.add_unmanaged(name, command=command, labels={**managed_labels(deployment_id, engine),
+                                                                 **(labels or {})}, ports=ports, status=status)
+
     def add_network(self, name, internal=True):
         self.networks.items[name] = FakeNetwork(name, internal)
         return self.networks.items[name]

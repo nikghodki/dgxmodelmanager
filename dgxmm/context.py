@@ -185,6 +185,12 @@ def build_context(settings: Settings, client_factory=None) -> AppContext:
     async def _reconcile():
         await budget.refresh()
         await reconcile(deployer)
+        while deployer.reconcile_pending:  # remote nodes skipped (stale at start-up, unreachable): once they answer
+            await asyncio.sleep(settings.remote_probe_interval_s)
+            try:
+                await reconcile(deployer, retry=True)
+            except Exception:
+                log.exception("reconcile retry failed")
 
     async def _budget_loop():
         await budget_loop(ctx)
@@ -208,7 +214,7 @@ def build_context(settings: Settings, client_factory=None) -> AppContext:
 
     from dgxmm.watchdog import Watchdog
     ctx.watchdog = Watchdog(settings, deployer, events, db)
-    ctx.budget_listeners.append(ctx.watchdog.check)
+    ctx.budget_listeners.append(ctx.watchdog.check_nodes)
     ctx.budget_listeners.append(liveness_listener(deployer))
 
 

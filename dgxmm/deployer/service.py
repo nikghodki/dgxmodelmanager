@@ -117,6 +117,8 @@ class Deployer:
         self.node_probe = node_probe  # NodeProbe: staleness of remote nodes (None: the budget probe's, if it has one)
         self.remote_liveness_timeout_s = REMOTE_LIVENESS_TIMEOUT_S
         self._liveness_inflight: dict[str, asyncio.Future] = {}  # node -> a remote lookup that outlived its wait
+        # node -> {dep id: (state, container id)} of the rows of a node reconcile skipped (deployer/reconcile.py)
+        self.reconcile_pending: dict[str, dict[int, tuple]] = {}
         self.mem_lock = asyncio.Lock()
         self._locks: dict[int, asyncio.Lock] = {}
         self._monitors: dict[int, asyncio.Task] = {}
@@ -193,8 +195,8 @@ class Deployer:
     def base_url(self, name: str, port: int, engine: str | None = None, node: str = LOCAL_NODE_ID) -> str:
         """engine_base_host (if set) for engines with a published port; the container name otherwise (the decider
         has no published port and is reachable only on its docker network). On a remote node: its cluster IP."""
-        if self._is_remote(node):
-            return f"http://{self.nodes.config(node).engine_address()}:{port}"
+        if self._is_remote(node):  # a node removed from config.yaml: DeployError unknown_node
+            return f"http://{self.nodes.config(self._require_node(node)).engine_address()}:{port}"
         host = (self.settings.engine_base_host if self._publishes(engine) else None) or container_name(name)
         return f"http://{host}:{port}"
 
@@ -224,6 +226,11 @@ class Deployer:
 
     def _is_remote(self, node_id: str) -> bool:
         return node_id != LOCAL_NODE_ID and self.nodes is not None
+
+    def node_configured(self, node_id: str) -> bool:
+        """False for a deployment's node that was removed from config.yaml: nothing can be reached there, so stop and
+        remove only release the DB state (ruling R11)."""
+        return node_id == LOCAL_NODE_ID or (self.nodes is not None and node_id in self.nodes.ids())
 
     def _require_node(self, node_id: str) -> str:
         if node_id != LOCAL_NODE_ID and (self.nodes is None or node_id not in self.nodes.ids()):
@@ -833,6 +840,15 @@ class Deployer:
         except Exception:
             log.exception("monitor task for deployment %s died with uncaught exception", dep_id)
 
+    def nodes_by_id(self) -> dict[int, str]:
+        """deployment id -> the node it runs on."""
+        with self.db.session() as s:
+            return {i: n or LOCAL_NODE_ID for i, n in s.execute(select(Deployment.id, Deployment.node))}
+
+    def has_monitor(self, dep_id: int) -> bool:
+        mon = self._monitors.get(dep_id)
+        return mon is not None and not mon.done()
+
     def resume_monitor(self, dep_id: int) -> None:
         self._spawn_monitor(dep_id)
 
@@ -979,7 +995,7 @@ class Deployer:
                         continue
                     node = self._node_of(dep)
                     if self._is_remote(node):
-                        if node in skip_nodes:
+                        if node in skip_nodes or not self.node_configured(node):
                             continue
                         info = await self._remote_lookup(node, dep.container_id)
                         if info is _SKIPPED:
@@ -1069,7 +1085,14 @@ class Deployer:
                 self.gate.withdraw(dep_id)
                 return self._transition(dep_id, "stopped", message=f"cancelled while queued ({reason})",
                                         actor=reason, container_id=None)
-            docker = self._docker_for(self._node_of(dep))
+            node = self._node_of(dep)
+            if not self.node_configured(node):  # nothing to reach there: release the DB state only (R11)
+                if dep.state not in ("planned", "failed", "stopping"):
+                    self._transition(dep_id, "stopping", message=message or f"stop requested ({reason})", actor=reason)
+                return self._transition(dep_id, "stopped", actor=reason, container_id=None,
+                                        message=f"stopped without contacting node {node}, which is not configured "
+                                                f"({reason}); a container left there is not removed")
+            docker = self._docker_for(node)
             if dep.state in ("planned", "failed"):
                 try:
                     await asyncio.to_thread(docker.stop_and_remove, dep.container_id)
@@ -1136,11 +1159,12 @@ class Deployer:
             if dep.state not in ("stopped", "failed"):
                 raise DeployError("not_stopped", "stop the deployment before removing it", 409)
             node = self._node_of(dep)
-            try:
-                await asyncio.to_thread(self._docker_for(node).stop_and_remove, dep.container_id)
-            except NodeUnreachable as e:
-                raise DeployError("node_unreachable", f"could not remove container: {e}", 503)
-            await self._remove_leftover(dep.name, dep_id, node)
+            if self.node_configured(node):  # else: nothing to reach there, only the row goes (R11)
+                try:
+                    await asyncio.to_thread(self._docker_for(node).stop_and_remove, dep.container_id)
+                except NodeUnreachable as e:
+                    raise DeployError("node_unreachable", f"could not remove container: {e}", 503)
+                await self._remove_leftover(dep.name, dep_id, node)
             for hook in self.before_removal_hooks:
                 try:
                     hook(dep_id)
@@ -1227,6 +1251,8 @@ class Deployer:
 
     def _endpoints(self, d: Deployment) -> dict:
         node = self._node_of(d)
+        if not self.node_configured(node):  # its node was removed from config.yaml: no address (R11)
+            return {"endpoint": None, "host_endpoint": None}
         if self._is_remote(node):  # no docker DNS across hosts: both are the node's published address
             url = f"http://{self.nodes.config(node).engine_address()}:{d.port}/v1" if d.port else None
             return {"endpoint": url, "host_endpoint": url}

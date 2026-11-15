@@ -25,6 +25,7 @@ from sqlalchemy import select
 
 from dgxmm.config import load_ondemand_key
 from dgxmm.db import Database, Deployment
+from dgxmm.deployer.service import DeployError
 from dgxmm.ondemand import HEALTH_HEADER
 from dgxmm.settings_store import LiteLLMConfig
 
@@ -619,7 +620,10 @@ class LiteLLMSync:
                 want[(str(v["id"]), name)] = (api_base, v["served_name"], key, ondemand_params(settings),
                                                 ondemand_info())
             else:
-                api_base = self.deployer.base_url_for(v) + "/v1"
+                try:
+                    api_base = self.deployer.base_url_for(v) + "/v1"
+                except DeployError:  # its node is no longer configured: nothing to point LiteLLM at
+                    continue
                 want[(str(v["id"]), name)] = (api_base, v["served_name"], "none", None, None)
         self.conflicts = conflicts
         self.ondemand = ondemand
