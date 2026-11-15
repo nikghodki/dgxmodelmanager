@@ -648,12 +648,14 @@ class Deployer:
                                       f"node {node_id} is not ready for cluster deployments "
                                       "(missing cluster_ip or nccl config)", 400)
 
-    def placement_options(self, req: DeployRequest) -> list:
+    def placement_options(self, req: DeployRequest, prep: Prepared | None = None) -> list:
         """Where ``req`` could run (planner.placement.PlacementOption list: each node, plus the cluster) and which
         placement to suggest; ``req.placement`` / ``req.node`` are ignored. From the budgets of the last refresh
-        (the caller refreshes first). Blocking (inventory, calibration DB): call it in a worker thread."""
+        (the caller refreshes first). ``prep``: ``prepare()`` of ``req`` if the caller already ran it. Blocking
+        (inventory, calibration DB): call it in a worker thread."""
         from dgxmm.planner.placement import build_options
-        prep = self.prepare(req.engine, req.model_ref, req.config)
+        if prep is None:
+            prep = self.prepare(req.engine, req.model_ref, req.config)
         budgets = self.budget.all() if self.budget is not None else {}
         return build_options(prep.engine.name, prep.estimate, self.settings, budgets, stale=self._node_stale,
                              allow_cluster=not is_system_engine(prep.engine))

@@ -57,11 +57,13 @@ async def placement_options(body: DeployRequest, p: Principal = Depends(require_
                             ctx: AppContext = Depends(get_ctx)):
     """Which placements (each node, the nodes together as a cluster) fit this deploy request, and the suggested one.
     Same body as a deploy (placement / node ignored). Admin-only like /preview (the deploy wizard is its caller).
-    The estimate and the options are computed in a worker thread, never on the event loop."""
+    The request is validated and estimated first (a bad request costs no budget refresh), in a worker thread like
+    the options themselves: never on the event loop."""
     try:
+        prep = await asyncio.to_thread(ctx.deployer.prepare, body.engine, body.model_ref, body.config)
         if ctx.deployer.budget is not None:
             await ctx.deployer.budget.refresh()
-        opts = await asyncio.to_thread(ctx.deployer.placement_options, body)
+        opts = await asyncio.to_thread(ctx.deployer.placement_options, body, prep)
     except DeployError as e:
         raise deploy_error(e)
     return [o.as_dict() for o in opts]

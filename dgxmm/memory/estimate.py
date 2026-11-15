@@ -48,14 +48,18 @@ def per_rank_bytes(engine: str, est: MemoryEstimate, free: dict[str, int]) -> di
     """Memory each rank of a deployment needs, by node (``free``: node id -> its free_for_new, ranks in order).
 
     One node: the single-node total. Several: the shardable part (weights, draft weights, KV cache, recurrent state)
-    is split across the ranks and the rest (activations / compute buffers, runtime, margin) is needed in full on
-    every rank, exactly once. vLLM (tensor parallel, tp = number of nodes): split evenly. llama.cpp (RPC layer
-    split): split in proportion to each node's free memory. Rounded up (never under-estimates a rank)."""
+    and ``margin`` are split across the ranks; the absolute overheads (activations / compute buffers, runtime) are
+    needed in full on every rank. ``margin`` is entirely proportional to the model: the low-confidence margin is
+    LOW_CONFIDENCE_MARGIN x (KV + state + activations) and calibration (``with_total``) only scales the total
+    (measured x 1.05, a mean ratio, +10% after an OOM), so it is split like the weights. (Absolute safety bytes live
+    in the per-node Budget: settings.margin_bytes / os_reserve_bytes, already out of free_for_new.) vLLM (tensor
+    parallel, tp = number of nodes): split evenly. llama.cpp (RPC layer split): split in proportion to each node's
+    free memory (a node with none gets no share; all none: even). Rounded up (never under-estimates a rank)."""
     nodes = list(free)
     if len(nodes) <= 1:
         return {n: est.total for n in nodes}
-    shard = est.weights + est.draft_weights + est.kv_cache + est.state
-    fixed = est.activations + est.runtime + est.margin
+    shard = est.weights + est.draft_weights + est.kv_cache + est.state + est.margin
+    fixed = est.activations + est.runtime
     if engine == "llamacpp":
         weights = {n: max(free[n], 0) for n in nodes}
         if sum(weights.values()) <= 0:

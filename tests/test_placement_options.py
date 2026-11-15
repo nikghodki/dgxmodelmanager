@@ -62,11 +62,13 @@ def test_vllm_rank_bytes_halve_weights_and_kv():
         {"local": 64 * GiB, "dgx-2": 64 * GiB}
 
 
-def test_vllm_rank_bytes_margin_and_activations_once_per_rank():
+def test_vllm_rank_bytes_margin_split_activations_once_per_rank():
+    # margin is proportional (split like the weights); activations and runtime are absolute (full on every rank)
     e = est(weights=100 * GiB, kv=20 * GiB, runtime=4 * GiB, draft_weights=2 * GiB, state=2 * GiB,
             activations=3 * GiB, margin=5 * GiB)
+    per_rank = (51 + 11) * GiB + int(2.5 * GiB) + (4 + 3) * GiB
     assert rank_bytes("vllm", e, Placement(kind="cluster", nodes=["local", "dgx-2"]), BUDGETS) == \
-        {"local": (51 + 11 + 4 + 3 + 5) * GiB, "dgx-2": (51 + 11 + 4 + 3 + 5) * GiB}
+        {"local": per_rank, "dgx-2": per_rank}
 
 
 def test_single_rank_bytes_is_the_single_node_total():
@@ -188,3 +190,71 @@ def test_api_placement_options_errors_and_viewer(api_stack):
     r = api_stack.post("/dgxmm/api/deployments/placement-options", headers=vh,
                        json={"name": "tiny", "engine": "vllm", "model_ref": "Qwen/Qwen3-Tiny", "config": SMALL})
     assert r.status_code == 403
+
+
+# ---------- fix round 1: proportional margin split, edge cases, API errors ----------
+
+def test_deepseek_like_low_confidence_model_recommends_cluster(two_node_settings):
+    """A 167 GB-class model (weights ~155 GiB, KV ~10 GiB) with a low-confidence 20% margin, then scaled by a
+    calibration ratio: the proportional margin is split across ranks, so the cluster fits at 110 GiB free per node."""
+    kv, act = 10 * GiB, 2 * GiB
+    e = est(weights=155 * GiB, kv=kv, activations=act, runtime=RUNTIME, margin=int(0.20 * (kv + act)),
+            confidence="low")
+    e = e.with_total(int(e.total * 1.15), "calibrated", "scaled x1.15")
+    budgets = {"local": budget(110 * GiB), "dgx-2": budget(110 * GiB)}
+    opts = build_options("vllm", e, two_node_settings, budgets)
+    cluster = next(o for o in opts if o.placement.kind == "cluster")
+    assert cluster.fits and cluster.recommended and cluster.reason == "fits"
+    assert all(o.reason == "too_big_for_one_node" and not o.fits for o in opts if o.placement.kind == "single")
+    shard = e.weights + e.kv_cache + e.margin
+    assert cluster.per_node == {n: -(-shard // 2) + act + RUNTIME for n in ("local", "dgx-2")}
+
+
+def test_proportional_margin_split_llamacpp_by_free():
+    e = est(weights=60 * GiB, kv=0, runtime=1 * GiB, activations=1 * GiB, margin=30 * GiB)
+    budgets = {"local": budget(30 * GiB), "dgx-2": budget(60 * GiB)}
+    assert rank_bytes("llamacpp", e, Placement(kind="cluster", nodes=["local", "dgx-2"]), budgets) == \
+        {"local": (30 + 2) * GiB, "dgx-2": (60 + 2) * GiB}
+
+
+def test_llamacpp_node_with_no_or_negative_free_gets_no_share():
+    e = est(weights=90 * GiB, kv=10 * GiB, runtime=1 * GiB)
+    pl = Placement(kind="cluster", nodes=["local", "dgx-2"])
+    for low in (0, -5 * GiB):
+        budgets = {"local": budget(low), "dgx-2": budget(80 * GiB)}
+        assert rank_bytes("llamacpp", e, pl, budgets) == {"local": 1 * GiB, "dgx-2": 101 * GiB}
+
+
+def test_llamacpp_all_zero_free_falls_back_to_even_split():
+    e = est(weights=90 * GiB, kv=10 * GiB, runtime=1 * GiB)
+    budgets = {"local": budget(0), "dgx-2": budget(-1 * GiB)}
+    assert rank_bytes("llamacpp", e, Placement(kind="cluster", nodes=["local", "dgx-2"]), budgets) == \
+        {"local": 51 * GiB, "dgx-2": 51 * GiB}
+
+
+def test_equal_free_tie_break_is_first_in_config_order(options_two_nodes):
+    opts = options_two_nodes(model_gib=22, free_gib={"local": 100, "dgx-2": 100})
+    assert [o.placement.nodes for o in opts if o.recommended] == [["local"]]
+
+
+def test_api_placement_options_unknown_engine_and_invalid_ref(api_stack):
+    from tests.test_api_deployments import SMALL, admin
+    h = admin(api_stack)
+    calls = []
+    orig = api_stack.ctx.deployer.budget.refresh
+
+    async def counting_refresh():
+        calls.append(1)
+        return await orig()
+    api_stack.ctx.deployer.budget.refresh = counting_refresh
+    url = "/dgxmm/api/deployments/placement-options"
+    r = api_stack.post(url, headers=h, json={"name": "x", "engine": "nope", "model_ref": "Qwen/Qwen3-Tiny",
+                                             "config": SMALL})
+    assert r.status_code == 422 and r.json()["detail"]["code"] == "unknown_engine"
+    r = api_stack.post(url, headers=h, json={"name": "x", "engine": "vllm", "model_ref": "../../etc/passwd",
+                                             "config": SMALL})
+    assert r.status_code == 422 and r.json()["detail"]["code"] == "invalid_model_ref"
+    assert calls == []  # validation runs before the budget refresh
+    r = api_stack.post(url, headers=h, json={"name": "x", "engine": "vllm", "model_ref": "Qwen/Qwen3-Tiny",
+                                             "config": SMALL})
+    assert r.status_code == 200 and calls == [1]
