@@ -207,7 +207,10 @@ class DockerController:
         return [_info(c) for c in self.client.containers.list(all=True)]
 
     def list_managed(self) -> list[ContainerInfo]:
-        return [_info(c) for c in self.client.containers.list(all=True, filters={"label": f"{MANAGED_LABEL}=true"})]
+        """The managed containers that are (or were) deployments: without the internal ones (ROLE_LABEL, e.g. the
+        probe) and oneshots, which reconcile must never record as orphans and the planner never stop."""
+        out = [_info(c) for c in self.client.containers.list(all=True, filters={"label": f"{MANAGED_LABEL}=true"})]
+        return [i for i in out if not i.labels.get(ROLE_LABEL) and not i.labels.get("dgxmm.oneshot")]
 
     def get(self, id_or_name: str | None) -> ContainerInfo | None:
         if not id_or_name:

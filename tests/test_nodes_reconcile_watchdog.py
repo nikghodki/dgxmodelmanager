@@ -445,3 +445,27 @@ async def test_a_retry_that_fails_outside_the_rows_keeps_the_node_pending(deploy
     monkeypatch.undo()
     await reconcile(d, retry=True)
     assert d.reconcile_pending == {}
+
+
+# ---------- final review C4: the probe container is not a deployment ----------
+
+async def test_reconcile_never_adopts_the_probe_container(deployer_two_nodes):
+    """The probe is dgxmm.managed (the guard) but has the role label: never an orphan row, never a victim."""
+    from dgxmm.nodes.probe import PROBE_NAME, NodeProbe
+    d = deployer_two_nodes
+    NodeProbe(d.nodes, d.settings).ensure("dgx-2")
+    fake = d.fake("dgx-2")
+    assert [c.name for c in fake._containers.values()] == [PROBE_NAME]
+    notes = await reconcile(d)
+    assert d.count_rows() == 0, notes
+    assert not [n for n in notes if "probe" in n or "orphan" in n]
+    assert fake.container(next(iter(fake._containers))).status == "running"  # left alone
+    await d.aclose()
+
+
+def test_list_managed_skips_internal_role_containers_and_oneshots(two_node_registry):
+    fake = two_node_registry.fake("dgx-2")
+    dep = fake.add_managed(deployment_id=5, name="dgxmm-dep5")
+    fake.add_unmanaged("dgxmm-node-probe", image="busybox", labels={"dgxmm.managed": "true", "dgxmm.role": "probe"})
+    fake.add_unmanaged("oneshot", image="busybox", labels={"dgxmm.managed": "true", "dgxmm.oneshot": "true"})
+    assert [c.id for c in two_node_registry.docker("dgx-2").list_managed()] == [dep.id]
