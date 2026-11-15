@@ -88,6 +88,20 @@ async def test_reconcile_records_remote_orphan_on_its_node(deployer_two_nodes):
     with deployer_two_nodes.db.session() as s:
         rows = s.scalars(select(Deployment)).all()
     assert [(r.name, r.state, r.node) for r in rows] == [("ghost", "unknown", "dgx-2")]
+    # Task 10: verify orphan adoption sets placement and ranks
+    assert rows[0].placement == {"kind": "single", "nodes": ["dgx-2"]}
+    assert rows[0].ranks == []
+
+
+async def test_reconcile_records_local_orphan_on_local_node(deployer_two_nodes):
+    """Task 10: verify local orphan adoption also sets placement and ranks correctly."""
+    deployer_two_nodes.fake("local").add_managed(deployment_id=888, name="dgxmm-local-orphan")
+    await reconcile(deployer_two_nodes)
+    with deployer_two_nodes.db.session() as s:
+        rows = s.scalars(select(Deployment)).all()
+    assert [(r.name, r.state, r.node) for r in rows] == [("local-orphan", "unknown", "local")]
+    assert rows[0].placement == {"kind": "single", "nodes": ["local"]}
+    assert rows[0].ranks == []
 
 
 async def test_reconcile_local_unchanged_when_remote_node_is_down(deployer_two_nodes):
