@@ -94,9 +94,9 @@ GIB_F = float(1024**3)
 
 class Deployer:
     def __init__(self, *, settings: Settings, db: Database, docker, inventory, engines: dict, http: httpx.AsyncClient,
-                 events: EventBroker, budget=None, clock: Callable[[], float] = time.monotonic):
+                 events: EventBroker, budget=None, nodes=None, clock: Callable[[], float] = time.monotonic):
         self.settings, self.db, self.docker, self.inventory = settings, db, docker, inventory
-        self.engines, self.http, self.events, self.budget, self.clock = engines, http, events, budget, clock
+        self.engines, self.http, self.events, self.budget, self.nodes, self.clock = engines, http, events, budget, nodes, clock
         self.mem_lock = asyncio.Lock()
         self._locks: dict[int, asyncio.Lock] = {}
         self._monitors: dict[int, asyncio.Task] = {}

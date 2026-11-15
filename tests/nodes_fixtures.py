@@ -54,3 +54,25 @@ def two_node_settings(settings_factory):
             }
         ]
     )
+
+
+@pytest.fixture
+def two_node_registry(two_node_settings):
+    """NodeRegistry with fake Docker clients for testing."""
+    from dgxmm.nodes.registry import NodeRegistry
+    from tests.fakes import FakeDockerClient
+    
+    # Create a fake client for each node
+    fake_clients = {}
+    
+    def client_factory(node):
+        if node.id not in fake_clients:
+            fake_clients[node.id] = FakeDockerClient()
+        return fake_clients[node.id]
+    
+    registry = NodeRegistry(two_node_settings, client_factory=client_factory)
+    
+    # Add a helper method to get the fake client for a node
+    registry.fake = lambda node_id: fake_clients[node_id]
+    
+    return registry

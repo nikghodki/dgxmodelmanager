@@ -26,6 +26,7 @@ class AppContext:
     budget: Any = None
     deployer: Any = None
     docker: Any = None
+    nodes: Any = None  # NodeRegistry; multi-node support
     engines: dict = field(default_factory=dict)
     probe: Any = None
     http: Any = None
@@ -123,21 +124,23 @@ def build_context(settings: Settings) -> AppContext:
     from dgxmm.inventory.service import InventoryService
     from dgxmm.memory.budget import BudgetService
     from dgxmm.memory.hostmem import HostProbe, NvmlGpu
+    from dgxmm.nodes.registry import NodeRegistry
 
     Path(settings.data_dir).mkdir(parents=True, exist_ok=True)
     db = Database(f"sqlite:///{settings.db_path}")
     events = EventBroker()
     http = httpx.AsyncClient(timeout=httpx.Timeout(30, connect=5))
     inventory = InventoryService(settings)
-    docker = DockerController.from_env()
+    nodes = NodeRegistry(settings)
+    docker = nodes.docker("local")
     engines = build_engines(settings)
     probe = HostProbe(settings, NvmlGpu(), containers=docker.lookup)
     deployer = Deployer(settings=settings, db=db, docker=docker, inventory=inventory, engines=engines, http=http,
-                        events=events)
+                        events=events, nodes=nodes)
     budget = BudgetService(settings, probe, deployer.usage_rows)
     deployer.budget = budget
     ctx = AppContext(settings=settings, db=db, events=events, inventory=inventory, budget=budget, deployer=deployer,
-                     docker=docker, engines=engines, probe=probe, http=http)
+                     docker=docker, nodes=nodes, engines=engines, probe=probe, http=http)
 
     async def _bootstrap():
         bootstrap_admin(db)

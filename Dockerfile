@@ -12,7 +12,7 @@ WORKDIR /app
 COPY pyproject.toml ./
 COPY dgxmm ./dgxmm
 COPY deploy/decider ./deploy/decider
-RUN pip install --no-cache-dir . && useradd -u 1000 -m dgxmm && mkdir -p /app/data && chown 1000:1000 /app/data
+RUN apt-get update && apt-get install -y --no-install-recommends openssh-client && rm -rf /var/lib/apt/lists/* &&     pip install --no-cache-dir . && useradd -u 1000 -m dgxmm && mkdir -p /app/data && chown 1000:1000 /app/data
 COPY --from=ui /ui/dist /app/static
 USER 1000:1000
 EXPOSE 8090

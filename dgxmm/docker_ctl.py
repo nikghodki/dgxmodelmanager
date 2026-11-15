@@ -172,6 +172,33 @@ class DockerController:
         # Lookups use their own client with a short timeout so a slow daemon cannot stall the processes view.
         return cls(docker.from_env(), lookup_client=docker.from_env(timeout=LOOKUP_TIMEOUT_S))
 
+    @classmethod
+    def for_node(cls, node: "NodeConfig") -> "DockerController":
+        """Create a DockerController for a specific node (local or remote).
+        
+        For local nodes (unix:// URL), returns the same as from_env().
+        For remote nodes (ssh:// URL), creates a Docker client over SSH.
+        
+        Args:
+            node: NodeConfig with docker_url and other settings
+            
+        Returns:
+            DockerController configured for the node
+        """
+        from dgxmm.config import NodeConfig  # Import here to avoid circular import
+        
+        if node.docker_url.startswith("unix://"):
+            # Local node: use the same approach as from_env()
+            return cls.from_env()
+        elif node.docker_url.startswith("ssh://"):
+            # Remote node: create SSH-based Docker client
+            client = docker.DockerClient(base_url=node.docker_url, use_ssh_client=True, timeout=30)
+            lookup_client = docker.DockerClient(base_url=node.docker_url, use_ssh_client=True, 
+                                               timeout=LOOKUP_TIMEOUT_S)
+            return cls(client, lookup_client=lookup_client)
+        else:
+            raise ValueError(f"Unsupported docker_url scheme: {node.docker_url}")
+
     def list_all(self) -> list[ContainerInfo]:
         return [_info(c) for c in self.client.containers.list(all=True)]
 
