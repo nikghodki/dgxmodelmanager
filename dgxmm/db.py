@@ -193,6 +193,8 @@ class Download(Base):
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_by: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    # Migration 44: kind column distinguishes regular downloads from weight copies (Task 6)
+    kind: Mapped[str | None] = mapped_column(String(16), nullable=True)  # NULL = "download", "copy" = weight copy
 
 
 class Favourite(Base):

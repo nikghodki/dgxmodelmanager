@@ -175,7 +175,7 @@ class DownloadService:
             d = s.get(Download, dl_id)
             return {"id": d.id, "repo_id": d.repo_id, "revision": d.revision, "files": d.files, "state": d.state,
                     "bytes_done": d.bytes_done, "bytes_total": d.bytes_total, "error": d.error,
-                    "created_at": d.created_at.isoformat()}
+                    "kind": d.kind, "created_at": d.created_at.isoformat()}
 
     def list(self, limit: int = 50) -> list[dict]:
         with self.db.session() as s:

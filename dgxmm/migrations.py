@@ -190,6 +190,17 @@ def _deployment_node(conn: sqlite3.Connection) -> None:
         conn.execute('ALTER TABLE deployments ADD COLUMN "node" VARCHAR(32) DEFAULT "local"')
     conn.execute("UPDATE deployments SET node = 'local' WHERE node IS NULL")
 
+
+
+def _download_kind(conn: sqlite3.Connection) -> None:
+    """Version 44: downloads get a `kind` column (Task 6: weight copies). ``add_missing_columns`` adds the column
+    when creating a fresh database; it is added here when missing. Existing downloads are NULL (= "download")."""
+    if not _table_exists(conn, "downloads"):
+        return
+    cols = {r[1] for r in conn.execute('PRAGMA table_info("downloads")')}
+    if "kind" not in cols:
+        conn.execute('ALTER TABLE downloads ADD COLUMN "kind" VARCHAR(16)')
+
 # Version numbers reserved for the parallel feature lanes of the advanced decision-model features, so their
 # branches merge without renumbering: 4-9 deploy-time features, 10-19 operations features, 20-29 schedules/commands;
 # fixes after them from 30 on.
@@ -201,6 +212,7 @@ MIGRATIONS: list[Migration] = [
     Migration(30, "deployments: ids are never reused (AUTOINCREMENT)", _deployment_ids_never_reused, rebuilds=True),
     Migration(40, "deployments: on-demand mode", _ondemand_mode),
     Migration(41, "deployments: node", _deployment_node),
+    Migration(44, "downloads: kind", _download_kind),
 ]
 LATEST = max(m.version for m in MIGRATIONS)
 

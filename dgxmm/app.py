@@ -11,7 +11,7 @@ from pathlib import Path
 from fastapi import FastAPI
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 
-from dgxmm.api import auth as auth_api, users as users_api, host as host_api, inventory as inventory_api
+from dgxmm.api import auth as auth_api, users as users_api, host as host_api, inventory as inventory_api, nodes as nodes_api
 from dgxmm.api import engines as engines_api, deployments as deployments_api, stream as stream_api
 from dgxmm.api import audit as audit_api, containers as containers_api
 from dgxmm.api import catalog as catalog_api, downloads as downloads_api, planner as planner_api
@@ -31,7 +31,7 @@ BACKGROUND_STOP_S = 3.0  # how long shutdown waits for cancelled background loop
 
 ROUTERS = [auth_api, users_api, host_api, inventory_api, engines_api, deployments_api, stream_api, audit_api, containers_api, catalog_api, downloads_api, planner_api, metrics_api, integrations_api, decider_api,
            decider_features_api, insights_api, deploy_advice_api, decider_ops_api, schedules_api,
-           commands_api]
+           commands_api, nodes_api]
 
 
 class BodyLimit:
