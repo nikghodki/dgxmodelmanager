@@ -31,7 +31,7 @@ def settings_factory(tmp_path):
 
 @pytest.fixture
 def isolated_home(tmp_path, monkeypatch):
-    """NodeRegistry writes $HOME/.ssh/config for remote nodes: never the real one in tests."""
+    """A temporary HOME (NodeRegistry writes <data_dir>/ssh/config; tests check nothing lands under HOME)."""
     home = tmp_path / "home"
     home.mkdir(exist_ok=True)
     monkeypatch.setenv("HOME", str(home))

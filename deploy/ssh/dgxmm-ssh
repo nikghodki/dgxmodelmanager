@@ -1,0 +1,37 @@
+#!/bin/sh
+# DGXMM's ssh: the image installs it as /usr/local/bin/ssh, ahead of /usr/bin/ssh on PATH.
+#
+# docker-py's ssh:// transport (use_ssh_client=True) runs plain `ssh -l <user> -- <host> docker system dial-stdio`.
+# OpenSSH reads its user config from the passwd home directory, never $HOME, so the per-node config DGXMM's
+# NodeRegistry writes (pinned known_hosts, identity, StrictHostKeyChecking, BatchMode, timeouts) would never be
+# used. This wrapper passes it explicitly: -F "$DGXMM_SSH_CONFIG". Without that file ssh refuses to run (fail
+# closed: no fallback to another config, known_hosts or key).
+#
+# DGXMM runs as the host user's uid (compose `user:`), which may have no passwd entry in the image; OpenSSH then
+# exits with "No user exists for uid". For ssh only, nss_wrapper supplies a one-line passwd and group file.
+set -eu
+cfg="${DGXMM_SSH_CONFIG:-/app/data/ssh/config}"
+uid="$(id -u)"
+if ! getent passwd "$uid" >/dev/null 2>&1; then
+    lib=""
+    for f in /usr/lib/*/libnss_wrapper.so /usr/lib/libnss_wrapper.so; do
+        if [ -e "$f" ]; then lib="$f"; break; fi
+    done
+    if [ -n "$lib" ]; then
+        dir="${TMPDIR:-/tmp}/dgxmm-nss-$uid"
+        mkdir -p -m 700 "$dir"
+        if [ ! -O "$dir" ] || [ -L "$dir" ]; then
+            echo "dgxmm-ssh: $dir is not owned by uid $uid" >&2
+            exit 255
+        fi
+        printf 'dgxmm:x:%s:%s:dgxmm:%s:/bin/sh\n' "$uid" "$(id -g)" "$(dirname "$cfg")" > "$dir/passwd.$$"
+        printf 'dgxmm:x:%s:\n' "$(id -g)" > "$dir/group.$$"
+        mv -f "$dir/passwd.$$" "$dir/passwd"
+        mv -f "$dir/group.$$" "$dir/group"
+        LD_PRELOAD="$lib${LD_PRELOAD:+ $LD_PRELOAD}"
+        NSS_WRAPPER_PASSWD="$dir/passwd"
+        NSS_WRAPPER_GROUP="$dir/group"
+        export LD_PRELOAD NSS_WRAPPER_PASSWD NSS_WRAPPER_GROUP
+    fi
+fi
+exec /usr/bin/ssh -F "$cfg" "$@"

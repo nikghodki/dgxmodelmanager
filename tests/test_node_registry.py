@@ -14,18 +14,19 @@ def test_registry_builds_local_controller_for_unix_url(settings):
     assert isinstance(reg.docker("local"), DockerController)
 
 
-def test_registry_writes_ssh_config_with_pinned_known_hosts(two_node_settings, tmp_path, monkeypatch):
-    """Registry writes SSH config with pinned known_hosts per remote node."""
-    monkeypatch.setenv("HOME", str(tmp_path))
+def test_registry_writes_ssh_config_with_pinned_known_hosts(two_node_settings):
+    """Registry writes SSH config with pinned known_hosts per remote node (under the data dir: test_node_ssh.py)."""
+    from pathlib import Path
+    ssh_dir = Path(two_node_settings.data_dir) / "ssh"
     NodeRegistry(two_node_settings, client_factory=lambda n: FakeDockerClient())
-    cfg = (tmp_path / ".ssh" / "config").read_text()
+    cfg = (ssh_dir / "config").read_text()
     assert "Host 192.0.2.2" in cfg and "StrictHostKeyChecking yes" in cfg
     assert "BatchMode yes" in cfg
     assert f"IdentityFile {two_node_settings.node_ssh_key_path}" in cfg
-    kh_path = tmp_path / ".ssh" / "known_hosts_dgx-2"
+    kh_path = ssh_dir / "known_hosts_dgx-2"
     kh = kh_path.read_text()
     assert kh.strip() == two_node_settings.node("dgx-2").known_hosts
-    assert oct((tmp_path / ".ssh" / "config").stat().st_mode & 0o777) == "0o600"
+    assert oct((ssh_dir / "config").stat().st_mode & 0o777) == "0o600"
     assert oct(kh_path.stat().st_mode & 0o777) == "0o600"
 
 
@@ -118,7 +119,8 @@ def test_registry_derives_ssh_user_from_docker_url(settings_factory, tmp_path, m
     
     from dgxmm.nodes.registry import NodeRegistry
     NodeRegistry(s, client_factory=lambda n: FakeDockerClient())
-    cfg = (tmp_path / ".ssh" / "config").read_text()
+    from dgxmm.nodes.registry import ssh_config_path
+    cfg = ssh_config_path(s).read_text()
     assert "User deriveduser" in cfg
 
 

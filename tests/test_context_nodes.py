@@ -1,5 +1,6 @@
 """Multi-node context tests."""
 import pytest
+from pathlib import Path
 
 
 def test_remote_probe_loop_not_started_for_single_node(settings_factory):
@@ -37,7 +38,7 @@ def test_remote_probe_loop_started_for_multi_node(two_node_settings):
     from tests.fakes import FakeDockerClient
     
     # Need to mock the node registry with fakes
-    ctx = build_context(two_node_settings)
+    ctx = build_context(two_node_settings, client_factory=lambda n: FakeDockerClient())
     
     # Replace probe with NodeProbe
     from dgxmm.nodes.registry import NodeRegistry
@@ -180,7 +181,7 @@ def test_single_node_context_builds_no_node_probe(settings_factory, isolated_hom
     ctx = build_context(settings_factory(), client_factory=lambda n: fake)
     assert ctx.node_probe is None and ctx.deployer.node_probe is None
     assert ctx.budget.nodes is None and ctx.budget.node_probe is None
-    assert not (isolated_home / ".ssh").exists()
+    assert not (isolated_home / ".ssh").exists() and not (Path(ctx.settings.data_dir) / "ssh").exists()
 
 
 async def test_two_node_context_admits_remote_deploy_once_probe_is_fresh(two_node_settings, fake_hf_repo,
@@ -198,7 +199,8 @@ async def test_two_node_context_admits_remote_deploy_once_probe_is_fresh(two_nod
     assert isinstance(ctx.node_probe, NodeProbe)
     assert ctx.budget.node_probe is ctx.node_probe and ctx.deployer.node_probe is ctx.node_probe
     assert ctx.budget.nodes is ctx.nodes
-    assert (isolated_home / ".ssh" / "config").exists()  # the test HOME, not the real one
+    assert (Path(two_node_settings.data_dir) / "ssh" / "config").exists()  # the data dir, never a home
+    assert not (isolated_home / ".ssh").exists()
 
     fake_hf_repo("Qwen/Qwen3-Tiny", config=QWEN_TINY, files={"model.safetensors": 2 * GIB})
     ctx.inventory.refresh()

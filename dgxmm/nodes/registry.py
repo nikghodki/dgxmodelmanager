@@ -15,10 +15,31 @@ from dgxmm.config import LOCAL_NODE_ID, NodeConfig, Settings
 from dgxmm.docker_ctl import DockerController
 
 
-def ssh_config_path() -> Path:
-    """The ssh client config NodeRegistry writes ($HOME/.ssh/config: per-node user, key, pinned known_hosts,
-    StrictHostKeyChecking). Passed explicitly (ssh -F) by the weight copy: OpenSSH resolves ~ from passwd, not $HOME."""
-    return Path(os.environ.get("HOME", str(Path.home()))) / ".ssh" / "config"
+SSH_CONFIG_ENV = "DGXMM_SSH_CONFIG"  # the image sets it (Dockerfile) for its ssh wrapper and for this module alike
+
+
+def ssh_config_path(settings: Settings | None = None) -> Path:
+    """The ssh client config NodeRegistry writes (per-node user, key, pinned known_hosts, StrictHostKeyChecking):
+    $DGXMM_SSH_CONFIG, else <data_dir>/ssh/config. A DGXMM-owned path, never a ~/.ssh: OpenSSH reads ~/.ssh/config
+    from the passwd home (not $HOME), so nothing may rely on it being found there. Every ssh DGXMM runs gets it
+    explicitly: the weight copy passes -F, and docker-py's ssh:// transport (plain `ssh -l user -- host ...`) runs
+    the image's wrapper deploy/ssh/dgxmm-ssh, first on PATH, which adds -F $DGXMM_SSH_CONFIG."""
+    env = os.environ.get(SSH_CONFIG_ENV)
+    if env:
+        return Path(env)
+    data_dir = settings.data_dir if settings is not None else Settings.model_fields["data_dir"].default
+    return Path(data_dir) / "ssh" / "config"
+
+
+def _mkdirs_private(d: Path) -> None:
+    """Create ``d`` and any missing parents, each one DGXMM creates with mode 0700 (existing ones are left as is)."""
+    missing = []
+    while not d.exists():
+        missing.append(d)
+        d = d.parent
+    for m in reversed(missing):
+        m.mkdir(mode=0o700, exist_ok=True)
+        m.chmod(0o700)  # mkdir's mode is filtered by the umask
 
 
 class UnknownNode(KeyError):
@@ -106,9 +127,9 @@ class NodeRegistry:
     
     def _write_ssh_config(self, remote_nodes: list[NodeConfig]) -> None:
         """Write SSH config with pinned known_hosts for remote nodes."""
-        config_path = ssh_config_path()
+        config_path = ssh_config_path(self.settings)
         ssh_dir = config_path.parent
-        ssh_dir.mkdir(mode=0o700, exist_ok=True)
+        _mkdirs_private(ssh_dir)
         config_lines = []
         
         for node in remote_nodes:
@@ -141,8 +162,10 @@ class NodeRegistry:
                 f"  IdentityFile {self.settings.node_ssh_key_path}",
                 f"  UserKnownHostsFile {known_hosts_path}",
                 "  StrictHostKeyChecking yes",
-                "  ServerAliveInterval 15",
                 "  BatchMode yes",
+                "  ConnectTimeout 10",  # a node that is down fails in 10 s, not after the kernel's TCP timeout
+                "  ServerAliveInterval 15",  # a dead link ends the session after 3 x 15 s without an answer
+                "  ServerAliveCountMax 3",
                 "",
             ])
         

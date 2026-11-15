@@ -21,7 +21,6 @@ services:
     # in .env and ./install.sh, which then sets DGXMM_PID_MODE="" (an empty `pid:` = the container's own).
     pid: ${DGXMM_PID_MODE-host}
     environment:
-      HOME: /app/data/home
       DGXMM_CONFIG: /app/config.yaml
       DGXMM_HOST_HOME: "${DGXMM_HOST_HOME:?set DGXMM_HOST_HOME in .env (run ./install.sh)}"
       DGXMM_TRUSTED_PROXIES: "${DGXMM_TRUSTED_PROXIES:-}"  # empty → config.yaml/default

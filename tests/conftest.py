@@ -6,11 +6,25 @@ from dgxmm.config import PathMapping, Settings
 from dgxmm.db import Database
 
 
+@pytest.fixture(scope="session")
+def _no_ssh_bin(tmp_path_factory):
+    """A directory whose `ssh` fails at once: no test may open a real SSH connection (docker-py's ssh:// transport
+    spawns `ssh` from PATH). Tests that run OpenSSH on purpose call /usr/bin/ssh (or the image's wrapper) by path."""
+    d = tmp_path_factory.mktemp("no-ssh")
+    f = d / "ssh"
+    f.write_text("#!/bin/sh\necho 'tests never open SSH connections' >&2\nexit 255\n")
+    f.chmod(0o755)
+    return d
+
+
 @pytest.fixture(autouse=True)
-def _isolated_home_dir(tmp_path_factory, monkeypatch):
+def _isolated_home_dir(tmp_path_factory, monkeypatch, _no_ssh_bin):
     """Every test runs with HOME in a temporary directory: no test may write the real ~/.ssh (NodeRegistry writes
-    $HOME/.ssh/config for remote nodes) or anything else under the real home."""
+    an ssh config for remote nodes: under the data dir now, but never under a home) or anything else there."""
     monkeypatch.setenv("HOME", str(tmp_path_factory.mktemp("home")))
+    monkeypatch.delenv("DGXMM_SSH_CONFIG", raising=False)  # NodeRegistry writes <data_dir>/ssh/config
+    import os
+    monkeypatch.setenv("PATH", f"{_no_ssh_bin}{os.pathsep}{os.environ.get('PATH', '')}")
 
 
 @pytest.fixture

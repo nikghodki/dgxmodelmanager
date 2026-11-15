@@ -7,12 +7,18 @@ COPY frontend/ ./
 RUN npm run build
 
 FROM python:3.12-slim-bookworm@sha256:34386ef0cb081344d7ec1c103ba398e6e9f64e9ab3a1509accc92a4e24a07258
-ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 HF_HOME=/data/hf HF_HUB_DISABLE_TELEMETRY=1
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 HF_HOME=/data/hf HF_HUB_DISABLE_TELEMETRY=1 \
+    DGXMM_SSH_CONFIG=/app/data/ssh/config
 WORKDIR /app
 COPY pyproject.toml ./
 COPY dgxmm ./dgxmm
 COPY deploy/decider ./deploy/decider
-RUN apt-get update && apt-get install -y --no-install-recommends openssh-client && rm -rf /var/lib/apt/lists/* &&     pip install --no-cache-dir . && useradd -u 1000 -m dgxmm && mkdir -p /app/data && chown 1000:1000 /app/data
+# openssh-client + libnss-wrapper: remote nodes (Docker over SSH). deploy/ssh/dgxmm-ssh becomes `ssh` on PATH: it
+# passes the config NodeRegistry writes ($DGXMM_SSH_CONFIG) with -F, which docker-py's ssh:// transport does not,
+# and makes ssh work for a uid with no passwd entry here (compose runs DGXMM as the host user's uid).
+RUN apt-get update && apt-get install -y --no-install-recommends openssh-client libnss-wrapper && rm -rf /var/lib/apt/lists/* && \
+    pip install --no-cache-dir . && useradd -u 1000 -m dgxmm && mkdir -p /app/data && chown 1000:1000 /app/data
+COPY deploy/ssh/dgxmm-ssh /usr/local/bin/ssh
 COPY --from=ui /ui/dist /app/static
 USER 1000:1000
 EXPOSE 8090

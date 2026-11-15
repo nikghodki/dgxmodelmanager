@@ -370,6 +370,12 @@ class Settings(BaseModel):
                 if (why := unsafe_publish_reason(node.publish_bind)) is not None:
                     raise ValueError(f"remote node {node.id}: publish_bind {node.publish_bind!r} {why}; it must be "
                                      "the node's cluster IP (a concrete unicast address)")
+                # the generated ssh config has one Host block per cluster_ip: docker-py connects to the docker_url
+                # host, so any other name would miss that block (no pinned key, no identity)
+                url_host = node.docker_url[len("ssh://"):].rsplit("@", 1)[-1].split("/", 1)[0]
+                if url_host != node.cluster_ip:
+                    raise ValueError(f"remote node {node.id}: docker_url host {url_host!r} must be its cluster_ip "
+                                     f"{node.cluster_ip!r} (ssh://<user>@<cluster_ip>)")
             
             # Default local node's hf_cache_host to hf_cache.host
             if not local_nodes[0].hf_cache_host:

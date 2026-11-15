@@ -257,7 +257,10 @@ async def test_copy_spawns_tar_piped_into_ssh_with_exact_argv(sync):
     job = await s.copy_weights("dgx-2", "Qwen/Qwen3-Tiny", REV, user_id=1)
     v = await finished(sync.downloads, job.id)
     assert v["state"] == "done" and v["error"] is None
-    tar_argv, ssh_argv = copy_argv(s.settings.hf_cache.local, s.nodes.config("dgx-2"), TINY, REV)
+    from dgxmm.nodes.registry import ssh_config_path
+    tar_argv, ssh_argv = copy_argv(s.settings.hf_cache.local, s.nodes.config("dgx-2"), TINY, REV,
+                                   ssh_config_path(s.settings))
+    assert ssh_argv[2] == str(Path(s.settings.data_dir) / "ssh" / "config")
     tar, ssh = s.spawn.procs
     assert tar.argv == tar_argv and ssh.argv == ssh_argv
     # one pipe: tar writes it, ssh reads it; stderr captured; never a shell
@@ -482,10 +485,10 @@ async def test_transport_error_in_the_presence_check_is_node_unreachable(deploye
 
 def test_copy_ssh_pins_the_config_nodes_registry_wrote(two_node_registry):
     from dgxmm.nodes.registry import ssh_config_path
-    cfg = ssh_config_path()
-    assert cfg == Path(os.environ["HOME"]) / ".ssh" / "config" and cfg.exists()  # written by the registry
+    cfg = ssh_config_path(two_node_registry.settings)
+    assert cfg == Path(two_node_registry.settings.data_dir) / "ssh" / "config" and cfg.exists()  # the registry's
     assert "StrictHostKeyChecking yes" in cfg.read_text() and "known_hosts_dgx-2" in cfg.read_text()
-    _tar, ssh = copy_argv("/hf-local", two_node_registry.config("dgx-2"), TINY, REV)
+    _tar, ssh = copy_argv("/hf-local", two_node_registry.config("dgx-2"), TINY, REV, cfg)
     assert ssh[:7] == ["ssh", "-F", str(cfg), "-o", "StrictHostKeyChecking=yes", "-o", "BatchMode=yes"]
 
 

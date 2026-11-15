@@ -155,9 +155,11 @@ def _snapshot_blobs(repo: Path, snap: Path) -> list[str]:
     return sorted(blobs)
 
 
-def copy_argv(local_hf: str, node: NodeConfig, repo_dir: str, revision: str) -> tuple[list[str], list[str]]:
+def copy_argv(local_hf: str, node: NodeConfig, repo_dir: str, revision: str,
+              ssh_config: Path | None = None) -> tuple[list[str], list[str]]:
     """The ``tar -c`` argv (run here, on this node's HF cache ``local_hf``) and the ``ssh … tar -x`` argv (into the
-    node's ``hf_cache_host``) whose stdout/stdin are piped together. Reads the local snapshot's links (blocking)."""
+    node's ``hf_cache_host``) whose stdout/stdin are piped together. Reads the local snapshot's links (blocking).
+    ``ssh_config``: the config NodeRegistry wrote (default: ssh_config_path() for the default data dir)."""
     validate_repo_dir(repo_dir)
     validate_revision(revision)
     host = node.hf_cache_host
@@ -181,7 +183,7 @@ def copy_argv(local_hf: str, node: NodeConfig, repo_dir: str, revision: str) -> 
     if not re.fullmatch(r"^/[A-Za-z0-9._/-]+$", remote_hub):
         raise ValueError(f"node {node.id}: hf_cache_host {host!r} has characters a remote shell would interpret")
     # the config NodeRegistry wrote (key, pinned known_hosts per node), explicit: never ~ from passwd
-    ssh = ["ssh", "-F", str(ssh_config_path()), "-o", "StrictHostKeyChecking=yes", "-o", "BatchMode=yes",
+    ssh = ["ssh", "-F", str(ssh_config or ssh_config_path()), "-o", "StrictHostKeyChecking=yes", "-o", "BatchMode=yes",
            "-o", "ConnectTimeout=10", "-l", user, "--", node.cluster_ip,
            "tar", "-C", remote_hub, "-xf", "-"]
     return tar, ssh
@@ -248,7 +250,8 @@ class WeightsSync:
         def plan():
             if not snap.is_dir():
                 return None
-            return copy_argv(self.settings.hf_cache.local, node, repo_dir, revision), _snapshot_bytes(snap)
+            return (copy_argv(self.settings.hf_cache.local, node, repo_dir, revision, ssh_config_path(self.settings)),
+                    _snapshot_bytes(snap))
         try:
             planned = await asyncio.to_thread(plan)
         except ValueError as e:
