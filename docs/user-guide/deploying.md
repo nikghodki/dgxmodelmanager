@@ -22,7 +22,16 @@ Open **Deploy model** (Dashboard, Deployments, or the command palette). It needs
    on, with the hint *On demand needs LiteLLM (it starts models on requests that come through it)*. For
    on demand, **Idle minutes before sleeping** (1 to 1440) starts at the DGXMM default. See
    [on-demand models](on-demand.md).
-3. **Sizing and features**: the **Goal**, then context length, concurrent sequences, KV cache dtype, the
+3. **Where to run** (when multiple nodes are configured): DGXMM shows placement options with their
+   per-node memory need and whether each fits. Options are single nodes (dgx-1, dgx-2) and the cluster
+   (dgx-1 + dgx-2). One is marked **Recommended**: the single node with the most free memory if the model
+   fits on one node; otherwise the cluster if it fits there. The recommendation appears when you first open
+   the wizard; you can still pick any option. Each option shows its per-rank memory need: for single
+   placements it is the whole model, for clusters it is the per-rank share (model size divided by the number
+   of nodes). The memory check updates for your choice. When the model does not fit anywhere, no placement
+   is recommended and deploy is refused until you make it fit. When only one node is configured (the default),
+   this step is skipped and the implicit local node is used.
+4. **Sizing and features**: the **Goal**, then context length, concurrent sequences, KV cache dtype, the
    shared KV pool size, prefix caching, sleep mode, **Speculative decoding** and so on. Advanced options
    include tool-call and reasoning parsers, trust_remote_code, the served model name, and allowlisted
    extra flags. The suggestions in this step (suggested config, engine, parsers, draft model, code scan)
@@ -115,6 +124,58 @@ the pinned vLLM image does not list), or *unknown*. It also reports gated repos 
 template. DGXMM reads only `config.json`, the tokenizer config and chat template, the generation config
 and the first 8 KiB of the model card from the Hub, never the weights, and keeps the result for 7 days
 per commit. Viewers can see it too; their checks never use the HF token, so a gated repo shows as gated.
+
+## Multi-node deployments and cluster limits
+
+When multiple nodes are configured in `config.yaml`:
+
+**Cluster deployments.** A deployment on **dgx-1 + dgx-2 (cluster)** runs one model split across both nodes'
+GPUs. vLLM uses tensor parallelism over NCCL/RDMA; llama.cpp uses RPC layer split. The head node serves the
+API; worker nodes run headless. Any rank exiting fails the whole deployment and stops the others.
+
+**Cluster sleep behavior.** vLLM sleep (`--enable-sleep-mode`) does not work reliably across multiple nodes
+(hardware testing on 2026-11-15 showed that completions after wake produced garbled output). Therefore:
+
+- Cluster deployments never get sleep mode, even when the model supports it for single deployments.
+- A "sleep" of a cluster deployment is actually a **stop** that frees every node.
+- The deployment detail page shows `sleep_capable: false` and labels the action as "sleep (stops all nodes)".
+- The switch dialog does not offer a placement choice yet; switching placement requires stop and redeploy.
+
+**On-demand, schedules, watchdog and switch.** On-demand mode works for cluster deployments: the first request
+starts all ranks and waits for the head's health; idle timeout stops all ranks. Sleep/wake schedules work the
+same way (a sleep schedule stops every rank, its wake starts them again). The watchdog and planner can stop a
+cluster deployment when memory pressure requires it, freeing every node. Switch (single ↔ cluster) is
+supported: DGXMM stops all ranks and starts the new placement.
+
+**Node goes offline.** When a remote node becomes unreachable (network issue, node reboot, DGXMM cannot sample
+its memory for `3 × remote_probe_interval_s`, default 15 seconds):
+
+- The node is marked **stale** in DGXMM.
+- No new deployments are started on that node (fail closed).
+- Running deployments on that node are left untouched. Their container state becomes unknown and DGXMM
+  continues to monitor them with exponential backoff retries in the background.
+- Cluster deployments using that node continue to run if all ranks were already started; starting a cluster
+  deployment when any of its nodes is stale is refused with `node_unreachable`.
+- When the node comes back online (probe succeeds), it is marked fresh and new deployments are admitted again.
+- Remote-transport errors (Docker-over-SSH failures, probe timeout) never count toward the 5-errors-then-failed
+  rule that applies to engine crashes.
+
+**Deployment whose node was removed from config.** If you remove a node from `nodes:` in `config.yaml` and
+restart DGXMM, deployments that were on that node:
+
+- Are left in the database with their placement intact.
+- Show a warning in the UI: "node not configured" or "placement includes removed node".
+- Cannot be started, reconfigured or switched (operations return `400 unknown_node` or `placement_invalid`).
+- Can be stopped or removed via the UI or API. Stop/remove succeeds by releasing the database state without
+  making Docker calls to the removed node, so no orphan container is left in DGXMM's tracking. The container
+  on the removed node's host (if it still exists) must be cleaned up manually.
+
+**Copying weights to a remote node.** When you deploy on a remote node (single or cluster), DGXMM checks that
+the model exists in that node's HF cache. If not, deploy is refused with `409 weights_missing` and a
+`copy_weights` action. The action creates a background copy job (shown on the Downloads page) that transfers
+the snapshot over the cluster link with rsync. For llama.cpp clusters, only the head node needs the GGUF
+(workers receive tensors over RPC); for vLLM clusters, every node needs the full model. Once the copy
+completes, try deploying again.
 
 ## The start-up queue
 

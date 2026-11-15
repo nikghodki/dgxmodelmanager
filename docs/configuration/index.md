@@ -114,6 +114,168 @@ remote-code check 4 s; ⌘K commands 3 s per question and 8 s for the whole inte
 labels, routing advice and schedule proposals 10 s (in the background). Plan rankings are cached for 2 minutes and
 workload labels for 15 minutes.
 
+### Nodes
+
+DGXMM can manage models on one or more nodes (DGX Spark boxes or similar). With no `nodes:` key in
+`config.yaml`, DGXMM behaves exactly as today: one implicit local node. With a `nodes:` list, one
+DGXMM instance (on the first node) controls every node; other nodes run no DGXMM.
+
+Per deployment you choose where it runs:
+
+- **On dgx-1** (or whichever node runs DGXMM) — single-node deployment on the local node
+- **On dgx-2** (a remote node) — single-node deployment on a remote node, managed from dgx-1's DGXMM
+- **Across both** (cluster) — one model split across both nodes' GPUs (vLLM tensor parallel over NCCL/RDMA,
+  or llama.cpp RPC layer split)
+
+**Configuration.** Each node has an `id` (lowercase letters, digits and `-`), a `label` (shown in the UI), a
+`docker_url`, its `cluster_ip`, optional NCCL settings for cluster deployments, and SSH settings for remote
+nodes. The first node in the list is treated as the local node (where DGXMM runs); remote nodes need
+`ssh_user`, `known_hosts` and a key file.
+
+```yaml
+nodes:
+  - id: dgx-1
+    label: DGX-1
+    docker_url: unix:///var/run/docker.sock
+    cluster_ip: 192.0.2.1
+    publish_bind: 192.0.2.1  # cluster IP; engines bind here
+    hf_cache_host: ~/.cache/huggingface
+    nccl:
+      ib_hca: mlx5_0:1,mlx5_1:1
+      socket_ifname: eth0
+      gloo_socket_ifname: eth0
+
+  - id: dgx-2
+    label: DGX-2
+    docker_url: ssh://dgxuser@192.0.2.2
+    cluster_ip: 192.0.2.2
+    publish_bind: 192.0.2.2
+    hf_cache_host: /home/dgxuser/.cache/huggingface
+    ssh_user: dgxuser
+    known_hosts: |
+      192.0.2.2 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI...
+    nccl:
+      ib_hca: mlx5_2:1,mlx5_3:1
+      socket_ifname: eth1
+      gloo_socket_ifname: eth1
+```
+
+| Node field | Type | Meaning |
+|---|---|---|
+| `id` | string | Node identifier (1–32 chars: lowercase letters, digits and `-`). Used in API placement, logs, and database. |
+| `label` | string | Human-readable name shown in the UI (1–64 chars). |
+| `docker_url` | string | Docker connection. Local: `unix:///var/run/docker.sock`. Remote: `ssh://<user>@<cluster_ip>`. |
+| `cluster_ip` | IPv4 or null | Node's IP on the cluster link (point-to-point RDMA network). Required for cluster deployments. Remote engine ports bind here. |
+| `publish_bind` | IPv4 or null | Address remote engine ports are published on. Defaults to `cluster_ip`. Keep it on the cluster link (never `0.0.0.0`). |
+| `hf_cache_host` | path | Hugging Face cache on this node's host filesystem. |
+| `ssh_user` | string | SSH user for remote Docker (remote nodes only). |
+| `known_hosts` | string | SSH `known_hosts` lines for this node (remote nodes only, see [SSH setup](#node-ssh-key-and-known-hosts)). |
+| `nccl.ib_hca` | string | NCCL InfiniBand HCAs (e.g. `mlx5_0:1,mlx5_1:1`). Needed for vLLM clusters over RDMA. |
+| `nccl.socket_ifname` | string | Network interface for NCCL (e.g. `eth0`). |
+| `nccl.gloo_socket_ifname` | string | Network interface for Gloo collective operations (e.g. `eth0`). |
+
+**The implicit local node.** When `nodes:` is not set, DGXMM creates one implicit local node with id `local`,
+Docker socket `unix:///var/run/docker.sock`, `hf_cache_host` from `config.yaml` or settings, `publish_bind: 127.0.0.1`,
+no `cluster_ip` and no NCCL settings. Existing deployments (from before multi-node) are mapped to this node.
+
+**Per-node settings.** Each node uses its own `hf_cache_host`, `publish_bind` and `cluster_ip`. The Docker
+network (`docker_network`) exists only on the local node; remote engines run on their node's default bridge
+network and publish their API port on `publish_bind` (typically the cluster IP). Settings like `port_range`,
+`startup_timeout_s`, and `vllm_cache_mounts` apply globally; `vllm_cache_mounts` (local host paths) are not
+mounted on remote nodes.
+
+**Node health.** DGXMM keeps one long-lived probe container per remote node (image pinned by digest, `/proc`
+mounted read-only) and samples `meminfo` every `remote_probe_interval_s` (default 5 s). A node whose probe is
+older than `3 × interval` is marked **stale**: new starts are refused there (fail closed), running deployments
+are left alone, and DGXMM retries the probe in the background. When the node comes back it is marked fresh
+and new deployments are admitted again.
+
+**Cluster port allocation.** vLLM clusters need a master port (`--master-port`) on the head node; llama.cpp
+clusters need RPC ports on worker nodes. These ports are allocated from `cluster_port_range` (default
+`[29500, 29599]`), separate from the main `port_range`. The head's API port and master port are reserved on
+every node in the cluster placement.
+
+**llama.cpp RPC image.** Cluster deployments using llama.cpp need a special image with RPC support, built
+locally from `deploy/llamacpp-rpc` (commit 61dbf49, `GGML_RPC=ON`, CUDA sm_121) and loaded onto every node.
+The image is referenced by tag (`images.llamacpp_rpc`, default `dgxmm-llamacpp-rpc:61dbf49`) since it has no
+registry digest:
+
+```yaml
+images:
+  llamacpp_rpc: dgxmm-llamacpp-rpc:61dbf49
+```
+
+To build and load it on both nodes (from the node running DGXMM):
+
+```bash
+# Build locally
+docker build -t dgxmm-llamacpp-rpc:61dbf49 deploy/llamacpp-rpc
+
+# Load on remote node
+docker save dgxmm-llamacpp-rpc:61dbf49 | ssh dgxuser@192.0.2.2 docker load
+```
+
+<a id="node-ssh-key-and-known-hosts"></a>**Node SSH key and known_hosts.** Remote nodes need an SSH key for Docker-over-SSH. The key is a file under
+the data directory, pointed to by `node_ssh_key_file` in `config.yaml`:
+
+```yaml
+node_ssh_key_file: data/secrets/node_ssh_key
+```
+
+Default: `data/secrets/node_ssh_key`. The key must have mode 0600 and be accessible inside the DGXMM container
+at the path specified. To set it up:
+
+1. **Create a dedicated SSH key** (no passphrase):
+   ```bash
+   ssh-keygen -t ed25519 -f data/secrets/node_ssh_key -N '' -C 'dgxmm-node-access'
+   chmod 600 data/secrets/node_ssh_key
+   ```
+
+2. **Install the public key on the remote node**:
+   ```bash
+   ssh-copy-id -i data/secrets/node_ssh_key.pub dgxuser@192.0.2.2
+   ```
+
+3. **Get the `known_hosts` line** with `ssh-keyscan` and verify it against the host's real key:
+   ```bash
+   # Scan the host key
+   ssh-keyscan -t ed25519 192.0.2.2
+   
+   # Verify it matches the host's actual key fingerprint
+   ssh-keyscan -t ed25519 192.0.2.2 | ssh-keygen -lf -
+   # Compare with:
+   ssh dgxuser@192.0.2.2 'ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub'
+   ```
+
+4. **Add the verified line to the node config** in `config.yaml`:
+   ```yaml
+   nodes:
+     - id: dgx-2
+       docker_url: ssh://dgxuser@192.0.2.2
+       known_hosts: |
+         192.0.2.2 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExampleKeyHere...
+   ```
+
+The key file must be readable by the user the DGXMM container runs as (set by `DGXMM_UID` in `.env`). DGXMM
+validates the `known_hosts` fingerprint on startup and refuses to start if it cannot connect to a configured
+node. Never use trust-on-first-use in production; always verify the key fingerprint out of band.
+
+**Remote probe interval and cluster port range.**
+
+```yaml
+remote_probe_interval_s: 5.0   # Sample remote node memory every 5 seconds
+cluster_port_range: [29500, 29599]  # Master/RPC ports for clusters
+```
+
+**Memory budget per node.** Fit checks, memory budgets, the watchdog and the planner work per node. A cluster
+deployment's memory is counted on every node it uses: the per-rank share on each. A single-node deployment
+(local or remote) reserves memory on that node only. The Dashboard shows one memory bar per node; a cluster
+deployment appears on both nodes' bars.
+
+**Weights on remote nodes.** Deploying on a remote node whose HF cache lacks the model is refused with
+`weights_missing` and a `copy_weights` action. For llama.cpp clusters, only the head node needs the GGUF
+(workers receive tensors over RPC); for vLLM clusters, every node needs the model.
+
 ### Models and storage
 
 | Key | Type | Default | Meaning |

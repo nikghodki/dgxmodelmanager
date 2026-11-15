@@ -31,7 +31,9 @@ Tabs:
   [schedules](schedules.md)), the **Mode** card (*On demand* or *Always on* and the idle minutes; admins
   change them with **Save mode**, see [on-demand models](on-demand.md#choosing-and-changing-the-mode)),
   the **API access** card, memory (reserved, measured, estimate parts and
-  confidence), and the full configuration. API access shows how clients call this deployment: the single LiteLLM
+  confidence), and the full configuration. When multiple nodes are configured, **Runs on** shows
+  the placement: the node label (e.g. *DGX-1*) for single deployments, or *DGX-1 + DGX-2 (cluster)* for
+  clusters. API access shows how clients call this deployment: the single LiteLLM
   **Endpoint** (`…/v1`) and the **Model** name, each with a copy button, the LiteLLM status, and
   ready-to-copy `curl` and Python (OpenAI SDK) snippets that read the key from `LITELLM_API_KEY`. A
   warning appears when the integration is off, the model is not registered yet, or the last sync

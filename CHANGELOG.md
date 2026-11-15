@@ -5,6 +5,66 @@ All notable changes to DGXMM are documented in this file. The format is based on
 (the package version is `0.1.0`), so each section below is identified by its date. Upgrade notes for existing installs are in
 [upgrade](docs/getting-started/upgrade.md#upgrading-an-existing-install).
 
+## [Unreleased] — Multi-node deployments
+
+### Added
+
+- **Multi-node deployments.** DGXMM can now manage models across multiple DGX Spark nodes (or similar). Configure
+  a `nodes:` list in `config.yaml` with each node's id, label, Docker connection (`ssh://user@cluster-ip` for
+  remote nodes), cluster IP, HF cache path, SSH settings and NCCL parameters. Per deployment, choose where it runs:
+  on a single node (local or remote) or across both as a cluster (vLLM tensor parallel over NCCL/RDMA, or llama.cpp
+  RPC layer split). See [configuration nodes](docs/configuration/index.md#nodes) and
+  [deploying on multiple nodes](docs/user-guide/deploying.md#multi-node-deployments-and-cluster-limits).
+- **Placement wizard.** The deploy wizard shows placement options (single nodes and cluster) with per-node memory
+  needs and a recommendation: the single node with the most free memory if the model fits on one, otherwise the
+  cluster. Each option shows whether it fits. The Dashboard displays one memory bar per node; cluster deployments
+  appear on every node they use.
+- **Remote node health monitoring.** DGXMM keeps one probe container per remote node (read-only `/proc` mount) and
+  samples memory every 5 seconds (`remote_probe_interval_s`). A node whose probe is stale (older than `3 × interval`)
+  is marked stale: no new starts are admitted there, running deployments are left alone, and DGXMM retries in the
+  background. When the node comes back it is marked fresh.
+- **Cluster features.** On-demand mode, schedules, the watchdog, planner and switch work for cluster deployments.
+  Cluster sleep behavior: vLLM sleep across nodes was found unreliable in hardware testing (completions after wake
+  produced garbled output), so cluster deployments get `sleep_capable: false` and a "sleep" stops all ranks. Wake
+  and on-demand starts launch all ranks. Any rank exiting fails the whole deployment and stops the others.
+- **Copying weights to remote nodes.** Deploying on a remote node whose HF cache lacks the model is refused with
+  `409 weights_missing` and a `copy_weights` action. The action creates a background copy job (shown on Downloads)
+  that transfers the snapshot over the cluster link with rsync. For llama.cpp clusters, only the head node needs
+  the GGUF (workers receive tensors over RPC); for vLLM clusters, every node needs the full model.
+- **Engine API keys.** Engine containers now get an `--api-key` (generated per deployment, delivered to vLLM and
+  llama.cpp). LiteLLM and DGXMM's health checks send the key. vLLM enforces it on `/v1`, `/v2`, `/inference` and
+  `/cohere`; development endpoints stay open when sleep mode is enabled (single deployments that support sleep;
+  cluster deployments never get sleep mode).
+- **llama.cpp RPC image.** Cluster deployments using llama.cpp need `images.llamacpp_rpc` (default
+  `dgxmm-llamacpp-rpc:61dbf49`), built locally from `deploy/llamacpp-rpc` with `GGML_RPC=ON` and loaded onto
+  every node. See [configuration](docs/configuration/index.md#nodes).
+- **Cluster port allocation.** vLLM clusters use `cluster_port_range` (default `[29500, 29599]`) for master ports;
+  llama.cpp clusters use it for RPC ports. Separate from the main `port_range`.
+- **Deployments on removed nodes.** A deployment whose node was removed from `nodes:` shows "node not configured",
+  cannot be started or reconfigured, and can be stopped/removed (the operation succeeds by releasing database state,
+  with no Docker call to the removed node).
+
+### Security
+
+- **Node SSH key.** The SSH key for Docker-over-SSH on remote nodes (`node_ssh_key_file`, default
+  `data/secrets/node_ssh_key`) grants root-equivalent Docker socket access on those nodes. Protect it with mode
+  0600. Remote engine API ports are published on the cluster IP only (point-to-point link), never `0.0.0.0`. RPC
+  and NCCL ports are on the cluster link only. See [security overview](docs/security/overview.md).
+
+### Upgrade notes
+
+- Migration 41 adds `deployments.node`; existing deployments are mapped to the implicit local node. Migration 42
+  adds `deployments.placement` (JSON) and `engine_api_key`; migration 43 adjusts placement structure. Every existing
+  deployment remains on the local node and works exactly as before.
+- With no `nodes:` in `config.yaml`, DGXMM creates one implicit local node and behaves as before multi-node support.
+  Add a `nodes:` list to enable multi-node management.
+- The `node_ssh_key_file` (SSH key for remote nodes) must be readable by the user the DGXMM container runs as
+  (set by `DGXMM_UID` in `.env`). Create it with mode 0600 and install its public key on each remote node. See
+  [configuration](docs/configuration/index.md#node-ssh-key-and-known-hosts).
+- For llama.cpp clusters, build and load the RPC image on every node: `docker build -t dgxmm-llamacpp-rpc:61dbf49
+  deploy/llamacpp-rpc`, then `docker save dgxmm-llamacpp-rpc:61dbf49 | ssh user@node docker load` for each remote node.
+
+
 ## [Unreleased] — On-demand models
 
 ### Added
