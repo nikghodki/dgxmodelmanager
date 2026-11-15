@@ -216,6 +216,7 @@ def v40_db_with_one_deployment(tmp_path):
     cols = [c[1] for c in conn.execute('PRAGMA table_info("deployments")') if c[1] != "node"]
     col_list = ", ".join(f'"{c}"' for c in cols)
 
+    # Safe f-string: col_list built from PRAGMA table_info column names
     # Create new table without node, copy data, swap
     conn.execute(f"""
         CREATE TABLE deployments_new AS SELECT {col_list} FROM deployments
