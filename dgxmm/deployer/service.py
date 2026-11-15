@@ -1026,7 +1026,10 @@ class Deployer:
                 # node is back removes the container
                 msg = f"startup timed out after {self.settings.startup_timeout_s}s while its node was unreachable"
                 try:
-                    self._transition(dep_id, "failed", message=msg, last_error=f"{msg}: {e}")
+                    if cluster.is_cluster(self._get(dep_id)):  # every rank removed; reservations held until gone
+                        await cluster.fail(self, dep_id, f"{msg}: {e}")
+                    else:
+                        self._transition(dep_id, "failed", message=msg, last_error=f"{msg}: {e}")
                 except Exception:
                     log.exception("failed to transition deployment %s to failed after its startup timeout", dep_id)
                     self.gate.release(dep_id)
@@ -1040,7 +1043,10 @@ class Deployer:
             log.exception("monitor error for deployment %s (consecutive: %d)", dep_id, st.errors)
             if st.errors >= 5:
                 try:
-                    self._transition(dep_id, "failed", message="monitor error", last_error=f"monitor error: {e}")
+                    if cluster.is_cluster(self._get(dep_id)):  # every rank removed; reservations held until gone
+                        await cluster.fail(self, dep_id, f"monitor error: {e}")
+                    else:
+                        self._transition(dep_id, "failed", message="monitor error", last_error=f"monitor error: {e}")
                 except Exception:
                     log.exception("failed to transition deployment %s to failed after monitor errors", dep_id)
                 return True

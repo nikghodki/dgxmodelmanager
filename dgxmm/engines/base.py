@@ -33,7 +33,7 @@ class ContainerSpec:
     mounts: list[Mount]
     labels: dict[str, str]
     network: str
-    port: int
+    port: int | None  # None: a container that serves no port (a headless cluster worker)
     publish_bind: str | None
     gpus: bool = True
     ipc_host: bool = True

@@ -75,7 +75,8 @@ def held_ports(dep) -> set[int]:
 def head_url(d, dep) -> str:
     """http://<head cluster_ip>:<port>: where the head serves the API (LiteLLM, health, scraper, gateway)."""
     port = dep["port"] if isinstance(dep, dict) else dep.port
-    return f"http://{d.settings.node(nodes_of(dep)[0]).cluster_ip}:{port}"
+    head = d._require_node(nodes_of(dep)[0])  # a head removed from config.yaml: DeployError unknown_node
+    return f"http://{d.settings.node(head).cluster_ip}:{port}"
 
 
 def usage_rows(dep, launching: bool) -> list[tuple]:
@@ -225,6 +226,10 @@ async def restart(d, dep: Deployment, ref: str, raw_cfg: dict) -> bool:
     name = dep.alias or prep.engine.served_name(prep.cfg, ref)
     await d.require_not_foreign(name)
     unmanaged = await _checks(d, prep, placement)
+    # the recorded ranks of the previous run must be gone before any new rank starts (same names, same master port)
+    if not await remove_ranks(d, dep.id):
+        raise DeployError("docker_error", "rank containers of the previous run could not all be removed; try again",
+                          502)
     async with d.mem_lock:
         d.require_model_name(name, dep.id)
         _, need, mem_total = await _fit(d, prep, placement)
@@ -315,15 +320,13 @@ async def launch(d, dep_id: int, prep: Prepared, mem_total: dict[str, int]) -> N
                 raise DeployError(code, msg, status)
             by_rank[rs.rank]["container_id"] = cid
             ranks = [by_rank[k] for k in sorted(by_rank)]
+            # the head's id is the row's container_id: stored in the same commit as the ranks
+            _save_ranks(d, dep_id, ranks, **({"container_id": cid} if rs.rank == 0 else {}))
             if not created:
                 created = True
-                _save_ranks(d, dep_id, ranks)
                 d._transition(dep_id, "starting", message=f"rank {rs.rank} container {cid[:12]} created on node "
                                                           f"{rs.node}", last_error=None, exit_code=None,
                               oom_killed=None)
-            else:
-                _save_ranks(d, dep_id, ranks)
-        _save_ranks(d, dep_id, ranks, container_id=by_rank[0]["container_id"])
         d.events.publish("deployment", d.view(dep_id))
         started = True
     finally:
@@ -365,23 +368,32 @@ async def _fail_rank(d, dep: Deployment, rank: dict, info) -> None:
                exit_code=info.exit_code, oom_killed=oom)
 
 
-async def _infos(d, dep: Deployment) -> list[tuple[dict, object]]:
-    """(rank, its container info) of every rank (blocking lookups in worker threads; NodeUnreachable propagates)."""
-    out = []
+async def _infos(d, dep: Deployment) -> tuple[list[tuple[dict, object]], NodeUnreachable | None]:
+    """(rank, its container info) of every reachable rank (blocking lookups in worker threads), and the
+    NodeUnreachable of the first rank whose node could not be reached (None: all reached)."""
+    out, unreachable = [], None
     for r in ranks_of(dep):
-        info = await asyncio.to_thread(d._docker_for(r["node"]).get, r["container_id"]) if r.get("container_id") \
-            else None
+        try:
+            info = await asyncio.to_thread(d._docker_for(r["node"]).get, r["container_id"]) \
+                if r.get("container_id") else None
+        except NodeUnreachable as e:
+            unreachable = unreachable or e
+            continue
         out.append((r, info))
-    return out
+    return out, unreachable
 
 
 async def monitor_step(d, dep: Deployment, start: float) -> bool:
-    """Deployer._monitor_step of a cluster: every rank checked; health on the head only."""
-    infos = await _infos(d, dep)
+    """Deployer._monitor_step of a cluster: every rank checked; health on the head only. A rank that exited on a
+    reachable node fails the deployment even while another node is unreachable; otherwise an unreachable node raises
+    NodeUnreachable (Deployer._monitor_tick: backoff, then the start-up timeout)."""
+    infos, unreachable = await _infos(d, dep)
     for r, info in infos:
         if info is None or info.status in ("exited", "dead"):
             await _fail_rank(d, dep, r, info)
             return True
+    if unreachable is not None:
+        raise unreachable
     running = all(info.status == "running" for _, info in infos)
     if dep.state == "starting" and running:
         d._transition(dep.id, "loading", message="rank containers running; loading model")
@@ -408,20 +420,20 @@ async def check_live(d, dep: Deployment, skip_nodes: set[str]) -> bool:
     """Deployer.check_liveness of a cluster (under its lock): True if it failed. Skipped (nothing changes) when any
     of its nodes is stale, busy, too slow or unreachable."""
     infos = []
-    for r in ranks_of(dep):
+    for r in ranks_of(dep):  # an unreachable rank is skipped; the reachable ones are still evaluated
         node = r["node"]
         if d._is_remote(node):
             if node in skip_nodes or not d.node_configured(node):
-                return False
+                continue
             try:
                 info = await d._remote_lookup(node, r.get("container_id"))
             except NodeUnreachable as e:
                 skip_nodes.add(node)
-                log.warning("liveness check of deployment %s skipped: %s", dep.id, e)
-                return False
+                log.warning("liveness check of deployment %s on node %s skipped: %s", dep.id, node, e)
+                continue
             if info is _SKIPPED:
                 skip_nodes.add(node)
-                return False
+                continue
         else:
             info = await asyncio.to_thread(d.docker.get, r.get("container_id"))
         infos.append((r, info))
@@ -449,7 +461,11 @@ async def remove_ranks(d, dep_id: int) -> bool:
             docker = d._docker_for(node)
             if r.get("container_id"):
                 await asyncio.to_thread(docker.stop_and_remove, r["container_id"])
-            await asyncio.to_thread(docker.remove_leftover, rank_name(dep.name, r["rank"]), dep_id)
+            name = rank_name(dep.name, r["rank"])
+            if not await asyncio.to_thread(docker.remove_leftover, name, dep_id):
+                left = await asyncio.to_thread(docker.get, name)  # remove_leftover logs its errors, never raises
+                if left is not None and left.labels.get("dgxmm.deployment_id") == str(dep_id):
+                    raise RuntimeError(f"container {name} is still there")
             r["container_id"] = None
         except Exception as e:
             gone = False

@@ -213,6 +213,8 @@ class VllmEngine:
         reservation and its node's memory total (its --gpu-memory-utilization)."""
         head = nodes.config(placement.head)
         n = len(placement.nodes)
+        # no sleep mode on clusters (yet): no --enable-sleep-mode and no VLLM_SERVER_DEV_MODE dev endpoints
+        cfg = cfg.model_copy(update={"enable_sleep_mode": False})
         out: list[RankSpec] = []
         for rank, node_id in enumerate(placement.nodes):
             node = nodes.config(node_id)
@@ -238,7 +240,8 @@ class VllmEngine:
             spec = ContainerSpec(name=f"{container_name(launch.name)}-r{rank}", image=settings.images.vllm,
                                  command=cmd, environment=env, mounts=mounts,
                                  labels={**managed_labels(launch.deployment_id, self.name), RANK_LABEL: str(rank)},
-                                 network="host", port=launch.port, publish_bind=None, network_mode="host",
+                                 network="host", port=launch.port if is_head else None, publish_bind=None,
+                                 network_mode="host",
                                  devices=["/dev/infiniband"], cap_add=["IPC_LOCK"], ulimits={"memlock": (-1, -1)},
                                  shm_size="16g")
             out.append(RankSpec(node_id, rank, spec))

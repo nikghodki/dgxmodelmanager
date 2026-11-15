@@ -318,3 +318,178 @@ async def test_queued_cluster_launches_when_slot_frees(deployer_two_nodes, deeps
     assert await d.wait_ready(v["id"], 5) == "ready"
     assert [len(d.fake(n).containers.list()) for n in ("local", "dgx-2")] == [2, 1]
     await d.aclose()
+
+
+# ---------- fix round 1: generic monitor failures, restart, unreachable nodes ----------
+
+def _unreachable(d, node="dgx-2"):
+    from dgxmm.nodes.registry import NodeUnreachable
+    d.fake(node).raise_on_all = NodeUnreachable("ssh: connect timed out")
+
+
+async def _deployed(d, req):
+    """A cluster deploy whose background monitor is cancelled (the test drives the monitor itself)."""
+    v = await d.deploy(req, user_id=1)
+    d._monitors.pop(v["id"]).cancel()
+    return v
+
+
+async def test_unreachable_worker_past_startup_timeout_keeps_its_reservation(deployer_two_nodes, deepseek_cluster_req):
+    from dgxmm.deployer.service import MonitorState
+    d = deployer_two_nodes
+    d.cluster_retry_s = 30  # no retry within the test
+    v = await _deployed(d, deepseek_cluster_req)
+    worker = d._get(v["id"]).ranks[1]
+    _unreachable(d)
+    d.settings.startup_timeout_s = 0
+    assert await d._monitor_tick(v["id"], MonitorState(start=d.clock() - 1)) is True
+    assert d.state(v["id"]) == "stopping"
+    assert d.fake("local").containers.list() == []  # the head (reachable) is removed
+    await d.budget.refresh()
+    assert d.budget.current("dgx-2").committed >= worker["reserved"]  # not confirmed gone: still reserved
+    assert d.budget.current("local").committed == 0
+    assert v["id"] in d._cleanups
+    await d.aclose()
+
+
+async def test_five_monitor_errors_fail_cluster_with_no_rank_running(deployer_two_nodes, deepseek_cluster_req):
+    from dgxmm.deployer.service import MonitorState
+    d = deployer_two_nodes
+    v = await _deployed(d, deepseek_cluster_req)
+    d.fake("local").fail_get_count = 5
+    st = MonitorState(start=d.clock())
+    for _ in range(4):
+        assert await d._monitor_tick(v["id"], st) is False
+    assert await d._monitor_tick(v["id"], st) is True
+    assert d.state(v["id"]) == "failed" and "monitor error" in d._get(v["id"]).last_error
+    assert d.fake("local").containers.list() == [] == d.fake("dgx-2").containers.list()
+    await d.aclose()
+
+
+async def test_restart_removes_old_ranks_before_new_ones_start(deployer_two_nodes, ready_cluster_dep):
+    d = deployer_two_nodes
+    old = d._get(ready_cluster_dep.id)
+    old_ids = {r["container_id"] for r in old.ranks}
+    with d.db.session() as s:  # a failed row whose rank containers are still recorded and running
+        s.get(Deployment, old.id).state = "failed"
+    started = []
+    for node in ("local", "dgx-2"):
+        fake = d.fake(node)
+        orig = fake.containers.run
+
+        def run(*a, _orig=orig, _fake=fake, **kw):
+            started.append({c.id for f in ("local", "dgx-2") for c in d.fake(f).containers.list()})
+            return _orig(*a, **kw)
+        fake.containers.run = run
+    await d.restart(old.id)
+    assert started and all(not (ids & old_ids) for ids in started)  # no old rank alive when a new one starts
+    new = d._get(old.id)
+    assert {r["container_id"] for r in new.ranks}.isdisjoint(old_ids)
+    assert new.port == old.port and new.ranks[0]["master_port"] == old.ranks[0]["master_port"]
+    assert new.container_id == new.ranks[0]["container_id"]
+    assert [len(d.fake(n).containers.list()) for n in ("local", "dgx-2")] == [1, 1]
+
+
+async def test_restart_refused_while_an_old_rank_cannot_be_removed(deployer_two_nodes, ready_cluster_dep):
+    d = deployer_two_nodes
+    with d.db.session() as s:
+        s.get(Deployment, ready_cluster_dep.id).state = "failed"
+    d.fake("dgx-2").fail_remove = True
+    with pytest.raises(DeployError) as e:
+        await d.restart(ready_cluster_dep.id)
+    assert e.value.status == 502 and d.state(ready_cluster_dep.id) == "failed"
+    assert len(d.fake("local").containers.list()) == 0  # the head was removed, nothing new started
+    assert d._get(ready_cluster_dep.id).ranks[1]["container_id"] == ready_cluster_dep.ranks[1]["container_id"]
+
+
+async def test_unreachable_worker_during_monitor_waits(deployer_two_nodes, deepseek_cluster_req):
+    from dgxmm.deployer.service import MonitorState
+    d = deployer_two_nodes
+    v = await _deployed(d, deepseek_cluster_req)
+    _unreachable(d)
+    st = MonitorState(start=d.clock())
+    assert await d._monitor_tick(v["id"], st) is False and st.unreachable == 1
+    assert d.state(v["id"]) in ("starting", "loading") and len(d.fake("local").containers.list()) == 1
+    await d.aclose()
+
+
+async def test_head_exit_fails_cluster_while_worker_unreachable(deployer_two_nodes, deepseek_cluster_req):
+    from dgxmm.deployer.service import MonitorState
+    d = deployer_two_nodes
+    d.cluster_retry_s = 30
+    v = await _deployed(d, deepseek_cluster_req)
+    d.fake("local").exit_container(d._get(v["id"]).ranks[0]["container_id"], code=2)
+    _unreachable(d)
+    assert await d._monitor_tick(v["id"], MonitorState(start=d.clock())) is True
+    assert d.state(v["id"]) == "stopping" and d.fake("local").containers.list() == []
+    assert "rank 0" in d._get(v["id"]).last_error
+    await d.aclose()
+
+
+async def test_liveness_evaluates_local_head_while_worker_node_stale(deployer_two_nodes, ready_cluster_dep):
+    d = deployer_two_nodes
+    d.mark_stale("dgx-2")
+    d.cluster_retry_s = 30
+    d.fake("local").exit_container(ready_cluster_dep.ranks[0]["container_id"], code=1)
+    assert await d.check_liveness() == [ready_cluster_dep.id]
+    assert d.state(ready_cluster_dep.id) in ("stopping", "failed")
+    assert d.fake("local").containers.list() == []
+
+
+async def test_partial_launch_second_node_unreachable(deployer_two_nodes, deepseek_cluster_req):
+    """Head on dgx-2: the local worker starts first, then dgx-2 stops answering before its head rank runs."""
+    d = deployer_two_nodes
+    d.cluster_retry_s = 0.01
+    local = d.fake("local")
+    orig = local.containers.run
+
+    def run(*a, **kw):
+        c = orig(*a, **kw)
+        _unreachable(d)
+        return c
+    local.containers.run = run
+    req = deepseek_cluster_req.model_copy(update={"placement": Placement(kind="cluster", nodes=["dgx-2", "local"])})
+    with pytest.raises(DeployError) as e:
+        await d.deploy(req, user_id=1)
+    assert e.value.code == "node_unreachable"
+    dep_id = d.list_views()[0]["id"]
+    assert local.containers.list() == []  # the started worker is removed
+    assert d.state(dep_id) == "stopping"  # dgx-2 not confirmed clean: retried
+    d.fake("dgx-2").raise_on_all = None
+    for _ in range(200):
+        if d.state(dep_id) == "failed":
+            break
+        await asyncio.sleep(0.01)
+    assert d.state(dep_id) == "failed"
+    await d.aclose()
+
+
+async def test_stop_while_cleanup_pending(deployer_two_nodes, ready_cluster_dep):
+    d = deployer_two_nodes
+    d.cluster_retry_s = 30
+    d.fake("local").fail_remove = True
+    await d.stop(ready_cluster_dep.id)
+    task = d._cleanups[ready_cluster_dep.id]
+    d.fake("local").fail_remove = False
+    v = await d.stop(ready_cluster_dep.id)
+    await asyncio.sleep(0)
+    assert v["state"] == "stopped" and task.cancelled() and ready_cluster_dep.id not in d._cleanups
+    assert d.fake("local").containers.list() == []
+
+
+def test_cluster_specs_never_enable_sleep_mode(vllm_engine, cluster_launch):
+    cluster_launch["cfg"] = cluster_launch["cfg"].model_copy(update={"enable_sleep_mode": True})
+    for r in vllm_engine.cluster_specs(**cluster_launch):
+        assert "--enable-sleep-mode" not in r.spec.command
+        assert "VLLM_SERVER_DEV_MODE" not in r.spec.environment
+    head, worker = vllm_engine.cluster_specs(**cluster_launch)
+    assert head.spec.port == 8123 and worker.spec.port is None
+
+
+async def test_head_url_of_unconfigured_head_is_unknown_node(deployer_two_nodes, ready_cluster_dep):
+    d = deployer_two_nodes
+    with d.db.session() as s:
+        s.get(Deployment, ready_cluster_dep.id).placement = {"kind": "cluster", "nodes": ["dgx-9", "local"]}
+    with pytest.raises(DeployError) as e:
+        d.base_url_for(d._get(ready_cluster_dep.id))
+    assert e.value.code == "unknown_node"

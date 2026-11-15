@@ -247,15 +247,17 @@ async def _act_cluster(deployer, d: Deployment, listings: dict[str, dict], notes
                 notes.append(f"{d.name}: rank {r['rank']} container found on node {r['node']} by its label → linked")
         if problem is None and (c is None or c.status in ("exited", "dead")):
             problem = (r, c)
-    if linked:
-        head = next((r for r in ranks if r["rank"] == 0), None)
+    head = next((r for r in ranks if r["rank"] == 0), None)
+    head_cid = head.get("container_id") if head is not None else None
+    if linked or (head_cid and d.container_id != head_cid):  # the row's container_id is always the head's
         with deployer.db.session() as s:
             row = s.get(Deployment, d.id)
             row.ranks = [dict(r) for r in ranks]
-            if head is not None and head.get("container_id"):
-                row.container_id = head["container_id"]
-            s.add(DeploymentEvent(deployment_id=d.id, from_state=d.state, to_state=d.state,
-                                  message="rank containers found by their labels"))
+            if head_cid:
+                row.container_id = head_cid
+            if linked:
+                s.add(DeploymentEvent(deployment_id=d.id, from_state=d.state, to_state=d.state,
+                                      message="rank containers found by their labels"))
         d = deployer._get(d.id)
     if d.state == "stopping":
         return True
