@@ -142,7 +142,9 @@ async def adopt(deployer, container: str, name: str, user_id: int | None) -> dic
             raise AdoptError("name_in_use", f"a deployment named {name} already exists", 409)
         row = Deployment(name=name, engine="vllm", model_ref=ref, config=prep.cfg.model_dump(mode="json"),
                          state="stopped", reserved_bytes=prep.estimate.total, estimate=prep.estimate.as_dict(),
-                         adopted_from=info.name, created_by=user_id)
+                         adopted_from=info.name, created_by=user_id,
+                         placement={"kind": "single", "nodes": ["local"]},
+                         ranks=[])
         s.add(row)
         s.flush()
         s.add(DeploymentEvent(deployment_id=row.id, from_state="stopped", to_state="stopped",

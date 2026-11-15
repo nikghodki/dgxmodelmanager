@@ -2,6 +2,8 @@
 import json
 import sqlite3
 import pytest
+from sqlalchemy import select
+from dgxmm.db import Deployment
 from dgxmm.deployer.service import DeployError, DeployRequest, Placement
 from dgxmm.migrations import migrate
 
@@ -189,3 +191,101 @@ def test_migration_43_backfills_placement_from_node_column(tmp_path):
     
     assert placement == {"kind": "single", "nodes": ["dgx-2"]}
     conn.close()
+
+
+def test_node_placement_conflict_explicit():
+    """Explicit conflicting node and placement is rejected."""
+    with pytest.raises(ValueError, match="node.*placement"):
+        DeployRequest(name="a", engine="vllm", model_ref="x/y", 
+                      node="dgx-2", placement=Placement(kind="single", nodes=["local"]))
+
+
+def test_node_placement_default_accepts_placement():
+    """Default node with explicit placement sets node from placement."""
+    req = DeployRequest(name="a", engine="vllm", model_ref="x/y",
+                        placement=Placement(kind="single", nodes=["dgx-2"]))
+    assert req.node == "dgx-2"
+
+
+def test_node_placement_from_json():
+    """JSON input with conflicting node and placement is rejected."""
+    with pytest.raises(ValueError, match="node.*placement"):
+        DeployRequest.model_validate({
+            "name": "a", "engine": "vllm", "model_ref": "x/y",
+            "node": "dgx-2", "placement": {"kind": "single", "nodes": ["local"]}
+        })
+
+
+async def test_deploy_creates_row_with_placement(deployer_two_nodes, qwen_req):
+    """Fresh deployment row has placement and ranks."""
+    await deployer_two_nodes.deploy(qwen_req, 1)
+    with deployer_two_nodes.db.session() as s:
+        dep = s.scalar(select(Deployment).where(Deployment.name == qwen_req.name))
+        assert dep.placement == {"kind": "single", "nodes": ["local"]}
+        assert dep.ranks == []
+
+
+async def test_view_includes_placement(deployer_two_nodes, qwen_req):
+    """Deployment view includes placement and placement_label."""
+    result = await deployer_two_nodes.deploy(qwen_req, 1)
+    view = deployer_two_nodes.view(result["id"])
+    assert view["placement"] == {"kind": "single", "nodes": ["local"]}
+    assert view["placement_label"] == "dgx-1"
+
+
+def test_view_cluster_placement_label(deployer_two_nodes):
+    """Cluster deployment view has correct placement_label."""
+    # Create a cluster row directly in DB
+    with deployer_two_nodes.db.session() as s:
+        dep = Deployment(
+            name="cluster-test",
+            engine="vllm",
+            model_ref="test/model",
+            config={},
+            state="ready",
+            estimate={},
+            node="local",
+            placement={"kind": "cluster", "nodes": ["local", "dgx-2"]},
+            ranks=[]
+        )
+        s.add(dep)
+        s.commit()
+        dep_id = dep.id
+    
+    view = deployer_two_nodes.view(dep_id)
+    assert view["placement"]["kind"] == "cluster"
+    assert "dgx-1" in view["placement_label"]
+    assert "dgx-2" in view["placement_label"]
+    assert "cluster" in view["placement_label"].lower()
+
+
+def test_view_null_placement_reads_as_single(deployer_two_nodes):
+    """NULL placement reads as single on row's node."""
+    # Create a row with NULL placement
+    with deployer_two_nodes.db.session() as s:
+        dep = Deployment(
+            name="null-placement",
+            engine="vllm",
+            model_ref="test/model",
+            config={},
+            state="ready",
+            estimate={},
+            node="dgx-2",
+            placement=None,
+            ranks=None
+        )
+        s.add(dep)
+        s.commit()
+        dep_id = dep.id
+    
+    view = deployer_two_nodes.view(dep_id)
+    assert view["placement"] == {"kind": "single", "nodes": ["dgx-2"]}
+    assert view["placement_label"] == "dgx-2"
+
+
+def test_system_deployment_cluster_rejected_in_validation(deployer_two_nodes):
+    """System deployments with cluster placement are rejected during validation."""
+    placement = Placement(kind="cluster", nodes=["local", "dgx-2"])
+    with pytest.raises(DeployError) as e:
+        deployer_two_nodes.validate_placement(placement, "decision", system=True)
+    assert e.value.code == "cluster_unsupported"

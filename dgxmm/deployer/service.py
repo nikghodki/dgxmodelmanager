@@ -97,9 +97,19 @@ class DeployRequest(BaseModel):
     placement: Placement | None = None
 
     def model_post_init(self, __context):
-        """Map node field to placement if not explicitly set."""
+        """Map node field to placement if not explicitly set, or validate consistency."""
         if self.placement is None:
+            # No placement provided, create from node
             self.placement = Placement(kind="single", nodes=[self.node])
+        else:
+            # Placement provided, check for conflict with explicit node
+            if "node" in self.model_fields_set and self.node != self.placement.nodes[0]:
+                raise ValueError(
+                    f"conflicting node and placement: node={self.node!r} but "
+                    f"placement.nodes[0]={self.placement.nodes[0]!r}"
+                )
+            # Sync node to placement head (handles default node case)
+            self.node = self.placement.nodes[0]
 
 
 
@@ -607,9 +617,13 @@ class Deployer:
             return plans
 
     # ---------- lifecycle ----------
-    def validate_placement(self, placement: Placement, engine: str) -> None:
+    def validate_placement(self, placement: Placement, engine: str, system: bool = False) -> None:
         """Validate placement configuration. Raises DeployError if invalid."""
         if placement.kind == "cluster":
+            # System deployments cannot be clusters
+            if system:
+                raise DeployError("cluster_unsupported",
+                                  "system deployments cannot be clusters", 400)
             # Only vllm and llamacpp support clustering
             if engine not in ("vllm", "llamacpp"):
                 raise DeployError("cluster_unsupported_engine",
@@ -642,12 +656,7 @@ class Deployer:
         system = is_system_engine(prep.engine)
         
         # Validate placement
-        self.validate_placement(req.placement, req.engine)
-        
-        # System deployments cannot be clusters
-        if system and req.placement.kind == "cluster":
-            raise DeployError("cluster_unsupported_for_system",
-                              f"system deployments cannot be clusters", 400)
+        self.validate_placement(req.placement, req.engine, system)
         if system and node != LOCAL_NODE_ID:
             raise DeployError("node_unsupported", f"the {req.engine} engine runs only on the local node", 422)
         with self.db.session() as s:
@@ -682,7 +691,9 @@ class Deployer:
                                  mode="always_on" if system else req.mode,
                                  idle_timeout_s=None if system else req.idle_timeout_s,
                                  # the decision model has its own key (dgxmm/decider/secret.py)
-                                 engine_api_key=None if system else new_engine_key())
+                                 engine_api_key=None if system else new_engine_key(),
+                                 placement=req.placement.model_dump(),
+                                 ranks=[])
                 s.add(dep)
                 s.flush()
                 dep_id = dep.id
@@ -1323,6 +1334,28 @@ class Deployer:
             return None
         return next((u.actual for u in b.deployments if u.deployment_id == dep_id), None)
 
+    def _read_placement(self, d: Deployment) -> dict:
+        """Read placement from a Deployment row, handling NULL."""
+        if d.placement is not None:
+            return d.placement
+        # NULL placement: read as single on the row's node
+        node = d.node if d.node else "local"
+        return {"kind": "single", "nodes": [node]}
+
+    def _placement_label(self, placement: dict) -> str:
+        """Generate human-readable placement label."""
+        if placement["kind"] == "single":
+            node_id = placement["nodes"][0]
+            node_cfg = next((n for n in self.settings.nodes if n.id == node_id), None)
+            return node_cfg.label if node_cfg else node_id
+        else:
+            # cluster: join node labels with " + " and append "(cluster)"
+            labels = []
+            for node_id in placement["nodes"]:
+                node_cfg = next((n for n in self.settings.nodes if n.id == node_id), None)
+                labels.append(node_cfg.label if node_cfg else node_id)
+            return f"{' + '.join(labels)} (cluster)"
+
     def _view(self, d: Deployment) -> dict:
         engine = self.engines.get(d.engine)
         served = None
@@ -1349,6 +1382,8 @@ class Deployer:
             "litellm_error": self.litellm_error(d.id, d.state) if self.litellm_error is not None else None,
             **self._endpoints(d),
             "sleep_capable": bool(engine and engine.supports_sleep and d.config.get("enable_sleep_mode")),
+            "placement": self._read_placement(d),
+            "placement_label": self._placement_label(self._read_placement(d)),
             "created_at": d.created_at.isoformat() if d.created_at else None,
             "updated_at": d.updated_at.isoformat() if d.updated_at else None,
         }
