@@ -51,6 +51,37 @@ UNREACHABLE_BACKOFF_MAX_S = 60.0  # longest wait between monitor polls while a r
 REMOTE_LIVENESS_TIMEOUT_S = 5.0  # longest a liveness check waits on a remote node's Docker (the budget loop runs it)
 
 
+
+class Placement(BaseModel):
+    """Deployment placement: single-node or multi-node cluster."""
+    kind: Literal["single", "cluster"]
+    nodes: list[str]  # head first
+
+    @property
+    def head(self) -> str:
+        """Head node (rank 0)."""
+        return self.nodes[0]
+
+    @property
+    def workers(self) -> list[str]:
+        """Worker nodes (ranks 1+)."""
+        return self.nodes[1:]
+
+    def label(self, settings: Settings) -> str:
+        """Human-readable placement label."""
+        if self.kind == "single":
+            node_id = self.nodes[0]
+            node_cfg = next((n for n in settings.nodes if n.id == node_id), None)
+            return node_cfg.label if node_cfg else node_id
+        else:
+            # cluster: join node labels with " + "
+            labels = []
+            for node_id in self.nodes:
+                node_cfg = next((n for n in settings.nodes if n.id == node_id), None)
+                labels.append(node_cfg.label if node_cfg else node_id)
+            return f"{' + '.join(labels)} (cluster)"
+
+
 class DeployRequest(BaseModel):
     name: str = Field(pattern=NAME_PATTERN)
     engine: str = Field(pattern=r"^[a-z]{1,16}$")
@@ -63,6 +94,13 @@ class DeployRequest(BaseModel):
     mode: DeploymentMode = "always_on"  # system deployments are always_on whatever is sent
     idle_timeout_s: int | None = Field(None, ge=IDLE_TIMEOUT_MIN_S, le=IDLE_TIMEOUT_MAX_S)
     node: str = Field(LOCAL_NODE_ID, pattern=NODE_ID_PATTERN)  # where it runs (a configured node id)
+    placement: Placement | None = None
+
+    def model_post_init(self, __context):
+        """Map node field to placement if not explicitly set."""
+        if self.placement is None:
+            self.placement = Placement(kind="single", nodes=[self.node])
+
 
 
 class DeployError(Exception):
@@ -569,10 +607,47 @@ class Deployer:
             return plans
 
     # ---------- lifecycle ----------
+    def validate_placement(self, placement: Placement, engine: str) -> None:
+        """Validate placement configuration. Raises DeployError if invalid."""
+        if placement.kind == "cluster":
+            # Only vllm and llamacpp support clustering
+            if engine not in ("vllm", "llamacpp"):
+                raise DeployError("cluster_unsupported_engine",
+                                  f"engine {engine} does not support cluster deployments", 400)
+            
+            # Cluster needs at least 2 distinct nodes
+            if len(set(placement.nodes)) < 2:
+                raise DeployError("cluster_needs_two_nodes", 
+                                  "cluster deployment requires at least 2 distinct nodes", 400)
+            
+            # All nodes must be configured with cluster_ip and nccl
+            for node_id in placement.nodes:
+                node_cfg = next((n for n in self.settings.nodes if n.id == node_id), None)
+                if node_cfg is None:
+                    raise DeployError("cluster_node_not_ready",
+                                      f"node {node_id} is not configured", 400)
+                if node_cfg.cluster_ip is None or node_cfg.nccl is None:
+                    raise DeployError("cluster_node_not_ready",
+                                      f"node {node_id} is not ready for cluster deployments "
+                                      "(missing cluster_ip or nccl config)", 400)
+
     async def deploy(self, req: DeployRequest, user_id: int | None) -> dict:
+        # Cluster deployments not yet implemented (Task 12)
+        if req.placement.kind == "cluster":
+            raise DeployError("cluster_not_implemented",
+                              "cluster deployments will be available in a future release", 501)
+        
         node = self._require_node(req.node)
         prep = self.prepare(req.engine, req.model_ref, req.config)
         system = is_system_engine(prep.engine)
+        
+        # Validate placement
+        self.validate_placement(req.placement, req.engine)
+        
+        # System deployments cannot be clusters
+        if system and req.placement.kind == "cluster":
+            raise DeployError("cluster_unsupported_for_system",
+                              f"system deployments cannot be clusters", 400)
         if system and node != LOCAL_NODE_ID:
             raise DeployError("node_unsupported", f"the {req.engine} engine runs only on the local node", 422)
         with self.db.session() as s:

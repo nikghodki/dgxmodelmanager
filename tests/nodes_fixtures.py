@@ -46,7 +46,12 @@ def two_node_settings(settings_factory, isolated_home):
             {
                 "id": "local",
                 "label": "dgx-1",
-                "docker_url": "unix:///var/run/docker.sock"
+                "docker_url": "unix:///var/run/docker.sock",
+                "cluster_ip": "192.0.2.1",
+                "nccl": {
+                    "ib_hca": "mlx5_0,mlx5_1",
+                    "socket_ifname": "enp1s0f0np0"
+                }
             },
             {
                 "id": "dgx-2",

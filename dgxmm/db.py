@@ -98,6 +98,12 @@ class Deployment(Base):
     # audit record. NULL: a row from before engine keys (or a system deployment): the engine runs without a key and
     # nothing sends one, until its next launch gives it a key.
     engine_api_key: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # Placement (single-node or multi-node cluster): {"kind": "single"|"cluster", "nodes": [...]}.
+    # Nullable for add_missing_columns; migration 43 backfills from node column, and a NULL reads as {"kind": "single", "nodes": [<node or "local">]}.
+    placement: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    # Cluster ranks: [{"node", "rank", "container_id", "port"}] (empty for single deployments).
+    # Nullable for add_missing_columns; migration 43 sets [] on older rows, and a NULL reads as [].
+    ranks: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     created_by: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)

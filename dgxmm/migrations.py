@@ -202,6 +202,31 @@ def _engine_api_key(conn: sqlite3.Connection) -> None:
         conn.execute('ALTER TABLE deployments ADD COLUMN "engine_api_key" VARCHAR(64)')
 
 
+
+def _deployment_placement(conn: sqlite3.Connection) -> None:
+    """Version 43: deployments get placement (single or cluster) and ranks. add_missing_columns adds the columns
+    when creating a fresh database; they are added here when missing. Existing deployments are backfilled from
+    their node column ({"kind": "single", "nodes": [node or "local"]}), and ranks become []."""
+    if not _table_exists(conn, "deployments"):
+        return
+    cols = {r[1] for r in conn.execute('PRAGMA table_info("deployments")')}
+    if "placement" not in cols:
+        conn.execute('ALTER TABLE deployments ADD COLUMN "placement" TEXT')
+    if "ranks" not in cols:
+        conn.execute('ALTER TABLE deployments ADD COLUMN "ranks" TEXT')
+    
+    # Backfill placement from node column
+    import json
+    rows = conn.execute("SELECT id, node FROM deployments WHERE placement IS NULL").fetchall()
+    for row_id, node in rows:
+        node_value = node if node else "local"
+        placement = json.dumps({"kind": "single", "nodes": [node_value]})
+        conn.execute("UPDATE deployments SET placement = ? WHERE id = ?", (placement, row_id))
+    
+    # Backfill ranks
+    conn.execute("UPDATE deployments SET ranks = '[]' WHERE ranks IS NULL")
+
+
 def _download_kind(conn: sqlite3.Connection) -> None:
     """Version 44: downloads get `kind` ("copy": a copy of a snapshot to a remote node) and `node` (its target).
     ``add_missing_columns`` adds them when creating a fresh database; added here when missing. Existing rows stay
@@ -226,6 +251,7 @@ MIGRATIONS: list[Migration] = [
     Migration(40, "deployments: on-demand mode", _ondemand_mode),
     Migration(41, "deployments: node", _deployment_node),
     Migration(42, "deployments: engine API key", _engine_api_key),
+    Migration(43, "deployments: placement and ranks", _deployment_placement),
     Migration(44, "downloads: kind and node (weight copies)", _download_kind),
 ]
 LATEST = max(m.version for m in MIGRATIONS)
