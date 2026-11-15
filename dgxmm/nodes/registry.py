@@ -47,8 +47,22 @@ class NodeRegistry:
         config_lines = []
         
         for node in remote_nodes:
-            if not node.cluster_ip or not node.ssh_user or not node.known_hosts:
-                continue
+            # Remote nodes must have cluster_ip and known_hosts (validated in Settings)
+            if not node.cluster_ip:
+                raise ValueError(f"remote node {node.id} requires cluster_ip")
+            if not node.known_hosts:
+                raise ValueError(f"remote node {node.id} requires known_hosts")
+            
+            # Extract ssh_user from docker_url if not provided
+            ssh_user = node.ssh_user
+            if not ssh_user:
+                # Parse ssh://user@host from docker_url
+                if node.docker_url.startswith("ssh://"):
+                    url_part = node.docker_url[6:]  # strip ssh://
+                    if "@" in url_part:
+                        ssh_user = url_part.split("@")[0]
+                if not ssh_user:
+                    raise ValueError(f"remote node {node.id} requires ssh_user (not found in docker_url)")
             
             # Write per-node known_hosts file
             known_hosts_path = ssh_dir / f"known_hosts_{node.id}"
@@ -58,7 +72,7 @@ class NodeRegistry:
             # Add Host block to config
             config_lines.extend([
                 f"Host {node.cluster_ip}",
-                f"  User {node.ssh_user}",
+                f"  User {ssh_user}",
                 f"  IdentityFile {self.settings.node_ssh_key_file}",
                 f"  UserKnownHostsFile {known_hosts_path}",
                 "  StrictHostKeyChecking yes",
