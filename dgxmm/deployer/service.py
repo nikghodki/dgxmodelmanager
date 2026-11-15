@@ -314,9 +314,12 @@ class Deployer:
         return self._db_ports(exclude_dep, node_id) | self._unmanaged_ports(node_id)
 
     def _db_ports(self, exclude_dep: int | None, node_id: str) -> set[int]:
-        """Ports of the other active/planned deployments on ``node_id`` (DB only, no docker call)."""
+        """Ports of the other active/planned deployments on ``node_id`` (DB only, no docker call), and of those being
+        (re)launched right now (``launching``: e.g. a remote restart whose row is still stopped/failed while its
+        container starts after mem_lock; counted like usage_rows does)."""
         with self.db.session() as s:
-            return {d.port for d in s.scalars(select(Deployment)) if d.port and d.state in ACTIVE_STATES | {"planned"}
+            return {d.port for d in s.scalars(select(Deployment))
+                    if d.port and (d.state in ACTIVE_STATES | {"planned"} or d.id in self.launching)
                     and d.id != exclude_dep and (d.node or "local") == node_id}
 
     def _unmanaged_ports(self, node_id: str) -> set[int]:

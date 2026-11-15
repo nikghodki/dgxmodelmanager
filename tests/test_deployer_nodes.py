@@ -619,3 +619,95 @@ async def test_remote_spec_refuses_unsafe_bind(deployer_two_nodes, qwen_req, bin
         await d.deploy(qwen_req.model_copy(update={"node": "dgx-2"}), user_id=1)
     assert e.value.code == "unsafe_publish_bind"
     assert d.fake("dgx-2").run_calls == []
+
+
+# ---------- fix round 2: ports of remote launches in flight after mem_lock ----------
+def _block_first_run(fake, release, calls):
+    """dgx-2's first containers.run hangs until ``release``, then proceeds normally (later calls are not blocked)."""
+    orig = fake.containers.run
+
+    def run(*a, **kw):
+        if not calls:
+            calls.append(kw.get("name"))
+            release.wait(5)
+        return orig(*a, **kw)
+    fake.containers.run = run
+
+
+async def test_remote_restart_in_flight_keeps_its_port(deployer_two_nodes, ready_remote_dep, qwen_req):
+    """A's restart writes its port into a still-stopped row and launches after mem_lock: a concurrent deploy on the
+    same node must not get that port."""
+    import asyncio
+    import threading
+    d = deployer_two_nodes
+    d.settings.max_concurrent_startups = 0  # no start-up limit: B is not queued behind A
+    a_id = ready_remote_dep.id
+    await d.stop(a_id)
+    release, calls = threading.Event(), []
+    _block_first_run(d.fake("dgx-2"), release, calls)
+    restart = asyncio.create_task(d.restart(a_id))
+    try:
+        assert await _until(lambda: calls)  # A's launch is in flight, its row still "stopped"
+        assert d.state(a_id) == "stopped"
+        b = await d.deploy(qwen_req.model_copy(update={"node": "dgx-2", "name": "b", "alias": "b"}), user_id=1)
+    finally:
+        release.set()
+    a = await asyncio.wait_for(restart, 10)
+    assert a["port"] != b["port"]
+    assert a["state"] in ("starting", "loading") and b["state"] in ("starting", "loading")
+
+
+async def test_remote_deploy_in_flight_keeps_its_port(deployer_two_nodes, qwen_req):
+    """Same for a fresh remote deploy launching after mem_lock (row "planned") and a concurrent one."""
+    import asyncio
+    import threading
+    d = deployer_two_nodes
+    d.settings.max_concurrent_startups = 0
+    release, calls = threading.Event(), []
+    _block_first_run(d.fake("dgx-2"), release, calls)
+    first = asyncio.create_task(d.deploy(qwen_req.model_copy(update={"node": "dgx-2", "name": "a", "alias": "a"}),
+                                         user_id=1))
+    try:
+        assert await _until(lambda: calls)
+        b = await d.deploy(qwen_req.model_copy(update={"node": "dgx-2", "name": "b", "alias": "b"}), user_id=1)
+    finally:
+        release.set()
+    a = await asyncio.wait_for(first, 10)
+    assert a["port"] != b["port"]
+
+
+async def test_remote_queued_launch_in_flight_keeps_its_port(deployer_two_nodes, qwen_req):
+    """And for a queued remote deployment launching after mem_lock (row "queued") while another deploy runs."""
+    import asyncio
+    import threading
+    d = deployer_two_nodes
+    blocker = await d.deploy(qwen_req.model_copy(update={"name": "l", "alias": "l"}), user_id=1)  # holds the slot
+    q = await d.deploy(qwen_req.model_copy(update={"node": "dgx-2", "name": "a", "alias": "a"}), user_id=1)
+    assert q["state"] == "queued"
+    release, calls = threading.Event(), []
+    _block_first_run(d.fake("dgx-2"), release, calls)
+    d.engines_http.healthy.add(blocker["port"])  # l becomes ready: the queued remote one takes the slot
+    try:
+        assert await _until(lambda: calls)
+        d.settings.max_concurrent_startups = 0
+        b = await d.deploy(qwen_req.model_copy(update={"node": "dgx-2", "name": "b", "alias": "b"}), user_id=1)
+    finally:
+        release.set()
+    assert await _until(lambda: d.state(q["id"]) in ("starting", "loading"))
+    assert d._get(q["id"]).port != b["port"]
+
+
+def test_db_ports_counts_rows_being_launched(deployer_two_nodes):
+    from tests.nodes_fixtures import insert_deployment
+    d = deployer_two_nodes
+    insert_deployment(d, node="dgx-2", port=8100, name="a")
+    with d.db.session() as s:
+        from dgxmm.db import Deployment
+        row = s.query(Deployment).filter_by(name="a").one()
+        row.state = "stopped"
+        dep_id = row.id
+    assert 8100 not in d._db_ports(None, "dgx-2")
+    d.launching[dep_id] = ("Qwen/Qwen3-0.6B",)
+    assert 8100 in d._db_ports(None, "dgx-2")
+    assert 8100 not in d._db_ports(dep_id, "dgx-2")  # its own port stays available to it
+    assert 8100 not in d._db_ports(None, "local")
