@@ -194,3 +194,205 @@ async def test_single_node_watchdog_state_is_unchanged(stack):
     assert await w.check_nodes(compute_budget(HostMemory(121 * GIB, 5 * GIB, 0, 0, 0, 0), [], stack.settings)) \
         == "critical"
     assert set(w.state()) == {"level", "message", "since", "action"}
+
+
+# ---------- fix round 1 ----------
+
+async def test_startup_completes_with_unsampled_remote_node_and_background_retry_reconciles(two_node_settings):
+    """The start-up reconcile is one pass: a remote node with no memory sample yet must not hold up start-up; the
+    background retry reconciles it once the remote probe loop has sampled it."""
+    import asyncio
+    from dgxmm.context import build_context
+    from tests.fakes import FakeDockerClient
+    settings = two_node_settings
+    settings.remote_probe_interval_s = 0.05
+    from pathlib import Path
+    (Path(settings.host_proc) / "meminfo").write_text("MemTotal: 127000000 kB\nMemAvailable: 100000000 kB\n")
+    fakes = {"local": FakeDockerClient(), "dgx-2": FakeDockerClient()}
+    fakes["dgx-2"].exec_output = "MemTotal: 127000000 kB\nMemAvailable: 100000000 kB\n"
+    ctx = build_context(settings, client_factory=lambda n: fakes[n.id])
+    with ctx.db.session() as s:
+        row = Deployment(name="q2", engine="vllm", model_ref="Qwen/Qwen3-Tiny", config={}, state="starting",
+                         port=8150, reserved_bytes=0, estimate={}, node="dgx-2")
+        s.add(row)
+        s.flush()
+        dep_id = row.id
+    fakes["dgx-2"].add_managed(deployment_id=dep_id, name="dgxmm-q2")
+    for fn in ctx.startup:
+        await asyncio.wait_for(fn(), 10)  # never waits on the remote node
+    assert ctx.deployer._get(dep_id).container_id is None
+    assert "dgx-2" in ctx.deployer.reconcile_pending
+    names = {"_remote_probe_loop", "_reconcile_retry"}
+    tasks = [asyncio.create_task(fn()) for fn in ctx.background if fn.__name__ in names]
+    assert len(tasks) == 2
+    try:
+        for _ in range(200):
+            if not ctx.deployer.reconcile_pending:
+                break
+            await asyncio.sleep(0.025)
+        assert ctx.deployer.reconcile_pending == {}
+        assert ctx.deployer._get(dep_id).container_id is not None
+    finally:
+        for t in tasks:
+            t.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        await ctx.deployer.aclose()
+        await ctx.http.aclose()
+
+
+def _hold_listing(d, early=False):
+    """The next container listing on dgx-2 blocks (in its worker thread) until the returned event is set; it lists
+    the containers as they are then (``early``: as they were when the listing was called)."""
+    import threading
+    fake = d.fake("dgx-2")
+    orig = fake.containers.list
+    release, held = threading.Event(), []
+
+    def listing(*a, **kw):
+        if not held:
+            held.append(1)
+            seen = orig(*a, **kw) if early else None
+            release.wait(10)
+            return seen if early else orig(*a, **kw)
+        return orig(*a, **kw)
+    fake.containers.list = listing
+    d.remote_liveness_timeout_s = 10
+    return release
+
+
+async def _start_retry(d):
+    import asyncio
+    task = asyncio.create_task(reconcile(d, retry=True))
+    await asyncio.sleep(0.05)  # the retry is waiting on the listing
+    return task
+
+
+async def _restarted_with_dgx2_skipped(d):
+    d.mark_stale("dgx-2")
+    await reconcile(d)
+    assert "dgx-2" in d.reconcile_pending
+    d.probe.stale_nodes.discard("dgx-2")
+
+
+async def test_retry_leaves_a_deployment_stopped_during_the_listing(deployer_two_nodes, ready_remote_dep):
+    d = deployer_two_nodes
+    await _restarted_with_dgx2_skipped(d)
+    release = _hold_listing(d)
+    task = await _start_retry(d)
+    await d.stop(ready_remote_dep.id, reason="user")
+    release.set()
+    await task
+    row = d.row(ready_remote_dep.id)
+    assert (row.state, row.container_id) == ("stopped", None)
+    assert not d.has_monitor(ready_remote_dep.id) and not d.gate.holds(ready_remote_dep.id)
+
+
+async def test_retry_leaves_a_deployment_restarted_during_the_listing(deployer_two_nodes, ready_remote_dep):
+    d = deployer_two_nodes
+    dep_id = ready_remote_dep.id
+    await _restarted_with_dgx2_skipped(d)
+    d.fake("dgx-2")._containers.clear()  # its container is gone: the start-up snapshot says "missing"
+    release = _hold_listing(d, early=True)  # the listing predates the restart: the new container is not in it
+    task = await _start_retry(d)
+    await d.stop(dep_id, reason="user")
+    task_restart = await d.restart(dep_id, 1)
+    assert await d.wait_ready(dep_id, 5) == "ready"
+    cid = d.row(dep_id).container_id
+    assert cid
+    release.set()
+    await task
+    row = d.row(dep_id)
+    assert (row.state, row.container_id) == ("ready", cid)
+    assert task_restart["id"] == dep_id
+    await d.aclose()
+
+
+async def test_retry_does_not_adopt_a_deployment_created_during_the_listing(deployer_two_nodes, ready_remote_dep):
+    d = deployer_two_nodes
+    await _restarted_with_dgx2_skipped(d)
+    release = _hold_listing(d)
+    task = await _start_retry(d)
+    new_id = d.insert_row(node="dgx-2", state="ready", name="late", port=8170)
+    c = d.fake("dgx-2").add_managed(deployment_id=new_id, name="dgxmm-late")
+    with d.db.session() as s:
+        s.get(Deployment, new_id).container_id = c.id
+    release.set()
+    notes = await task
+    with d.db.session() as s:
+        names = sorted(r.name for r in s.scalars(select(Deployment)))
+    assert names == ["late", "qwen"]
+    assert not [n for n in notes if "orphan" in n]
+
+
+async def test_retry_never_starts_a_second_listing_while_one_is_running(deployer_two_nodes, ready_remote_dep):
+    import asyncio
+    import threading
+    d = deployer_two_nodes
+    await _restarted_with_dgx2_skipped(d)
+    fake = d.fake("dgx-2")
+    orig, calls, release = fake.containers.list, [], threading.Event()
+
+    def listing(*a, **kw):
+        calls.append(1)
+        release.wait(10)
+        return orig(*a, **kw)
+    fake.containers.list = listing
+    d.remote_liveness_timeout_s = 0.05
+    await reconcile(d, retry=True)  # times out, the listing keeps running
+    await reconcile(d, retry=True)  # skipped: the earlier listing has not finished
+    assert len(calls) == 1 and "dgx-2" in d.reconcile_pending
+    release.set()
+    for _ in range(100):
+        if d._liveness_inflight["dgx-2"].done():
+            break
+        await asyncio.sleep(0.01)
+    await reconcile(d, retry=True)
+    assert d.reconcile_pending == {}
+
+
+async def test_mark_keeps_the_earlier_reason_and_is_cleared_once_the_node_is_configured(deployer_two_nodes):
+    d = deployer_two_nodes
+    gone = d.insert_row(node="dgx-9", state="failed", name="gone")
+    with d.db.session() as s:
+        s.get(Deployment, gone).last_error = "out of memory"
+    back = d.insert_row(node="dgx-2", state="failed", name="back")
+    plain = d.insert_row(node="dgx-2", state="stopped", name="plain")
+    with d.db.session() as s:
+        s.get(Deployment, back).last_error = "node not configured: dgx-2 (before: out of memory)"
+        s.get(Deployment, plain).last_error = "node not configured: dgx-2"
+    await reconcile(d)
+    assert d.row(gone).last_error == "node not configured: dgx-9 (before: out of memory)"
+    await reconcile(d)  # marked once, never nested
+    assert d.row(gone).last_error == "node not configured: dgx-9 (before: out of memory)"
+    assert d.row(back).last_error == "out of memory"
+    assert d.row(plain).last_error is None
+
+
+async def test_a_failing_mark_does_not_abort_the_reconcile(deployer_two_nodes, monkeypatch):
+    from dgxmm.deployer import reconcile as rec
+    d = deployer_two_nodes
+    d.insert_row(node="dgx-9", state="ready", container_id="c" * 64, name="gone")
+
+    def boom(*a, **kw):
+        raise RuntimeError("database is locked")
+    monkeypatch.setattr(rec, "_mark_unconfigured", boom)
+    d.fake("local").add_managed(deployment_id=999, name="dgxmm-ghost")
+    notes = await reconcile(d)
+    assert any("gone: error during reconciliation" in n for n in notes)
+    assert d.count_rows() == 2  # the local orphan was still recorded
+
+
+async def test_litellm_leaves_out_on_demand_deployment_on_unconfigured_node(litellm_sync_two_nodes,
+                                                                            deployer_two_nodes, tmp_path):
+    d = deployer_two_nodes
+    key = tmp_path / "ondemand_key"
+    key.write_text("sk-ondemand-" + "k" * 40 + "\n")
+    d.settings.ondemand_key_file = str(key)
+    kept = d.insert_row(node="dgx-2", state="stopped", name="kept", port=8160)
+    gone = d.insert_row(node="dgx-9", state="stopped", name="gone", port=8161)
+    with d.db.session() as s:
+        for i, alias in ((kept, "kept"), (gone, "gone")):
+            row = s.get(Deployment, i)
+            row.mode, row.alias = "on_demand", alias
+    want = litellm_sync_two_nodes.desired()
+    assert {k[0] for k in want} == {str(kept)}

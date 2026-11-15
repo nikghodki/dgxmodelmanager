@@ -23,9 +23,8 @@ from urllib.parse import urlsplit
 import httpx
 from sqlalchemy import select
 
-from dgxmm.config import load_ondemand_key
+from dgxmm.config import LOCAL_NODE_ID, load_ondemand_key
 from dgxmm.db import Database, Deployment
-from dgxmm.deployer.service import DeployError
 from dgxmm.ondemand import HEALTH_HEADER
 from dgxmm.settings_store import LiteLLMConfig
 
@@ -597,10 +596,13 @@ class LiteLLMSync:
         key_err: str | None = None
         key_read = False
         settings = self.deployer.settings
+        node_of = self.deployer.nodes_by_id()
         for v in sorted(self.deployer.list_views(), key=lambda v: v["id"]):
             on_demand = v.get("mode") == "on_demand"
             if not registers(v["state"], v.get("mode"), bool(v.get("system"))) or not v["served_name"]:
                 continue  # system deployments (the decision model) are never LiteLLM models
+            if not self.deployer.node_configured(node_of.get(v["id"], LOCAL_NODE_ID)):
+                continue  # its node is no longer configured: nothing to point LiteLLM at (engine or gateway)
             if not on_demand and not v["port"]:
                 continue
             name = v["alias"] or v["served_name"]
@@ -620,10 +622,7 @@ class LiteLLMSync:
                 want[(str(v["id"]), name)] = (api_base, v["served_name"], key, ondemand_params(settings),
                                                 ondemand_info())
             else:
-                try:
-                    api_base = self.deployer.base_url_for(v) + "/v1"
-                except DeployError:  # its node is no longer configured: nothing to point LiteLLM at
-                    continue
+                api_base = self.deployer.base_url_for(v) + "/v1"
                 want[(str(v["id"]), name)] = (api_base, v["served_name"], "none", None, None)
         self.conflicts = conflicts
         self.ondemand = ondemand

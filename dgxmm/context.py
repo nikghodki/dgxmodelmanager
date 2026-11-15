@@ -184,8 +184,12 @@ def build_context(settings: Settings, client_factory=None) -> AppContext:
 
     async def _reconcile():
         await budget.refresh()
-        await reconcile(deployer)
-        while deployer.reconcile_pending:  # remote nodes skipped (stale at start-up, unreachable): once they answer
+        await reconcile(deployer)  # one pass: remote nodes that do not answer yet are left to _reconcile_retry
+
+    async def _reconcile_retry():
+        """Background: reconcile the remote nodes the start-up pass skipped (no memory sample yet, unreachable) once
+        they answer; ends when none is left."""
+        while deployer.reconcile_pending:
             await asyncio.sleep(settings.remote_probe_interval_s)
             try:
                 await reconcile(deployer, retry=True)
@@ -331,5 +335,6 @@ def build_context(settings: Settings, client_factory=None) -> AppContext:
     # Add remote probe loop only if we have remote nodes
     if ctx.nodes and any(ctx.nodes.is_remote(n) for n in ctx.nodes.ids() if n != "local"):
         tasks.insert(1, _remote_probe_loop)  # after budget, before inventory
+        tasks.insert(2, _reconcile_retry)
     ctx.background += tasks
     return ctx
