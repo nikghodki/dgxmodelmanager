@@ -236,7 +236,9 @@ class DecisionEngine:
                              mem_limit=int(settings.decider_memory_limit_gib * GIB), internal_network=internal,
                              secret_files={KEY_FILE: key.encode()})
 
-    async def health(self, http: httpx.AsyncClient, base_url: str, served_name: str) -> bool:
+    async def health(self, http: httpx.AsyncClient, base_url: str, served_name: str,
+                     api_key: str | None = None) -> bool:
+        """``api_key`` is unused: the decision model has its own key (dgxmm/decider/secret.py)."""
         try:
             status, content = await capped_request(http, "GET", f"{base_url}/health", timeout_s=5)
         except ValueError:  # reply larger than the cap
@@ -249,10 +251,10 @@ class DecisionEngine:
     def parse_metrics(self, text: str) -> EngineMetrics:
         return EngineMetrics()
 
-    async def sleep(self, http, base_url) -> None:
+    async def sleep(self, http, base_url, api_key: str | None = None) -> None:
         raise NotImplementedError("the decision model has no sleep mode")
 
-    async def wake(self, http, base_url) -> None:
+    async def wake(self, http, base_url, api_key: str | None = None) -> None:
         raise NotImplementedError("the decision model has no sleep mode")
 
     def kv_patch_options(self, cfg: DecisionConfig) -> list[dict]:

@@ -395,10 +395,12 @@ class FakeEngines:
         self.hosts: list[tuple[str, int, str]] = []  # (request host, port, path)
         self.all_healthy = False
         self.systemone_auth: list[str | None] = []
+        self.auth: list[tuple[int, str, str | None]] = []  # (port, path, Authorization header) of every request
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         port, path = request.url.port, request.url.path
         self.calls.append((request.method, port, path))
+        self.auth.append((port, path, request.headers.get("authorization")))
         self.hosts.append((request.url.host, port, path))
         if path in self.fail_paths:
             return httpx.Response(500)

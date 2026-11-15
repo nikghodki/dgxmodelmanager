@@ -93,6 +93,11 @@ class Deployment(Base):
     # Node where this deployment runs (local | dgx-2 | ...). Nullable for add_missing_columns;
     # migration 41 sets "local" on older rows, and a NULL reads as "local".
     node: Mapped[str | None] = mapped_column(String(32), nullable=True, default="local")
+    # The engine's bearer key (secrets.token_urlsafe(32)), generated at the deployment's first launch and kept across
+    # restart, sleep/wake and reconfigure (migration 42). A real column, never in config, a view, an event or an
+    # audit record. NULL: a row from before engine keys (or a system deployment): the engine runs without a key and
+    # nothing sends one, until its next launch gives it a key.
+    engine_api_key: Mapped[str | None] = mapped_column(String(64), nullable=True)
     created_by: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)

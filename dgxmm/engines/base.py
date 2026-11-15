@@ -67,6 +67,9 @@ class LaunchContext:
     reserved: int
     mem_total: int
     node: str = LOCAL_NODE_ID  # where the container runs (NodeConfig.id)
+    # the engine's bearer key (Deployment.engine_api_key), handed over in the environment; None = no key (a
+    # deployment from before engine keys, or a system deployment). Not part of repr().
+    api_key: str | None = field(default=None, repr=False)
 
 
 REMOTE_NETWORK = "bridge"  # a remote node's default Docker network: DGXMM's own networks exist only on the local node
@@ -100,10 +103,11 @@ class Engine(Protocol):
     def estimate(self, artifact: ModelArtifact, cfg: Any, draft: ModelArtifact | None, settings: Settings) -> MemoryEstimate: ...
     def container_spec(self, artifact: ModelArtifact, cfg: Any, draft: ModelArtifact | None,
                        launch: LaunchContext, settings: Settings) -> ContainerSpec: ...
-    async def health(self, http: httpx.AsyncClient, base_url: str, served_name: str) -> bool: ...
+    async def health(self, http: httpx.AsyncClient, base_url: str, served_name: str,
+                     api_key: str | None = None) -> bool: ...
     def parse_metrics(self, text: str) -> EngineMetrics: ...
-    async def sleep(self, http: httpx.AsyncClient, base_url: str) -> None: ...
-    async def wake(self, http: httpx.AsyncClient, base_url: str) -> None: ...
+    async def sleep(self, http: httpx.AsyncClient, base_url: str, api_key: str | None = None) -> None: ...
+    async def wake(self, http: httpx.AsyncClient, base_url: str, api_key: str | None = None) -> None: ...
     def kv_patch_options(self, cfg: Any) -> list[dict]: ...
 
 
@@ -123,10 +127,17 @@ def default_served_name(model_ref: str) -> str:
     return re.sub(r"[^A-Za-z0-9._-]", "-", stem).lower()[:63] or "model"
 
 
-async def openai_health(http: httpx.AsyncClient, base_url: str, served_name: str, health_path: str = "/health") -> bool:
-    r = await http.get(f"{base_url}{health_path}", timeout=5)
+def auth_headers(api_key: str | None) -> dict[str, str]:
+    """The Authorization header for an engine's bearer key; none without a key (as before engine keys)."""
+    return {"Authorization": f"Bearer {api_key}"} if api_key else {}
+
+
+async def openai_health(http: httpx.AsyncClient, base_url: str, served_name: str, health_path: str = "/health",
+                        api_key: str | None = None) -> bool:
+    headers = auth_headers(api_key)
+    r = await http.get(f"{base_url}{health_path}", headers=headers, timeout=5)
     if r.status_code != 200:
         return False
-    r = await http.post(f"{base_url}/v1/completions",
+    r = await http.post(f"{base_url}/v1/completions", headers=headers,
                         json={"model": served_name, "prompt": "Hi", "max_tokens": 1}, timeout=120)
     return r.status_code == 200

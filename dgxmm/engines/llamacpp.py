@@ -121,20 +121,23 @@ class LlamaCppEngine:
                "-np", str(cfg.parallel), "-ngl", str(cfg.n_gpu_layers), "-ctk", cfg.cache_type_k,
                "-ctv", cfg.cache_type_v, "-fa", cfg.flash_attn, "-b", str(cfg.n_batch), "-ub", str(cfg.n_ubatch),
                "--metrics", "--slots", "-a", self.served_name(cfg, artifact.ref), *cfg.extra_args]
+        # the key in the environment, never argv (--api-key would show in ps and docker inspect's Cmd)
+        env = {"LLAMA_API_KEY": launch.api_key} if launch.api_key else {}
         return ContainerSpec(name=container_name(launch.name), image=settings.images.llamacpp, command=cmd,
-                             environment={}, mounts=[mount], labels=managed_labels(launch.deployment_id, self.name),
+                             environment=env, mounts=[mount], labels=managed_labels(launch.deployment_id, self.name),
                              network=network, port=launch.port, publish_bind=publish_bind, ipc_host=False)
 
-    async def health(self, http: httpx.AsyncClient, base_url: str, served_name: str) -> bool:
-        return await openai_health(http, base_url, served_name)
+    async def health(self, http: httpx.AsyncClient, base_url: str, served_name: str,
+                     api_key: str | None = None) -> bool:
+        return await openai_health(http, base_url, served_name, api_key=api_key)
 
     def parse_metrics(self, text: str) -> EngineMetrics:
         return metrics_from(text, LLAMA_METRICS)
 
-    async def sleep(self, http, base_url) -> None:
+    async def sleep(self, http, base_url, api_key: str | None = None) -> None:
         raise NotImplementedError("llama.cpp has no sleep mode")
 
-    async def wake(self, http, base_url) -> None:
+    async def wake(self, http, base_url, api_key: str | None = None) -> None:
         raise NotImplementedError("llama.cpp has no sleep mode")
 
     def kv_patch_options(self, cfg: LlamaCppConfig) -> list[dict]:

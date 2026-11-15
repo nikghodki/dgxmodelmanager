@@ -12,6 +12,7 @@ from typing import Callable
 import httpx
 
 from dgxmm.db import Benchmark, BenchmarkRun, Database, utcnow
+from dgxmm.engines.base import auth_headers
 
 WORDS = ("memory token cache batch speed latency model server context window prompt decode prefill expert layer "
          "tensor kernel stream request response quality").split()
@@ -54,14 +55,15 @@ class BenchmarkRunner:
     def busy(self) -> int | None:
         return self._running
 
-    async def _one(self, http: httpx.AsyncClient, base_url: str, model: str, input_len: int, output_len: int) -> ReqStat:
+    async def _one(self, http: httpx.AsyncClient, base_url: str, model: str, input_len: int, output_len: int,
+                   headers: dict[str, str] | None = None) -> ReqStat:
         prompt = f"[{uuid.uuid4().hex}] " + " ".join(random.choice(WORDS) for _ in range(input_len))
         body = {"model": model, "prompt": prompt, "max_tokens": output_len, "stream": True, "ignore_eos": True,
                 "temperature": 0, "stream_options": {"include_usage": True}}
         t0 = self.clock()
         ttft, last, itls, chunks, usage = None, None, [], 0, None
         try:
-            async with http.stream("POST", f"{base_url}/v1/completions", json=body) as r:
+            async with http.stream("POST", f"{base_url}/v1/completions", json=body, headers=headers) as r:
                 if r.status_code != 200:
                     return ReqStat(ok=False, e2e=self.clock() - t0)
                 async for line in r.aiter_lines():
@@ -86,7 +88,8 @@ class BenchmarkRunner:
             return ReqStat(ok=False, e2e=self.clock() - t0)
         return ReqStat(ok=True, ttft=ttft, itls=itls, tokens=int(usage or chunks), e2e=self.clock() - t0)
 
-    async def _level(self, http, base_url, model, conc, input_len, output_len, duration_s, max_requests) -> dict:
+    async def _level(self, http, base_url, model, conc, input_len, output_len, duration_s, max_requests,
+                     headers: dict[str, str] | None = None) -> dict:
         stats: list[ReqStat] = []
         start = self.clock()
         issued = 0
@@ -95,7 +98,7 @@ class BenchmarkRunner:
             nonlocal issued
             while issued < max_requests and self.clock() - start < duration_s:
                 issued += 1
-                stats.append(await self._one(http, base_url, model, input_len, output_len))
+                stats.append(await self._one(http, base_url, model, input_len, output_len, headers))
 
         await asyncio.gather(*(worker() for _ in range(conc)))
         wall = max(self.clock() - start, 1e-9)
@@ -110,7 +113,8 @@ class BenchmarkRunner:
 
     async def run(self, *, deployment_id: int, engine: str, model_ref: str, config: dict, base_url: str,
                   served_name: str, levels=(1, 4, 8, 16), input_len: int = 1024, output_len: int = 256,
-                  duration_s: float = 60.0, max_requests: int = 32) -> list[dict]:
+                  duration_s: float = 60.0, max_requests: int = 32, api_key: str | None = None) -> list[dict]:
+        """``api_key``: the deployment's engine key (sent as a bearer token; None = no Authorization)."""
         from dgxmm.deployer.service import config_hash
         if self._lock.locked():
             raise BenchmarkBusy(f"a benchmark is already running (deployment {self._running})")
@@ -129,7 +133,8 @@ class BenchmarkRunner:
             try:
                 async with self.http_factory() as http:
                     for conc in levels:
-                        r = await self._level(http, base_url, served_name, conc, input_len, output_len, duration_s, max_requests)
+                        r = await self._level(http, base_url, served_name, conc, input_len, output_len, duration_s,
+                                              max_requests, auth_headers(api_key))
                         attempted = r["requests"] + r["errors"]
                         if r["requests"] == 0 or r["errors"] > MAX_ERROR_RATIO * attempted:
                             # Not a measurement (all or most requests failed). Record the failure on the run instead

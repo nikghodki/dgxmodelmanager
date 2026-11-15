@@ -7,6 +7,7 @@ import hashlib
 import json
 import logging
 import re
+import secrets
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -95,6 +96,11 @@ class Prepared:
     cfg: BaseModel
     draft: ModelArtifact | None
     estimate: MemoryEstimate
+
+
+def new_engine_key() -> str:
+    """A deployment's engine API key (Deployment.engine_api_key)."""
+    return secrets.token_urlsafe(32)
 
 
 def config_hash(cfg: dict) -> str:
@@ -209,6 +215,26 @@ class Deployer:
         else:
             name, port, engine, node = dep.name, dep.port, dep.engine, self._node_of(dep)
         return self.base_url(name, port, engine, node)
+
+    def api_key_for(self, dep: "Deployment | dict") -> str | None:
+        """The engine's bearer key of a deployment (row or view; views never carry it), None without one (a
+        deployment from before engine keys, a system deployment). For every DGXMM client of the engine."""
+        if isinstance(dep, dict):
+            dep = self._get(dep["id"]) if dep.get("id") is not None else None
+        return dep.engine_api_key if dep is not None else None
+
+    def _ensure_api_key(self, dep_id: int, prep: Prepared) -> str | None:
+        """The key the engine is launched with: the deployment's own, generated now for a row that has none (from
+        before engine keys); kept across restarts. None for system engines (their own key mechanism)."""
+        if is_system_engine(prep.engine):
+            return None
+        with self.db.session() as s:
+            row = s.get(Deployment, dep_id)
+            if row is None:
+                return None
+            if not row.engine_api_key:
+                row.engine_api_key = new_engine_key()
+            return row.engine_api_key
 
     # ---------- nodes ----------
     def _has_remote(self) -> bool:
@@ -579,7 +605,9 @@ class Deployer:
                                  estimate=prep.estimate.as_dict(), created_by=user_id, system=system or None,
                                  # the decision model is never managed by the on-demand controller
                                  mode="always_on" if system else req.mode,
-                                 idle_timeout_s=None if system else req.idle_timeout_s)
+                                 idle_timeout_s=None if system else req.idle_timeout_s,
+                                 # the decision model has its own key (dgxmm/decider/secret.py)
+                                 engine_api_key=None if system else new_engine_key())
                 s.add(dep)
                 s.flush()
                 dep_id = dep.id
@@ -752,9 +780,10 @@ class Deployer:
                 raise  # restart/reconfigure: row keeps its stopped/failed state
             node = self._node_of(self._get(dep_id))
             docker = self._docker_for(node)
+            api_key = self._ensure_api_key(dep_id, prep)
             tried: set[int] = set()
             while True:
-                launch = LaunchContext(dep_id, name, port, prep.estimate.total, mem_total, node)
+                launch = LaunchContext(dep_id, name, port, prep.estimate.total, mem_total, node, api_key=api_key)
                 try:
                     spec = prep.engine.container_spec(prep.artifact, prep.cfg, prep.draft, launch, self.settings)
                 except ValueError as e:  # SpecError (a typed reason) or a config the engine cannot express
@@ -936,7 +965,7 @@ class Deployer:
         cfg = engine.validate_config(dep.config)
         try:
             return await engine.health(self.http, self.base_url(dep.name, dep.port, dep.engine, self._node_of(dep)),
-                                       engine.served_name(cfg, dep.model_ref))
+                                       engine.served_name(cfg, dep.model_ref), api_key=dep.engine_api_key)
         except (httpx.HTTPError, OSError):
             return False
 
@@ -1345,7 +1374,8 @@ class Deployer:
             if not (engine.supports_sleep and engine.sleep_enabled(cfg)):
                 raise DeployError("sleep_unsupported", "this deployment was not started with sleep mode", 409)
             try:
-                await engine.sleep(self.http, self.base_url(dep.name, dep.port, node=self._node_of(dep)))
+                await engine.sleep(self.http, self.base_url(dep.name, dep.port, node=self._node_of(dep)),
+                                   api_key=dep.engine_api_key)
             except httpx.HTTPError as e:
                 raise DeployError("engine_error", f"sleep failed: {e}", 502)
             return self._transition(dep_id, "sleeping", message="sleeping (level 1: KV freed, weights offloaded)")
@@ -1422,7 +1452,8 @@ class Deployer:
                                                            budget.free_for_new - need, self._stored_estimate(dep),
                                                            budget))
                     try:
-                        await engine.wake(self.http, self.base_url(dep.name, dep.port, node=self._node_of(dep)))
+                        await engine.wake(self.http, self.base_url(dep.name, dep.port, node=self._node_of(dep)),
+                                          api_key=dep.engine_api_key)
                     except httpx.HTTPError as e:
                         raise DeployError("engine_error", f"wake failed: {e}", 502)
                     return self._transition(dep_id, "ready", message="woken up", last_error=None)

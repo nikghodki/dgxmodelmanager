@@ -7,6 +7,8 @@ from typing import Callable
 
 import httpx
 
+from dgxmm.engines.base import auth_headers
+
 log = logging.getLogger(__name__)
 
 
@@ -27,7 +29,8 @@ class MetricsScraper:
             if engine is None or not getattr(engine, "scrape_metrics", True):
                 continue  # e.g. the decision model: no /metrics
             try:
-                r = await self.http.get(self.deployer.base_url_for(v) + "/metrics", timeout=5)
+                r = await self.http.get(self.deployer.base_url_for(v) + "/metrics", timeout=5,
+                                        headers=auth_headers(self.deployer.api_key_for(v)))
                 r.raise_for_status()
                 out[v["id"]] = self.store.add(v["id"], now, engine.parse_metrics(r.text))
             except Exception as e:

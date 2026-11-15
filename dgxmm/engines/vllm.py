@@ -10,7 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from dgxmm.config import LOCAL_NODE_ID, Mount, Settings
 from dgxmm.engines.argguard import VLLM_EXTRA_FLAGS, validate_extra_args
 from dgxmm.engines.base import (REMOTE_NETWORK, SERVED_NAME_RE, ContainerSpec, EngineMetrics, LaunchContext,
-                                container_name, remote_hf_mount,
+                                auth_headers, container_name, remote_hf_mount,
                                 default_served_name, managed_labels, openai_health)
 from dgxmm.engines.prom import buckets, counter, gauge, parse_samples
 from dgxmm.inventory.artifact import REPO_RE, ModelArtifact
@@ -179,6 +179,8 @@ class VllmEngine:
         env = {"HF_HUB_OFFLINE": "1", "VLLM_NO_USAGE_STATS": "1", "DO_NOT_TRACK": "1"}
         if cfg.enable_sleep_mode:
             env["VLLM_SERVER_DEV_MODE"] = "1"  # exposes /sleep and /wake_up
+        if launch.api_key:  # the environment, never argv (--api-key would show in ps and docker inspect's Cmd)
+            env["VLLM_API_KEY"] = launch.api_key
         if launch.node == LOCAL_NODE_ID:
             mounts = [Mount(host=settings.hf_cache.host, target="/root/.cache/huggingface"), *settings.vllm_cache_mounts]
             network, publish_bind = settings.docker_network, settings.publish_bind
@@ -189,17 +191,19 @@ class VllmEngine:
                              mounts=mounts, labels=managed_labels(launch.deployment_id, self.name),
                              network=network, port=launch.port, publish_bind=publish_bind)
 
-    async def health(self, http: httpx.AsyncClient, base_url: str, served_name: str) -> bool:
-        return await openai_health(http, base_url, served_name)
+    async def health(self, http: httpx.AsyncClient, base_url: str, served_name: str,
+                     api_key: str | None = None) -> bool:
+        return await openai_health(http, base_url, served_name, api_key=api_key)
 
     def parse_metrics(self, text: str) -> EngineMetrics:
         return metrics_from(text, VLLM_METRICS)
 
-    async def sleep(self, http: httpx.AsyncClient, base_url: str) -> None:
-        (await http.post(f"{base_url}/sleep", params={"level": 1}, timeout=120)).raise_for_status()
+    async def sleep(self, http: httpx.AsyncClient, base_url: str, api_key: str | None = None) -> None:
+        (await http.post(f"{base_url}/sleep", params={"level": 1}, headers=auth_headers(api_key),
+                         timeout=120)).raise_for_status()
 
-    async def wake(self, http: httpx.AsyncClient, base_url: str) -> None:
-        (await http.post(f"{base_url}/wake_up", timeout=300)).raise_for_status()
+    async def wake(self, http: httpx.AsyncClient, base_url: str, api_key: str | None = None) -> None:
+        (await http.post(f"{base_url}/wake_up", headers=auth_headers(api_key), timeout=300)).raise_for_status()
 
     def kv_patch_options(self, cfg: VllmConfig) -> list[dict]:
         return [{"kv_cache_dtype": "fp8"}] if cfg.kv_cache_dtype == "auto" else []

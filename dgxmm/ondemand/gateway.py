@@ -652,7 +652,10 @@ class _Exchange(Response):
 
     async def _exchange(self, client: httpx.AsyncClient, v: dict) -> None:
         url = "/" + self.path + (f"?{self.query}" if self.query else "")
-        request = client.build_request(self.method, url, headers=self.req_headers, content=self.content)
+        # the client's Authorization (the gateway key) was dropped (DROP_REQUEST); the engine gets its own key
+        key = self.gw.ctx.deployer.api_key_for(v)
+        headers = self.req_headers + ([("authorization", f"Bearer {key}")] if key else [])
+        request = client.build_request(self.method, url, headers=headers, content=self.content)
         try:
             up = await client.send(request, stream=True)
         except httpx.HTTPError as e:

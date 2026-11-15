@@ -623,7 +623,10 @@ class LiteLLMSync:
                                                 ondemand_info())
             else:
                 api_base = self.deployer.base_url_for(v) + "/v1"
-                want[(str(v["id"]), name)] = (api_base, v["served_name"], "none", None, None)
+                # the engine's own key (none for a deployment from before engine keys); a key that appears or
+                # changes is a new fingerprint, so _sync replaces the entry
+                engine_key = self.deployer.api_key_for(v) or "none"
+                want[(str(v["id"]), name)] = (api_base, v["served_name"], engine_key, None, None)
         self.conflicts = conflicts
         self.ondemand = ondemand
         if conflicts:
@@ -679,9 +682,9 @@ class LiteLLMSync:
             held = {i for i, why in self.ondemand.items() if why}  # no on-demand key: leave their entries alone
             # Anything marked as ours that is not wanted (stopped deployment, old alias, a mode switch's old
             # api_base, or the served-name entry older DGXMM versions registered next to the alias) is deleted;
-            # duplicates are collapsed. An on-demand entry whose key fingerprint is missing (registered before
-            # fingerprints) or differs (key rotated), or whose timeouts or health-check settings differ
-            # (ondemand_queue_timeout_s changed, an upgrade), is replaced. Deletes run after the adds, so a deployment whose entry is replaced (mode switch, rename, key
+            # duplicates are collapsed. An entry whose key fingerprint is missing (registered before
+            # fingerprints, or before the deployment had an engine key) or differs (key rotated), or whose
+            # timeouts or health-check settings differ (ondemand_queue_timeout_s changed, an upgrade), is replaced. Deletes run after the adds, so a deployment whose entry is replaced (mode switch, rename, key
             # rotation, new timeouts) is never without one.
             stale: list[str] = []
             for key, entries in have.items():

@@ -191,6 +191,17 @@ def _deployment_node(conn: sqlite3.Connection) -> None:
     conn.execute("UPDATE deployments SET node = 'local' WHERE node IS NULL")
 
 
+def _engine_api_key(conn: sqlite3.Connection) -> None:
+    """Version 42: deployments get ``engine_api_key`` (the engine's bearer key). ``add_missing_columns`` adds it when
+    creating a fresh database; added here when missing. Existing rows stay NULL: their engines keep running without
+    a key, and the next launch of each gives it one (Deployer._launch)."""
+    if not _table_exists(conn, "deployments"):
+        return
+    cols = {r[1] for r in conn.execute('PRAGMA table_info("deployments")')}
+    if "engine_api_key" not in cols:
+        conn.execute('ALTER TABLE deployments ADD COLUMN "engine_api_key" VARCHAR(64)')
+
+
 def _download_kind(conn: sqlite3.Connection) -> None:
     """Version 44: downloads get `kind` ("copy": a copy of a snapshot to a remote node) and `node` (its target).
     ``add_missing_columns`` adds them when creating a fresh database; added here when missing. Existing rows stay
@@ -214,6 +225,7 @@ MIGRATIONS: list[Migration] = [
     Migration(30, "deployments: ids are never reused (AUTOINCREMENT)", _deployment_ids_never_reused, rebuilds=True),
     Migration(40, "deployments: on-demand mode", _ondemand_mode),
     Migration(41, "deployments: node", _deployment_node),
+    Migration(42, "deployments: engine API key", _engine_api_key),
     Migration(44, "downloads: kind and node (weight copies)", _download_kind),
 ]
 LATEST = max(m.version for m in MIGRATIONS)

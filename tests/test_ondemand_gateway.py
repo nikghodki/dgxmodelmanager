@@ -55,6 +55,10 @@ def _record(dep_id: int, name: str, state: str, mode: str = "on_demand", system:
 class FakeDeployer:
     def __init__(self):
         self.deps: dict[int, dict] = {}
+        self.keys: dict[int, str] = {}  # engine API keys (Deployment.engine_api_key), never in a view
+
+    def api_key_for(self, v: dict) -> str | None:
+        return self.keys.get(v["id"])
 
     def add(self, dep_id: int, name: str = "a", state: str = "stopped", **kw) -> None:
         self.deps[dep_id] = _record(dep_id, name, state, **kw)
@@ -465,6 +469,20 @@ async def test_stream_passthrough_byte_identical(gw):
     assert req.content == raw
     assert req.headers["x-trace"] == "t-9" and req.headers["content-type"] == "application/json"
     assert "authorization" not in req.headers and "cookie" not in req.headers  # the key never reaches the engine
+
+
+async def test_engine_gets_its_own_key_never_the_gateway_key(gw):
+    """Task 8: the request to the engine carries the deployment's engine API key; the gateway's key never reaches
+    it. A deployment without a key (from before engine keys) is forwarded without Authorization, as before."""
+    gw.dep.deps[1]["state"] = "ready"
+    gw.dep.keys[1] = "engine-key-1"
+    c = await call(gw.app, "POST", f"{BASE}/chat/completions", CHAT)
+    assert c.status == 200
+    sent = gw.engine.requests[-1].headers
+    assert sent["authorization"] == "Bearer engine-key-1" and KEY not in json.dumps(dict(sent))
+    gw.dep.keys.pop(1)
+    c = await call(gw.app, "POST", f"{BASE}/chat/completions", CHAT)
+    assert c.status == 200 and "authorization" not in gw.engine.requests[-1].headers
 
 
 async def test_stream_queued_notice_then_answer(gw):

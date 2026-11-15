@@ -111,7 +111,7 @@ async def test_always_on_unchanged_only_ready(stack, key):
     assert await sync.sync()
     [entry] = mine(fake)
     assert entry["litellm_params"] == {"model": "openai/qwen3-tiny", "api_base": f"http://engines.test:{d['port']}/v1",
-                                       "api_key": "none"}
+                                       "api_key": stack.deployer.api_key_for(d)}  # the engine's own key
     await stack.deployer.stop(d["id"])
     assert await sync.sync() and mine(fake) == []
     assert stack.deployer.view(d["id"])["litellm_status"] == "none"
@@ -122,6 +122,9 @@ async def test_existing_always_on_registration_survives_upgrade(stack, key):
     fake = FakeLiteLLM()
     sync = make(stack, fake)
     d = await ready(stack, "a", "always_on", alias="chat")
+    from dgxmm.db import Deployment
+    with stack.db.session() as s:  # a deployment from before engine keys: its engine still runs without one
+        s.get(Deployment, d["id"]).engine_api_key = None
     old = {"model_name": "chat", "litellm_params": {"model": "openai/qwen3-tiny",
                                                     "api_base": f"http://engines.test:{d['port']}/v1", "api_key": "none"},
            "model_info": {"dgxmm_id": str(d["id"]), "id": "old-chat", "db_model": True}}
@@ -227,7 +230,9 @@ async def test_entry_carries_key_fingerprint_and_unchanged_key_never_rewrites(st
     assert await sync.sync()
     od, ao = sorted(mine(fake), key=lambda m: m["model_name"] == "steady")
     assert od["model_info"]["dgxmm_key_fp"] == fp(KEY) and KEY not in json.dumps(od["model_info"])
-    assert "dgxmm_key_fp" not in ao["model_info"]  # always-on entries carry no fingerprint
+    # always-on entries carry the fingerprint of the engine's own key (never the key)
+    eng_key = stack.deployer.api_key_for(stack.deployer.view(int(ao["model_info"]["dgxmm_id"])))
+    assert ao["model_info"]["dgxmm_key_fp"] == fp(eng_key) and eng_key not in json.dumps(ao["model_info"])
     before = writes(fake)
     for _ in range(3):
         assert await sync.sync()

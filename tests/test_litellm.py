@@ -28,7 +28,8 @@ async def test_registers_once_under_alias_then_removes(stack):
     mine = sorted(m["model_name"] for m in fake.models if m["model_info"].get("dgxmm_id"))
     assert mine == ["chat"]  # single endpoint: one registration per deployment, under its model name
     entry = next(m for m in fake.models if m["model_name"] == "chat")
-    assert entry["litellm_params"] == {"model": "openai/qwen3-tiny", "api_base": f"http://engines.test:{d['port']}/v1", "api_key": "none"}
+    assert entry["litellm_params"] == {"model": "openai/qwen3-tiny", "api_base": f"http://engines.test:{d['port']}/v1",
+                                       "api_key": stack.deployer.api_key_for(d)}  # the engine's own key
     assert entry["model_info"]["dgxmm_id"] == str(d["id"])
     assert stack.deployer.view(d["id"])["litellm_status"] == "synced"
     assert set(fake.auth) == {"Bearer sk-test"}
@@ -52,6 +53,9 @@ async def test_migration_removes_second_name(stack):
     fake = FakeLiteLLM()
     sync = make(stack, fake)
     d = await ready(stack, "a", alias="chat")
+    from dgxmm.db import Deployment
+    with stack.db.session() as s:  # an older DGXMM's deployment: no engine key
+        s.get(Deployment, d["id"]).engine_api_key = None
     base = f"http://engines.test:{d['port']}/v1"
     for name in ("qwen3-tiny", "chat"):
         fake.models.append({"model_name": name, "litellm_params": {"model": "openai/qwen3-tiny", "api_base": base, "api_key": "none"},
