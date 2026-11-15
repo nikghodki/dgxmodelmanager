@@ -44,6 +44,28 @@ class MemoryEstimate:
                        notes=self.notes + (note,))
 
 
+def per_rank_bytes(engine: str, est: MemoryEstimate, free: dict[str, int]) -> dict[str, int]:
+    """Memory each rank of a deployment needs, by node (``free``: node id -> its free_for_new, ranks in order).
+
+    One node: the single-node total. Several: the shardable part (weights, draft weights, KV cache, recurrent state)
+    is split across the ranks and the rest (activations / compute buffers, runtime, margin) is needed in full on
+    every rank, exactly once. vLLM (tensor parallel, tp = number of nodes): split evenly. llama.cpp (RPC layer
+    split): split in proportion to each node's free memory. Rounded up (never under-estimates a rank)."""
+    nodes = list(free)
+    if len(nodes) <= 1:
+        return {n: est.total for n in nodes}
+    shard = est.weights + est.draft_weights + est.kv_cache + est.state
+    fixed = est.activations + est.runtime + est.margin
+    if engine == "llamacpp":
+        weights = {n: max(free[n], 0) for n in nodes}
+        if sum(weights.values()) <= 0:
+            weights = {n: 1 for n in nodes}
+    else:
+        weights = {n: 1 for n in nodes}
+    total_w = sum(weights.values())
+    return {n: -(-shard * weights[n] // total_w) + fixed for n in nodes}
+
+
 @dataclass(frozen=True)
 class VllmSizing:
     max_model_len: int

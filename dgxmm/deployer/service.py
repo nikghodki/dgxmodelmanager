@@ -52,6 +52,9 @@ REMOTE_LIVENESS_TIMEOUT_S = 5.0  # longest a liveness check waits on a remote no
 
 
 
+CLUSTER_ENGINES = ("vllm", "llamacpp")  # engines that can run one deployment across several nodes
+
+
 class Placement(BaseModel):
     """Deployment placement: single-node or multi-node cluster."""
     kind: Literal["single", "cluster"]
@@ -625,7 +628,7 @@ class Deployer:
                 raise DeployError("cluster_unsupported",
                                   "system deployments cannot be clusters", 400)
             # Only vllm and llamacpp support clustering
-            if engine not in ("vllm", "llamacpp"):
+            if engine not in CLUSTER_ENGINES:
                 raise DeployError("cluster_unsupported_engine",
                                   f"engine {engine} does not support cluster deployments", 400)
             
@@ -644,6 +647,16 @@ class Deployer:
                     raise DeployError("cluster_node_not_ready",
                                       f"node {node_id} is not ready for cluster deployments "
                                       "(missing cluster_ip or nccl config)", 400)
+
+    def placement_options(self, req: DeployRequest) -> list:
+        """Where ``req`` could run (planner.placement.PlacementOption list: each node, plus the cluster) and which
+        placement to suggest; ``req.placement`` / ``req.node`` are ignored. From the budgets of the last refresh
+        (the caller refreshes first). Blocking (inventory, calibration DB): call it in a worker thread."""
+        from dgxmm.planner.placement import build_options
+        prep = self.prepare(req.engine, req.model_ref, req.config)
+        budgets = self.budget.all() if self.budget is not None else {}
+        return build_options(prep.engine.name, prep.estimate, self.settings, budgets, stale=self._node_stale,
+                             allow_cluster=not is_system_engine(prep.engine))
 
     async def deploy(self, req: DeployRequest, user_id: int | None) -> dict:
         # Cluster deployments not yet implemented (Task 12)

@@ -52,6 +52,21 @@ async def preview(body: PreviewIn, p: Principal = Depends(require_admin), ctx: A
         raise deploy_error(e)
 
 
+@router.post("/placement-options")
+async def placement_options(body: DeployRequest, p: Principal = Depends(require_admin),
+                            ctx: AppContext = Depends(get_ctx)):
+    """Which placements (each node, the nodes together as a cluster) fit this deploy request, and the suggested one.
+    Same body as a deploy (placement / node ignored). Admin-only like /preview (the deploy wizard is its caller).
+    The estimate and the options are computed in a worker thread, never on the event loop."""
+    try:
+        if ctx.deployer.budget is not None:
+            await ctx.deployer.budget.refresh()
+        opts = await asyncio.to_thread(ctx.deployer.placement_options, body)
+    except DeployError as e:
+        raise deploy_error(e)
+    return [o.as_dict() for o in opts]
+
+
 @router.post("", status_code=201)
 async def create(body: DeployIn, p: Principal = Depends(require_admin), ctx: AppContext = Depends(get_ctx)):
     req = DeployRequest(**body.model_dump(exclude={"actions"}))
