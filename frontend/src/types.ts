@@ -86,6 +86,8 @@ export interface Deployment {
   config: Record<string, any>; litellm_status: string; last_error: string | null; exit_code: number | null;
   container_id: string | null; served_name: string | null; endpoint: string | null; host_endpoint: string | null;
   sleep_capable: boolean; adopted_from: string | null; created_at: string; updated_at: string; events?: DeploymentEvent[];
+  /** The engine requires its own key (never sent to the UI): its direct URLs answer 401 without it. */
+  engine_key?: boolean;
   /** The name clients pass as `model` to LiteLLM: alias if set, else served_name. */
   model_name?: string | null;
   /** Why this ready deployment is not (correctly) registered in LiteLLM, as of the last sync. */
@@ -118,6 +120,8 @@ export interface NodeInfo {
   id: string; label: string; remote: boolean; reachable: boolean;
   /** No recent memory reading: new deployments are refused there. */
   stale: boolean;
+  /** Why the last memory probe of a remote node failed (null: it answered). */
+  reason?: string | null;
   /** Its memory budget as GET /host serialises it; null for a remote node never sampled. */
   budget: Budget | null;
 }

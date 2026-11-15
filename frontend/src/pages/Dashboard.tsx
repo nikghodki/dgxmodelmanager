@@ -130,6 +130,7 @@ function NodesMemoryCard({ nodes, admin }: { nodes: NodeInfo[]; admin: boolean }
             <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
               <span className="flex items-center gap-2 text-sm font-semibold">{n.label}
                 {(n.stale || !n.reachable) && <Badge variant="outline" className="text-[11px] text-status-warning">Node unavailable</Badge>}</span>
+              {(n.stale || !n.reachable) && n.reason && <p className="basis-full text-xs text-status-warning break-words">{n.reason}</p>}
               {n.budget && <span className="text-xs text-muted-foreground tabular-nums">
                 <span className={cn("font-semibold", freeTone(n.budget))}>{fmtBytes(n.budget.free_for_new)}</span> free for new of {fmtBytes(n.budget.total)}
               </span>}

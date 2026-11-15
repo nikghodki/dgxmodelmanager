@@ -86,10 +86,11 @@ export function ApiAccessCard({ d, info, loading, error }: { d: Deployment; info
         <details className="group rounded-md border px-3 py-2">
           <summary className="cursor-pointer text-sm font-medium">Direct engine endpoints (advanced)</summary>
           <p className="mt-1 text-xs text-muted-foreground">These bypass LiteLLM: no virtual keys, budgets or rate limits apply.</p>
+          {d.engine_key && <p className="mt-1 text-xs text-muted-foreground">The engine needs the engine key; call it through LiteLLM (it holds the key). Without it these URLs answer 401.</p>}
           <dl className="mt-1">
             <KV label="Served name" value={d.served_name} mono copy={d.served_name} />
-            <KV label="Gateway network" value={d.endpoint} mono copy={d.endpoint} />
-            <KV label="On the DGX" value={d.host_endpoint} mono copy={d.host_endpoint} />
+            <KV label="Gateway network" value={d.endpoint} mono copy={d.engine_key ? null : d.endpoint} />
+            <KV label="On the DGX" value={d.host_endpoint} mono copy={d.engine_key ? null : d.host_endpoint} />
           </dl>
         </details>
       </CardContent>

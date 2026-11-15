@@ -13,7 +13,7 @@ import { useActionMutation } from "@/hooks/use-action-mutation";
 import { nameFixHref, takenHolder } from "@/lib/litellm";
 import { SYSTEM_REMOVE_TEXT, deploymentActions, queueShort } from "@/logic";
 import { ondemandBadge } from "@/lib/ondemand";
-import { showRunsOn, sleepLabel } from "@/lib/placement";
+import { CLUSTER_SLEEP_TEXT, showRunsOn, sleepLabel, sleepNeedsConfirm } from "@/lib/placement";
 import { useLive } from "@/stream";
 import type { Deployment, NodeInfo } from "@/types";
 import { ConfirmDialog } from "./confirm-dialog";
@@ -35,7 +35,7 @@ export function DeploymentStateBadge({ d, className }: { d: Deployment; classNam
   return od ? <StatusBadge state={od.state} label={od.label} className={className} /> : <StatusBadge state={d.state} className={className} />;
 }
 
-type Pending = { kind: "stop" | "remove"; d: Deployment } | null;
+type Pending = { kind: "stop" | "remove" | "sleep"; d: Deployment } | null;
 
 export function DeploymentsTable({ deployments, isAdmin, loading, searchable, onSwitch, onReconfigure, nodes }: {
   deployments: Deployment[]; isAdmin: boolean; loading?: boolean; searchable?: boolean;
@@ -104,7 +104,7 @@ export function DeploymentsTable({ deployments, isAdmin, loading, searchable, on
         </DropdownMenuTrigger>
         <DropdownMenuContent align="end" className="w-48">
           <DropdownMenuItem onSelect={() => nav(`/deployments/${d.id}`)}><ExternalLink className="mr-2 h-4 w-4" />Open</DropdownMenuItem>
-          {acts.includes("sleep") && <DropdownMenuItem onSelect={() => act.mutate({ d, action: "sleep" })}><Moon className="mr-2 h-4 w-4" />{sleepLabel(d)}</DropdownMenuItem>}
+          {acts.includes("sleep") && <DropdownMenuItem onSelect={() => (sleepNeedsConfirm(d) ? setPending({ kind: "sleep", d }) : act.mutate({ d, action: "sleep" }))}><Moon className="mr-2 h-4 w-4" />{sleepLabel(d)}</DropdownMenuItem>}
           {acts.includes("wake") && <DropdownMenuItem onSelect={() => act.mutate({ d, action: "wake" })}><Sun className="mr-2 h-4 w-4" />Wake</DropdownMenuItem>}
           {acts.includes("start") && <DropdownMenuItem onSelect={() => act.mutate({ d, action: "start" })}><Play className="mr-2 h-4 w-4" />Start</DropdownMenuItem>}
           {acts.includes("manage") && <DropdownMenuItem onSelect={() => nav("/decision-model")}><BrainCircuit className="mr-2 h-4 w-4" />Decision model page</DropdownMenuItem>}
@@ -125,13 +125,13 @@ export function DeploymentsTable({ deployments, isAdmin, loading, searchable, on
         searchText={(d) => `${d.name} ${d.model_ref} ${d.engine} ${d.state} ${d.model_name ?? ""} ${d.placement_label ?? ""}`}
         mobileTitle={(d) => <div className="flex items-center gap-2"><Link to={`/deployments/${d.id}`} className="hover:underline">{d.name}</Link>{d.system && <SystemBadge />}</div>} />
       <ConfirmDialog open={!!pending} onOpenChange={(o) => !o && setPending(null)}
-        title={pending?.kind === "stop" ? `Stop ${pending?.d.name}?` : `Remove ${pending?.d.name}?`}
-        description={pending?.kind === "stop"
+        title={pending?.kind === "stop" ? `Stop ${pending?.d.name}?` : pending?.kind === "sleep" ? `Sleep ${pending?.d.name}?` : `Remove ${pending?.d.name}?`}
+        description={pending?.kind === "sleep" ? CLUSTER_SLEEP_TEXT : pending?.kind === "stop"
           ? (pending?.d.system ? "The container is stopped and its memory is released; the decision model's features fall back to rules until it runs again."
             : "The container is stopped and its memory is released. LiteLLM routes to it are removed. You can start it again later.")
           : `Its settings, events and history are deleted. This cannot be undone.${pending?.d.system ? ` ${SYSTEM_REMOVE_TEXT}` : ""}`}
-        confirmLabel={pending?.kind === "stop" ? "Stop" : pending?.d.system ? "Remove and turn off" : "Remove"} destructive pending={act.isPending}
-        requireText={pending?.kind === "stop" && pending.d.state === "ready" ? pending.d.name : undefined}
+        confirmLabel={pending?.kind === "stop" ? "Stop" : pending?.kind === "sleep" ? sleepLabel(pending.d) : pending?.d.system ? "Remove and turn off" : "Remove"} destructive pending={act.isPending}
+        requireText={(pending?.kind === "stop" || pending?.kind === "sleep") && pending.d.state === "ready" ? pending.d.name : undefined}
         onConfirm={() => pending && act.mutate({ d: pending.d, action: pending.kind }, { onSettled: () => setPending(null) })} />
     </>
   );

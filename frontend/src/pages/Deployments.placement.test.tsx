@@ -154,3 +154,50 @@ describe("Downloads with weight copies", () => {
     expect(screen.getAllByText(/Download/).length).toBeGreaterThan(0);
   });
 });
+
+describe("final review fixes", () => {
+  const sleepCalls = () => vi.mocked(apiModule.api).mock.calls.filter((c) => String(c[0]).endsWith("/sleep"));
+
+  it("asks before the cluster sleep that stops every node, like Stop (T15a)", async () => {
+    const user = userEvent.setup();
+    mockDeployments([dep("ds", "dgx-1 + dgx-2 (cluster)", { sleep_label: "sleep (stops all nodes)" })]);
+    setup(<Deployments />);
+    await user.click(await screen.findByRole("button", { name: "Actions for ds" }));
+    await user.click(await screen.findByRole("menuitem", { name: "Sleep (stops all nodes)" }));
+    const dlg = await screen.findByRole("alertdialog");
+    expect(within(dlg).getByText("Sleep ds?")).toBeInTheDocument();
+    expect(sleepCalls()).toEqual([]);
+    const go = within(dlg).getByRole("button", { name: "Sleep (stops all nodes)" });
+    expect(go).toBeDisabled();  // type the name, as for Stop
+    await user.type(within(dlg).getByLabelText("Type ds to confirm"), "ds");
+    await user.click(go);
+    await waitFor(() => expect(sleepCalls().length).toBe(1));
+  });
+
+  it("asks before the cluster sleep on the detail page too (T15a)", async () => {
+    const user = userEvent.setup();
+    const d = dep("ds", "dgx-1 + dgx-2 (cluster)", { sleep_label: "sleep (stops all nodes)" });
+    mockDeployments([d]); setup(<div />, `/deployments/${d.id}`);
+    await user.click(await screen.findByRole("button", { name: "Sleep (stops all nodes)" }));
+    expect(within(await screen.findByRole("alertdialog")).getByText("Sleep ds?")).toBeInTheDocument();
+    expect(sleepCalls()).toEqual([]);
+  });
+
+  it("a plain single-node sleep needs no confirmation", async () => {
+    const user = userEvent.setup();
+    mockDeployments([dep("q", "dgx-1", { sleep_capable: true })]);
+    setup(<Deployments />);
+    await user.click(await screen.findByRole("button", { name: "Actions for q" }));
+    await user.click(await screen.findByRole("menuitem", { name: "Sleep" }));
+    await waitFor(() => expect(sleepCalls().length).toBe(1));
+    expect(screen.queryByRole("alertdialog")).toBeNull();
+  });
+
+  it("says why a node is unavailable (M15)", async () => {
+    nodes = [TWO_NODES[0], { ...TWO_NODES[1], reachable: false, reason: "probe container: bind source path does not exist" }];
+    mockDeployments([]);
+    extra = (url) => (url === "/host" ? Promise.resolve({ budget: budget(50 * GIB), external_top: [], gpu: {}, alert: { level: "ok" }, disk: null }) : undefined);
+    setup(<Dashboard />);
+    expect(await screen.findByText("probe container: bind source path does not exist")).toBeInTheDocument();
+  });
+});

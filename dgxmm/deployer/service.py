@@ -1502,6 +1502,8 @@ class Deployer:
             "model_name": d.alias or served,  # what clients pass as "model" to the single LiteLLM endpoint
             "litellm_error": self.litellm_error(d.id, d.state) if self.litellm_error is not None else None,
             **self._endpoints(d),
+            # the engine needs its key (never in a view): its direct URLs answer 401 without it (call it via LiteLLM)
+            "engine_key": bool(d.engine_api_key),
             "sleep_capable": self.supports_sleep(d),
             # a cluster: what "sleep" does to it ("sleep (stops all nodes)" while sleep fails across nodes)
             **({"sleep_label": cluster.sleep_label(d, engine)} if cluster.is_cluster(d) else {}),

@@ -17,6 +17,12 @@ export const isMultiNode = (nodes: NodeInfo[] | undefined) => (nodes?.length ?? 
 export const showRunsOn = (nodes: NodeInfo[] | undefined, deployments: Pick<Deployment, "placement">[]) =>
   isMultiNode(nodes) || deployments.some(offLocal);
 
+/** The confirmation of a cluster's "sleep" (it stops every rank: there is no sleep across nodes). */
+export const CLUSTER_SLEEP_TEXT = "A cluster cannot sleep across nodes: this stops its containers on every node and releases their memory. Start it again later (a full model load).";
+
+/** A Sleep that stops containers (a cluster's, labelled by sleep_label) asks first, like Stop. */
+export const sleepNeedsConfirm = (d: Pick<Deployment, "sleep_label">) => !!d.sleep_label;
+
 /** The Sleep action's label: a cluster's sleep_label (e.g. "Sleep (stops all nodes)"), else "Sleep". */
 export const sleepLabel = (d: Pick<Deployment, "sleep_label">) =>
   d.sleep_label ? d.sleep_label[0].toUpperCase() + d.sleep_label.slice(1) : "Sleep";

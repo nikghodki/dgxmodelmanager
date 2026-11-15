@@ -26,7 +26,7 @@ import { benchmarkSeries, plausibleRows, readingBadge } from "@/lib/benchmarks";
 import { estimateParts } from "@/lib/estimate";
 import { SYSTEM_REMOVE_TEXT, adviceApplicable, deploymentActions } from "@/logic";
 import { useNodes } from "@/hooks/use-nodes";
-import { rankBadge, showRunsOn, sleepLabel } from "@/lib/placement";
+import { CLUSTER_SLEEP_TEXT, rankBadge, showRunsOn, sleepLabel, sleepNeedsConfirm } from "@/lib/placement";
 import { useLive } from "@/stream";
 import type { Deployment, RankSummary, Workload } from "@/types";
 import { SwitchDialog } from "@/components/app/switch-dialog";
@@ -244,7 +244,7 @@ export function DeploymentDetail() {
   const diagnosis = useDiagnosis(id).data?.diagnosis ?? null;
   const [logs, setLogs] = useState(false);
   const [dialog, setDialog] = useState<null | { mode: "switch" | "reconfigure"; patch?: Record<string, any>; source?: string }>(null);
-  const [confirm, setConfirm] = useState<null | "stop" | "remove">(null);
+  const [confirm, setConfirm] = useState<null | "stop" | "remove" | "sleep">(null);
   const act = useActionMutation((action: string) => api(`/deployments/${id}/${action}`, { method: "POST" }), {
     success: (_r, a) => `${a[0].toUpperCase()}${a.slice(1)} requested`, invalidate: [["deployment", id], ["deployments"]],
   });
@@ -278,7 +278,7 @@ export function DeploymentDetail() {
         title={<span className="flex items-center gap-3">{d.name}<DeploymentStateBadge d={d} />{d.system && <SystemBadge />}</span>}
         description={<span className="break-all">{d.model_ref} · {engineLabel(d.engine)}{d.placement_label && showRunsOn(nodes.data, [d]) && <> · runs on {d.placement_label}</>}</span>}
         actions={<>
-          {acts.includes("sleep") && <Button variant="outline" size="sm" disabled={busy} onClick={() => act.mutate("sleep")}>{icon("sleep", Moon)}{sleepLabel(d)}</Button>}
+          {acts.includes("sleep") && <Button variant="outline" size="sm" disabled={busy} onClick={() => (sleepNeedsConfirm(d) ? setConfirm("sleep") : act.mutate("sleep"))}>{icon("sleep", Moon)}{sleepLabel(d)}</Button>}
           {acts.includes("wake") && <Button variant="outline" size="sm" disabled={busy} onClick={() => act.mutate("wake")}>{icon("wake", Sun)}Wake</Button>}
           {acts.includes("start") && <Button size="sm" disabled={busy} onClick={() => act.mutate("start")}>{icon("start", Play)}Start</Button>}
           {acts.includes("manage") && <Button asChild variant="outline" size="sm"><Link to="/decision-model"><BrainCircuit className="mr-1 h-4 w-4" />Decision model page</Link></Button>}
@@ -377,11 +377,11 @@ export function DeploymentDetail() {
 
       {admin && <LogsSheet id={id} open={logs} onOpenChange={setLogs} />}
       <ConfirmDialog open={!!confirm} onOpenChange={(o) => !o && setConfirm(null)}
-        title={confirm === "stop" ? `Stop ${d.name}?` : `Remove ${d.name}?`}
-        description={confirm === "stop" ? "The container is stopped and its memory released." : `Its settings, events and history are deleted. This cannot be undone.${d.system ? ` ${SYSTEM_REMOVE_TEXT}` : ""}`}
-        confirmLabel={confirm === "stop" ? "Stop" : d.system ? "Remove and turn off" : "Remove"} destructive pending={act.isPending || remove.isPending}
-        requireText={confirm === "stop" && d.state === "ready" ? d.name : undefined}
-        onConfirm={() => { if (confirm === "stop") act.mutate("stop", { onSettled: () => setConfirm(null) }); else remove.mutate(undefined); }} />
+        title={confirm === "stop" ? `Stop ${d.name}?` : confirm === "sleep" ? `Sleep ${d.name}?` : `Remove ${d.name}?`}
+        description={confirm === "stop" ? "The container is stopped and its memory released." : confirm === "sleep" ? CLUSTER_SLEEP_TEXT : `Its settings, events and history are deleted. This cannot be undone.${d.system ? ` ${SYSTEM_REMOVE_TEXT}` : ""}`}
+        confirmLabel={confirm === "stop" ? "Stop" : confirm === "sleep" ? sleepLabel(d) : d.system ? "Remove and turn off" : "Remove"} destructive pending={act.isPending || remove.isPending}
+        requireText={(confirm === "stop" || confirm === "sleep") && d.state === "ready" ? d.name : undefined}
+        onConfirm={() => { if (confirm === "stop" || confirm === "sleep") act.mutate(confirm, { onSettled: () => setConfirm(null) }); else remove.mutate(undefined); }} />
       {dialog && <SwitchDialog mode={dialog.mode} deployment={d} initialPatch={dialog.patch} patchSource={dialog.source} onClose={() => setDialog(null)} />}
     </div>
   );

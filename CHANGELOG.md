@@ -44,6 +44,16 @@ All notable changes to DGXMM are documented in this file. The format is based on
   cannot be started or reconfigured, and can be stopped/removed (the operation succeeds by releasing database state,
   with no Docker call to the removed node).
 
+### Changed
+
+- **Direct engine URLs need the engine key.** Once a deployment has an engine key (every new one, and every
+  existing single-node deployment after its next restart), its direct engine URLs ("Gateway network", "On the
+  DGX") answer `401` without that key, which DGXMM never shows. The deployment page now says so and no longer
+  offers them for copying: call the model through LiteLLM, which holds the key. Deployment views carry
+  `engine_key: true|false` (never the key).
+- **A cluster "Sleep (stops all nodes)" asks first.** Like Stop, it opens a confirmation (type the name when the
+  deployment is ready), since it stops the containers on every node.
+
 ### Security
 
 - **Node SSH key.** The SSH key for Docker-over-SSH on remote nodes (`node_ssh_key_file`, default
