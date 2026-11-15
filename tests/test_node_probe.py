@@ -50,7 +50,8 @@ def test_ensure_starts_stopped_probe_container(two_node_registry):
     # Create a stopped probe container
     stopped = FakeContainer(fake, "probe-cid", "dgxmm-node-probe", 
                           two_node_registry.settings.images.probe, 
-                          ["sleep", "2147483647"], {}, {}, [], [], [], status="exited")
+                          ["sleep", "2147483647"], {"dgxmm.managed": "true", "dgxmm.role": "probe"}, {}, [], [], [],
+                          status="exited")
     fake._containers["probe-cid"] = stopped
     
     p = NodeProbe(two_node_registry, two_node_registry.settings)

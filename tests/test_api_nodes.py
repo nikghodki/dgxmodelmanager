@@ -10,7 +10,7 @@ def test_get_nodes_shape_for_a_viewer(client_viewer_two_nodes):
     r = client_viewer_two_nodes.get("/api/nodes")
     assert r.status_code == 200, r.text
     local, remote = r.json()
-    assert set(local) == {"id", "label", "remote", "reachable", "stale", "budget"}
+    assert set(local) == {"id", "label", "remote", "reachable", "stale", "reason", "budget"}
     assert (local["label"], local["remote"], local["reachable"], local["stale"]) == ("dgx-1", False, True, False)
     assert (remote["label"], remote["remote"], remote["reachable"], remote["stale"]) == ("dgx-2", True, True, False)
     # the per-node Budget dict, as GET /api/host serialises it
@@ -106,3 +106,17 @@ async def test_get_nodes_never_shows_rank_container_ids(client_viewer_two_nodes,
         assert rank["container_id"] and rank["container_id"] not in raw
     assert all("container_id" not in u for n in r for u in n["budget"]["deployments"])
     assert {u["node"] for n in r for u in n["budget"]["deployments"]} == {"local", "dgx-2"}  # the share on both
+
+
+def test_get_nodes_says_why_a_node_is_unreachable(client_viewer_two_nodes, api_two_nodes):
+    """M15: the reason of the last failed probe attempt (None when it answers, and for the local node)."""
+    class Probe:
+        def reachable(self, node_id):
+            return node_id == "local"
+
+        def reason(self, node_id):
+            return None if node_id == "local" else "probe container: bind source path does not exist: /hf-missing"
+    api_two_nodes.ctx.node_probe = Probe()
+    local, remote = client_viewer_two_nodes.get("/api/nodes").json()
+    assert remote["reason"] == "probe container: bind source path does not exist: /hf-missing"
+    assert local["reason"] is None

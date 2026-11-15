@@ -24,6 +24,16 @@ def _reachable(ctx: AppContext, node_id: str, stale: bool) -> bool:
     return (not stale) if seen is None else bool(seen and not stale)
 
 
+def _reason(ctx: AppContext, node_id: str) -> str | None:
+    """Why the last memory probe of a remote node failed (NodeProbe.reason, e.g. the probe container could not be
+    created because hf_cache_host is missing there); None when it answered, for the local node, or unknown."""
+    if node_id == LOCAL_NODE_ID:
+        return None
+    probe = ctx.node_probe if ctx.node_probe is not None else getattr(ctx.budget, "probe", None)
+    reason = getattr(probe, "reason", None)
+    return reason(node_id) if callable(reason) else None
+
+
 def _budget_out(b) -> dict | None:
     """A node budget as GET /api/host serialises it, minus the container ids of its usage rows: a cluster has one
     row per rank, and rank container ids never reach a view (R15)."""
@@ -37,7 +47,7 @@ def _budget_out(b) -> dict | None:
 @router.get("")
 async def list_nodes(p: Principal = Depends(current_principal), ctx: AppContext = Depends(get_ctx)):
     """Every configured node (config order; a single-node install: the implicit local node) with its label, whether it
-    is remote, reachable and stale (no recent memory reading), and its memory budget as GET /api/host serialises it
+    is remote, reachable and stale (no recent memory reading), why its last probe failed (reason), and its memory budget as GET /api/host serialises it
     (None for a remote node never sampled). Any signed-in user. No Docker or SSH call: the budgets of the last
     refresh (one refresh first when there is none yet, as GET /api/host does)."""
     if ctx.budget.current() is None:
@@ -48,7 +58,7 @@ async def list_nodes(p: Principal = Depends(current_principal), ctx: AppContext 
         stale = bool(remote and ctx.deployer is not None and ctx.deployer.node_stale(n.id))
         b = ctx.budget.current(n.id)
         out.append({"id": n.id, "label": n.label, "remote": remote, "reachable": _reachable(ctx, n.id, stale),
-                    "stale": stale, "budget": _budget_out(b)})
+                    "stale": stale, "reason": _reason(ctx, n.id), "budget": _budget_out(b)})
     return out
 
 

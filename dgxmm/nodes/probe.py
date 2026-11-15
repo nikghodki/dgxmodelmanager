@@ -5,7 +5,9 @@ import time
 from typing import Callable
 
 from dgxmm.memory.hostmem import HostMemory, parse_meminfo
-from dgxmm.nodes.registry import NodeRegistry
+from dgxmm.nodes.registry import NodeRegistry, RemoteDocker
+
+PROBE_NAME = "dgxmm-node-probe"
 
 
 class NodeProbe:
@@ -18,56 +20,28 @@ class NodeProbe:
         self._samples: dict[str, HostMemory] = {}
         self._sample_times: dict[str, float] = {}
         self._reachable: dict[str, bool] = {}  # node -> whether its last sample attempt succeeded
+        self._errors: dict[str, str] = {}  # node -> why its last sample attempt failed (GET /api/nodes)
+
+    def _docker(self, node_id: str) -> RemoteDocker:
+        """The node's controller (managed-label guard), with transport failures raised as NodeUnreachable."""
+        return RemoteDocker(lambda: self.registry.docker(node_id), node_id)
 
     def ensure(self, node_id: str) -> None:
-        """Ensure probe container exists and is running on the given node."""
+        """Ensure the probe container exists and is running on the given (remote) node (DockerController.ensure_probe)."""
         if self.registry.is_remote(node_id):
-            controller = self.registry.docker(node_id)
-            docker = controller.client
             node_config = self.registry.config(node_id)
-            
-            # Check if probe container exists
-            try:
-                container = docker.containers.get("dgxmm-node-probe")
-                # If it exists but is not running, start it
-                if container.status != "running":
-                    container.start()
-                return
-            except Exception:
-                pass
-            
-            # Pull image if missing
-            try:
-                docker.images.get(self.settings.images.probe)
-            except Exception:
-                docker.images.pull(self.settings.images.probe)
-            
-            # Create probe container
             hf_cache_host = node_config.hf_cache_host or "/var/lib/huggingface"
-            docker.containers.run(
-                self.settings.images.probe,
-                name="dgxmm-node-probe",
-                command=["sleep", "2147483647"],
-                detach=True,
-                labels={"dgxmm.managed": "true"},
-                network_mode="none",
-                read_only_rootfs=True,
-                cap_drop=["ALL"],
-                mounts=[
-                    {"Type": "bind", "Source": "/proc", "Target": "/host/proc", "ReadOnly": True},
-                    {"Type": "bind", "Source": hf_cache_host, "Target": "/hf", "ReadOnly": True},
-                ],
-            )
+            self._docker(node_id).ensure_probe(PROBE_NAME, self.settings.images.probe, hf_cache_host)
 
     def sample(self, node_id: str) -> HostMemory | None:
         """Sample memory from a node. For local, return None. For remote, exec cat /host/proc/meminfo."""
         if node_id == "local" or not self.registry.is_remote(node_id):
             return None
-        
+
         try:
             self.ensure(node_id)
-        except Exception:
-            self._reachable[node_id] = False
+        except Exception as e:
+            self._failed(node_id, f"probe container: {e}")
             raise
 
         try:
@@ -76,11 +50,20 @@ class NodeProbe:
             self._samples[node_id] = mem
             self._sample_times[node_id] = self.clock()
             self._reachable[node_id] = True
+            self._errors.pop(node_id, None)
             return mem
-        except Exception:
+        except Exception as e:
             # Return last sample if exec fails (do not update timestamp)
-            self._reachable[node_id] = False
+            self._failed(node_id, f"meminfo exec: {e}")
             return self._samples.get(node_id)
+
+    def _failed(self, node_id: str, why: str) -> None:
+        self._reachable[node_id] = False
+        self._errors[node_id] = why[:500]
+
+    def reason(self, node_id: str) -> str | None:
+        """Why the last sample attempt on a remote node failed (None: it succeeded, none yet, or the local node)."""
+        return self._errors.get(node_id)
 
     def reachable(self, node_id: str) -> bool | None:
         """Whether the last sample attempt on a remote node succeeded (None: none yet; True for the local node). No
@@ -97,22 +80,18 @@ class NodeProbe:
         """Check if a node's sample is stale (>3x remote_probe_interval_s)."""
         if node_id == "local" or not self.registry.is_remote(node_id):
             return False
-        
+
         last_time = self._sample_times.get(node_id)
         if last_time is None:
             return True
-        
+
         age = self.clock() - last_time
         return age > 3 * self.settings.remote_probe_interval_s
 
     def exec(self, node_id: str, argv: list[str]) -> str:
         """Execute a command in the probe container and return stdout."""
-        controller = self.registry.docker(node_id)
-        docker = controller.client
-        container = docker.containers.get("dgxmm-node-probe")
-        
-        exit_code, output = container.exec_run(argv)
+        exit_code, output = self._docker(node_id).exec_managed(PROBE_NAME, argv)
         if exit_code != 0:
             raise RuntimeError(f"exec failed with code {exit_code}")
-        
+
         return output.decode() if isinstance(output, bytes) else output

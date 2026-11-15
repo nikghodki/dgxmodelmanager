@@ -11,6 +11,25 @@ from dgxmm.config import GIB
 from dgxmm.memory.hostmem import HostMemory, HostSample
 
 _ids = itertools.count(1)
+DOCKER_API_VERSION = "1.45"
+
+
+def check_docker_py_kwargs(image, command, kwargs: dict, run: bool) -> None:
+    """Raise what docker-py raises for these containers.run/create keywords: docker.models.containers converts them
+    with _create_container_args (TypeError for an unknown keyword, e.g. read_only_rootfs; HostConfig checks values).
+    Keeps fakes from accepting a call the real client rejects."""
+    import copy
+    from docker.models.containers import _create_container_args
+    kw = copy.copy(kwargs)
+    if run:  # consumed by ContainerCollection.run before create
+        for k in ("stdout", "stderr", "remove", "stream"):
+            kw.pop(k, None)
+        if kw.pop("detach", False) and kwargs.get("remove"):
+            kw["auto_remove"] = True
+    else:
+        kw.pop("detach", None)
+    kw = {k: v for k, v in kw.items() if not (k in ("ports", "volumes", "network") and v is None)}
+    _create_container_args({**kw, "image": image, "command": command, "version": DOCKER_API_VERSION})
 
 
 class FakeContainer:
@@ -54,6 +73,8 @@ class FakeContainer:
             self.exit_code = 0
 
     def start(self):
+        if self.id in self.client.fail_container_start or self.name in self.client.fail_container_start:
+            raise docker.errors.APIError("cannot start container: OCI runtime create failed")
         self.status = "running"
         self.exit_code = None
 
@@ -244,9 +265,24 @@ class FakeContainers:
                 return c
         raise docker.errors.NotFound("no such container")
 
+    def create(self, image, command=None, **kw):
+        """containers.create: validated like docker-py; the container is left "created"."""
+        self.client._maybe_raise()
+        check_docker_py_kwargs(image, command, kw, run=False)
+        cid = f"{next(_ids):064x}"
+        c = FakeContainer(self.client, cid, kw.get("name"), image, command, kw.get("labels"), kw.get("environment"),
+                          [], [], _mount_tuples(kw), status="created")
+        self.client._containers[cid] = c
+        return c
+
     def run(self, image, command=None, name=None, environment=None, labels=None, network=None, volumes=None,
             ports=None, entrypoint=None, remove=False, **kw):
         self.client._maybe_raise()
+        check_docker_py_kwargs(image, command, dict(name=name, environment=environment, labels=labels, network=network,
+                                                    volumes=volumes, ports=ports, entrypoint=entrypoint,
+                                                    remove=remove, **kw), run=True)
+        if self.client.run_error is not None:
+            raise self.client.run_error
         if (labels or {}).get("dgxmm.helper") == "true":
             call = dict(image=image, command=command, name=name, environment=environment, labels=labels,
                         network=network, volumes=volumes, ports=ports, entrypoint=entrypoint, remove=remove, **kw)
@@ -290,7 +326,7 @@ class FakeContainers:
         if any(c.name == name for c in self.client._containers.values()):
             raise docker.errors.APIError("Conflict. The container name is already in use")
         cid = f"{next(_ids):064x}"
-        mounts = [(h, v["bind"], v.get("mode", "rw")) for h, v in (volumes or {}).items()]
+        mounts = [(h, v["bind"], v.get("mode", "rw")) for h, v in (volumes or {}).items()] + _mount_tuples(kw)
         plist = [(int(k.split("/")[0]), v[0]) for k, v in (ports or {}).items()]
         c = FakeContainer(self.client, cid, name, image, command, labels, environment, plist,
                           [network] if network else [], mounts)
@@ -305,6 +341,11 @@ class FakeContainers:
             c.log_text, self.client.next_log_text = self.client.next_log_text, None
         self.client._containers[cid] = c
         return c
+
+
+def _mount_tuples(kw: dict) -> list[tuple[str, str, str]]:
+    """(source, target, mode) of containers.run/create(mounts=[docker.types.Mount, ...])."""
+    return [(m["Source"], m["Target"], "ro" if m.get("ReadOnly") else "rw") for m in kw.get("mounts") or []]
 
 
 class FakeDockerClient:
@@ -329,6 +370,8 @@ class FakeDockerClient:
         self.exit_on_start: dict[str, int] = {}
         self.next_log_text: str | None = None  # log text of the next container run() creates
         self.fail_start: set[str] = set()  # container names whose start fails after create
+        self.fail_container_start: set[str] = set()  # ids/names whose Container.start() fails (an existing one)
+        self.run_error: Exception | None = None  # raised by every containers.run (after the kwargs check)
         self.helper_runs: list[dict] = []      # delete-helper containers (dgxmm.helper=true)
         self.helper_action = None              # callable(call) simulating the helper's effect
         self.fail_helper = False

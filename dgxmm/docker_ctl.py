@@ -21,6 +21,10 @@ from dgxmm.engines.base import MANAGED_LABEL, ContainerSpec, SpecError
 log = logging.getLogger(__name__)
 INSTALL_LABEL = "dgxmm.install"  # per-install id (Settings.install_id), set by the deployer
 HELPER_LABEL = "dgxmm.helper"
+# Internal containers DGXMM keeps on a node that are not deployments (e.g. the remote memory probe): managed (the
+# label guard lets DGXMM write them) but never listed as deployments, orphans or victims (list_managed skips them).
+ROLE_LABEL = "dgxmm.role"
+PROBE_ROLE = "probe"
 HELPER_MOUNT = "/x"  # where a helper sees the single host directory it may touch
 CONTAINER_CACHE_TTL_S = 30.0
 LOOKUP_TIMEOUT_S = 3
@@ -214,6 +218,43 @@ class DockerController:
             return _info(c)
         except docker.errors.NotFound:
             return None
+
+    def ensure_probe(self, name: str, image: str, hf_cache_host: str) -> None:
+        """Make the node's memory probe container ``name`` run: a stopped one is started (or, if it cannot start,
+        removed and created again); a missing one is created (the image pulled first if missing). Read-only rootfs,
+        no network, no capabilities; it sees the node's /proc and HF cache read-only (bind mounts: a missing source
+        is an error, never an auto-created root-owned directory). A container of that name that DGXMM does not
+        manage is refused (PermissionError). Daemon errors propagate (they are not "no probe")."""
+        try:
+            c = self._guard(name)
+        except docker.errors.NotFound:
+            c = None
+        if c is not None:
+            if (c.labels or {}).get(ROLE_LABEL) != PROBE_ROLE:
+                raise PermissionError(f"container {c.name} is not a dgxmm probe")
+            if c.status == "running":
+                return
+            try:
+                c.start()
+                return
+            except docker.errors.APIError as e:
+                log.warning("probe %s did not start (%s); creating it again", name, e)
+                c.remove(force=True)
+        try:
+            self.client.images.get(image)
+        except docker.errors.ImageNotFound:
+            self.client.images.pull(image)
+        self.client.containers.run(
+            image, command=["sleep", "2147483647"], name=name, detach=True,
+            labels={MANAGED_LABEL: "true", ROLE_LABEL: PROBE_ROLE}, network_mode="none", read_only=True,
+            cap_drop=["ALL"], security_opt=["no-new-privileges"], pids_limit=16, restart_policy={"Name": "no"},
+            mounts=[DockerMount(target="/host/proc", source="/proc", type="bind", read_only=True),
+                    DockerMount(target="/hf", source=hf_cache_host, type="bind", read_only=True)],
+        )
+
+    def exec_managed(self, name: str, argv: list[str]) -> tuple[int, bytes]:
+        """Run ``argv`` in the managed container ``name``: (exit code, output)."""
+        return self._guard(name).exec_run(argv)
 
     def _guard(self, id_or_name: str):
         c = self.client.containers.get(id_or_name)
