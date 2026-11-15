@@ -552,3 +552,52 @@ def starting_cluster_dep(deployer_two_nodes):
         s.flush()
         dep_id = row.id
     return SimpleNamespace(id=dep_id, name="dsr", ranks=ranks)
+
+
+@pytest.fixture
+def api_two_nodes(deployer_two_nodes):
+    """TestClient over the two-node deployer (no background loops), with users root (admin) and vic (viewer).
+    login(user, password) signs in and returns the CSRF header."""
+    from fastapi.testclient import TestClient
+    from dgxmm.app import create_app
+    from dgxmm.auth.passwords import hash_password
+    from dgxmm.auth.ratelimit import SlidingWindowLimiter
+    from dgxmm.context import AppContext
+    from dgxmm.db import User
+    d = deployer_two_nodes
+    ctx = AppContext(settings=d.settings, db=d.db, events=d.events, login_limiter=SlidingWindowLimiter(100, 60),
+                     inventory=d.inventory, budget=d.budget, deployer=d, docker=d.docker, nodes=d.nodes,
+                     engines=d.engines, probe=d.probe)
+    with d.db.session() as s:
+        s.add(User(username="root", pw_hash=hash_password("root-password-123"), role="admin"))
+        s.add(User(username="vic", pw_hash=hash_password("viewer-password-1"), role="viewer"))
+    with TestClient(create_app(ctx), base_url="http://testserver") as c:
+        def login(user: str, password: str) -> dict:
+            r = c.post("/dgxmm/api/auth/login", json={"username": user, "password": password})
+            assert r.status_code == 200, r.text
+            return {"X-CSRF-Token": r.json()["csrf_token"]}
+        c.ctx, c.login = ctx, login
+        yield c
+
+
+class _Prefixed:
+    """A TestClient whose paths ("/api/...") get the /dgxmm prefix of the app."""
+
+    def __init__(self, client, headers: dict):
+        self.client, self.headers = client, headers
+
+    def __getattr__(self, method):
+        def call(path, **kw):
+            return getattr(self.client, method)("/dgxmm" + path, headers={**self.headers, **kw.pop("headers", {})},
+                                                **kw)
+        return call
+
+
+@pytest.fixture
+def client_viewer_two_nodes(api_two_nodes):
+    return _Prefixed(api_two_nodes, api_two_nodes.login("vic", "viewer-password-1"))
+
+
+@pytest.fixture
+def client_admin_two_nodes(api_two_nodes):
+    return _Prefixed(api_two_nodes, api_two_nodes.login("root", "root-password-123"))

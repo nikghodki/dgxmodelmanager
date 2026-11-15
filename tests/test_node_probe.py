@@ -58,3 +58,15 @@ def test_ensure_starts_stopped_probe_container(two_node_registry):
     
     # Container should be started
     assert stopped.status == "running"
+
+
+def test_reachable_follows_the_last_sample_attempt(two_node_registry):
+    """GET /api/nodes reads reachable(): the last attempt failed = unreachable at once (stale only after 3 intervals)."""
+    p = NodeProbe(two_node_registry, two_node_registry.settings, clock=lambda: 0.0)
+    assert p.reachable("dgx-2") is None and p.reachable("local") is True
+    two_node_registry.fake("dgx-2").exec_output = "MemTotal: 127000000 kB\nMemAvailable: 100000000 kB\n"
+    p.sample("dgx-2")
+    assert p.reachable("dgx-2") is True
+    two_node_registry.fake("dgx-2").exec_fail = True
+    p.sample("dgx-2")
+    assert p.reachable("dgx-2") is False and p.stale("dgx-2") is False

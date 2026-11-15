@@ -17,6 +17,7 @@ class NodeProbe:
         self.clock = clock
         self._samples: dict[str, HostMemory] = {}
         self._sample_times: dict[str, float] = {}
+        self._reachable: dict[str, bool] = {}  # node -> whether its last sample attempt succeeded
 
     def ensure(self, node_id: str) -> None:
         """Ensure probe container exists and is running on the given node."""
@@ -63,17 +64,30 @@ class NodeProbe:
         if node_id == "local" or not self.registry.is_remote(node_id):
             return None
         
-        self.ensure(node_id)
-        
+        try:
+            self.ensure(node_id)
+        except Exception:
+            self._reachable[node_id] = False
+            raise
+
         try:
             output = self.exec(node_id, ["cat", "/host/proc/meminfo"])
             mem = parse_meminfo(output)
             self._samples[node_id] = mem
             self._sample_times[node_id] = self.clock()
+            self._reachable[node_id] = True
             return mem
         except Exception:
             # Return last sample if exec fails (do not update timestamp)
+            self._reachable[node_id] = False
             return self._samples.get(node_id)
+
+    def reachable(self, node_id: str) -> bool | None:
+        """Whether the last sample attempt on a remote node succeeded (None: none yet; True for the local node). No
+        I/O: GET /api/nodes reads it."""
+        if node_id == "local" or not self.registry.is_remote(node_id):
+            return True
+        return self._reachable.get(node_id)
 
     def last(self, node_id: str) -> HostMemory | None:
         """The last successful sample of a node (no I/O: the remote probe loop takes the samples)."""

@@ -198,6 +198,9 @@ class Deployer:
         # dep_id -> model refs while a container is being (re)launched; until it reaches "starting" the DB row may
         # still be planned/stopped/failed, so the weights deleter treats these as blocking.
         self.launching: dict[int, tuple[str, ...]] = {}
+        # rank container id -> its Docker status at the last cluster liveness / start-up check (cluster.note_rank):
+        # the views' rank_summary reads it, so a view never calls Docker
+        self.rank_status: dict[str, str] = {}
         # decision model (dgxmm/decider): returns the Decider (ctx.decider) at call time; None = rules only
         self.decider_getter: Callable[[], Any] | None = None
         self.metrics = None  # MetricsStore: traffic facts for the plan safety filter
@@ -301,6 +304,10 @@ class Deployer:
     # ---------- nodes ----------
     def _has_remote(self) -> bool:
         return self.nodes is not None and any(self.nodes.is_remote(n) for n in self.nodes.ids())
+
+    def node_stale(self, node_id: str) -> bool:
+        """No recent memory reading from ``node_id`` (always False for the local node). No I/O."""
+        return self._node_stale(node_id)
 
     def _node_stale(self, node_id: str) -> bool:
         probe = self.node_probe if self.node_probe is not None else getattr(self.budget, "probe", None)
@@ -1484,9 +1491,33 @@ class Deployer:
             **({"sleep_label": cluster.sleep_label(d, engine)} if cluster.is_cluster(d) else {}),
             "placement": self._read_placement(d),
             "placement_label": self._placement_label(self._read_placement(d)),
+            # a cluster: each rank's node, role and status (never its container id or ports; R15); [] otherwise
+            "rank_summary": self._rank_summary(d) if cluster.is_cluster(d) else [],
             "created_at": d.created_at.isoformat() if d.created_at else None,
             "updated_at": d.updated_at.isoformat() if d.updated_at else None,
         }
+
+    def _node_label(self, node_id: str) -> str:
+        node_cfg = next((n for n in self.settings.nodes if n.id == node_id), None)
+        return node_cfg.label if node_cfg else node_id
+
+    def _rank_summary(self, d: Deployment) -> list[dict]:
+        """A cluster's ranks for the views: node, label, head / worker and status. The status is the rank
+        container's Docker status from the last liveness or start-up check while the deployment is active and that
+        container was checked; else the deployment's state (a rank already removed while stopping: "stopped"). From
+        the row and ``rank_status`` only: no Docker call."""
+        out = []
+        for r in cluster.ranks_of(d):
+            cid = r.get("container_id")
+            if d.state in ACTIVE_STATES and cid and cid in self.rank_status:
+                status = self.rank_status[cid]
+            elif d.state == "stopping" and not cid:
+                status = "stopped"
+            else:
+                status = d.state
+            out.append({"rank": r["rank"], "node": r["node"], "node_label": self._node_label(r["node"]),
+                        "role": "head" if r["rank"] == 0 else "worker", "status": status})
+        return out
 
     def _endpoints(self, d: Deployment) -> dict:
         node = self._node_of(d)

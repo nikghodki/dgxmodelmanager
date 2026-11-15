@@ -494,6 +494,14 @@ async def _fail_rank(d, dep: Deployment, rank: dict, info) -> None:
                exit_code=info.exit_code, oom_killed=oom)
 
 
+def note_rank(d, rank: dict, info) -> None:
+    """Record what a check saw of ``rank``'s container (its Docker status, "missing" when it vanished) for the views'
+    rank_summary (Deployer.rank_status), keyed by container id: a new run's containers start unrecorded."""
+    cid = rank.get("container_id")
+    if cid:
+        d.rank_status[cid] = info.status if info is not None else "missing"
+
+
 async def _infos(d, dep: Deployment) -> tuple[list[tuple[dict, object]], NodeUnreachable | None]:
     """(rank, its container info) of every reachable rank (blocking lookups in worker threads), and the
     NodeUnreachable of the first rank whose node could not be reached (None: all reached)."""
@@ -514,6 +522,8 @@ async def monitor_step(d, dep: Deployment, start: float) -> bool:
     reachable node fails the deployment even while another node is unreachable; otherwise an unreachable node raises
     NodeUnreachable (Deployer._monitor_tick: backoff, then the start-up timeout)."""
     infos, unreachable = await _infos(d, dep)
+    for r, info in infos:
+        note_rank(d, r, info)
     for r, info in infos:
         if info is None or info.status in ("exited", "dead"):
             await _fail_rank(d, dep, r, info)
@@ -563,6 +573,7 @@ async def check_live(d, dep: Deployment, skip_nodes: set[str]) -> bool:
         else:
             info = await asyncio.to_thread(d.docker.get, r.get("container_id"))
         infos.append((r, info))
+        note_rank(d, r, info)
     for r, info in infos:
         if info is None or info.status in ("exited", "dead"):
             await _fail_rank(d, dep, r, info)
@@ -596,6 +607,7 @@ async def remove_ranks(d, dep_id: int) -> bool:
             continue
         try:
             await _remove_rank(d._docker_for(node), dep, r)
+            d.rank_status.pop(r.get("container_id") or "", None)
             r["container_id"] = None
         except Exception as e:
             gone = False

@@ -1,15 +1,45 @@
-"""Nodes API: copy a snapshot from this node's HF cache to a remote node (dgxmm/nodes/weights_sync.py)."""
+"""Nodes API: the configured nodes with their memory budgets (GET), and copying a snapshot from this node's HF cache
+to a remote node (dgxmm/nodes/weights_sync.py)."""
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field
 
 from dgxmm.api.errors import api_error
 from dgxmm.audit import audit
-from dgxmm.auth.deps import Principal, get_ctx, require_admin
+from dgxmm.auth.deps import Principal, current_principal, get_ctx, require_admin
 from dgxmm.config import LOCAL_NODE_ID
 from dgxmm.context import AppContext
 from dgxmm.nodes.weights_sync import CopyError
 
 router = APIRouter(prefix="/api/nodes", tags=["nodes"])
+
+
+def _reachable(ctx: AppContext, node_id: str, stale: bool) -> bool:
+    """The last memory probe of a remote node succeeded (NodeProbe.reachable; no I/O here). Without that record
+    (a probe that keeps none): a node with a recent reading is reachable. The local node always is."""
+    if node_id == LOCAL_NODE_ID:
+        return True
+    probe = ctx.node_probe if ctx.node_probe is not None else getattr(ctx.budget, "probe", None)
+    known = getattr(probe, "reachable", None)
+    seen = known(node_id) if callable(known) else None
+    return (not stale) if seen is None else bool(seen and not stale)
+
+
+@router.get("")
+async def list_nodes(p: Principal = Depends(current_principal), ctx: AppContext = Depends(get_ctx)):
+    """Every configured node (config order; a single-node install: the implicit local node) with its label, whether it
+    is remote, reachable and stale (no recent memory reading), and its memory budget as GET /api/host serialises it
+    (None for a remote node never sampled). Any signed-in user. No Docker or SSH call: the budgets of the last
+    refresh (one refresh first when there is none yet, as GET /api/host does)."""
+    if ctx.budget.current() is None:
+        await ctx.budget.refresh()
+    out = []
+    for n in ctx.settings.all_nodes():
+        remote = n.id != LOCAL_NODE_ID
+        stale = bool(remote and ctx.deployer is not None and ctx.deployer.node_stale(n.id))
+        b = ctx.budget.current(n.id)
+        out.append({"id": n.id, "label": n.label, "remote": remote, "reachable": _reachable(ctx, n.id, stale),
+                    "stale": stale, "budget": b.as_dict() if b is not None else None})
+    return out
 
 
 class CopyWeightsIn(BaseModel):
