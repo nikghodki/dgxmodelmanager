@@ -562,18 +562,56 @@ async def test_wake_restarts_a_cluster_its_sleep_stopped(deployer_two_nodes, rea
     assert e.value.code == "not_sleeping" and d.state(ready_cluster_dep.id) == "stopped"
 
 
-async def test_switch_to_remote_single_fitted_against_dgx2(deployer_two_nodes, ready_single_dep, qwen_req):
+def _stopping_events(d, dep_id: int) -> list[str]:
+    from sqlalchemy import select
+    from dgxmm.db import DeploymentEvent
+    with d.db.session() as s:
+        return list(s.scalars(select(DeploymentEvent.message).where(DeploymentEvent.deployment_id == dep_id,
+                                                                    DeploymentEvent.to_state == "stopping")))
+
+
+@pytest.mark.parametrize("build", ["validated", "model_copy"])
+async def test_switch_to_remote_single_fitted_against_dgx2(deployer_two_nodes, ready_single_dep, qwen_req, build):
+    """The pre-check fits the new deployment on dgx-2 and refuses before touching the old one. ``model_copy``: a
+    request whose placement was not re-derived from its node (pydantic skips model_post_init) is judged where
+    deploy() will put it (its node), too."""
+    from dgxmm.deployer.service import DeployRequest
     d = deployer_two_nodes
     d.engines_http.all_healthy = True
-    req = qwen_req.model_copy(update={"name": "q2", "alias": None, "node": "dgx-2"})
+    if build == "validated":
+        req = DeployRequest(**{**qwen_req.model_dump(exclude={"placement", "node"}), "name": "q2", "alias": None,
+                               "node": "dgx-2"})
+        assert req.placement.nodes == ["dgx-2"]
+    else:
+        req = qwen_req.model_copy(update={"name": "q2", "alias": None, "node": "dgx-2"})
+        assert req.placement.nodes == ["local"]
     _free_for(d, "dgx-2", 0)  # local is roomy, dgx-2 is not: stopping the local one frees nothing there
-    with pytest.raises(InsufficientMemory):
+    with pytest.raises(InsufficientMemory) as e:
         await d.switch(ready_single_dep.id, req, [], user_id=1)
+    assert e.value.extra["node"] == "dgx-2" and e.value.message.startswith("node dgx-2: ")
+    assert _stopping_events(d, ready_single_dep.id) == []  # refused at the pre-check: never stopped
     assert d.state(ready_single_dep.id) == "ready" and d.row_by_name("q2") is None
     d.set_free("dgx-2", 100 * GIB)
     _free_for(d, "local", 0)  # local is full, dgx-2 roomy: fits
     v = await d.switch(ready_single_dep.id, req, [], user_id=1)
     assert v["state"] == "ready" and d.row(v["id"]).node == "dgx-2"
+
+
+async def test_wake_after_sleep_failed_start_and_user_stop_is_refused(deployer_two_nodes, ready_cluster_dep):
+    """sleep -> stopped -> a start that fails -> the user stops the failed cluster (straight to "stopped", no
+    "stopping" event): the latest stop is the user's, so wake is 409."""
+    d = deployer_two_nodes
+    await d.sleep(ready_cluster_dep.id)
+    d.fake("dgx-2").fail_run = True
+    with pytest.raises(DeployError):
+        await d.restart(ready_cluster_dep.id)
+    assert d.state(ready_cluster_dep.id) == "failed"
+    d.fake("dgx-2").fail_run = False
+    await d.stop(ready_cluster_dep.id)
+    assert d.state(ready_cluster_dep.id) == "stopped"
+    with pytest.raises(DeployError) as e:
+        await d.wake(ready_cluster_dep.id)
+    assert e.value.code == "not_sleeping" and d.state(ready_cluster_dep.id) == "stopped"
 
 
 async def test_single_rows_placement_matches_node(deployer_two_nodes, ready_remote_dep):

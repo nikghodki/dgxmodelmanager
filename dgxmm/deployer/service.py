@@ -1892,11 +1892,14 @@ class Deployer:
         # placement (a single node, or every node of a cluster with its rank's share), each action crediting only
         # what it frees on that node.
         prep = self.prepare(req.engine, req.model_ref, req.config)
-        budgets = await self._placement_budgets(req.placement)
-        need = cluster.need_per_node(prep, req.placement, budgets)
+        # where deploy() will put it: a cluster's placement, else the request's node (a model_copy'd request may
+        # carry a placement not re-derived from its node)
+        placement = req.placement if req.placement.kind == "cluster" else Placement(kind="single", nodes=[req.node])
+        budgets = await self._placement_budgets(placement)
+        need = cluster.need_per_node(prep, placement, budgets)
 
         def fit_with(extra: Callable[[str], int]) -> tuple[FitResult, str]:
-            return cluster.fit_per_node(prep, req.placement, budgets, need, extra)
+            return cluster.fit_per_node(prep, placement, budgets, need, extra)
 
         # Memory freed by the user's chosen actions (each deployment counted once)
         seen: set[int] = set()
@@ -1928,7 +1931,7 @@ class Deployer:
         # Final fit check
         fit, node = fit_with(freed)
         if not fit.fits:
-            raise cluster.insufficient(fit, req.placement, node)
+            raise cluster.insufficient(fit, placement, node)
 
         alias = old.alias
         if "mode" not in req.model_fields_set:  # the replacement keeps the old deployment's mode unless one is given

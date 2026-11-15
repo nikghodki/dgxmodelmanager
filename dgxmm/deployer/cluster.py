@@ -172,12 +172,22 @@ def sleep_label(dep, engine) -> str | None:
 
 def stopped_by_sleep(d, dep_id: int) -> bool:
     """The cluster's latest stop was its "sleep" (``sleep_as_stop``, event actor "sleep"), not a user, a schedule, the
-    watchdog or a failure: a wake starts it again."""
+    watchdog or a failure: a wake starts it again. The stop that led to the latest transition into "stopped": that
+    event's actor (a planned / failed row goes straight to "stopped" with the actor on it), else, when it carries
+    none (the end of a running cluster's stop), the "stopping" event right before it."""
     from sqlalchemy import select
     with d.db.session() as s:
-        actor = s.scalar(select(DeploymentEvent.actor).where(
-            DeploymentEvent.deployment_id == dep_id, DeploymentEvent.to_state == "stopping")
-            .order_by(DeploymentEvent.id.desc()).limit(1))
+        last = s.scalar(select(DeploymentEvent).where(DeploymentEvent.deployment_id == dep_id,
+                                                      DeploymentEvent.to_state == "stopped")
+                        .order_by(DeploymentEvent.id.desc()).limit(1))
+        if last is None:
+            return False
+        actor = last.actor
+        if actor is None:
+            prev = s.scalar(select(DeploymentEvent).where(DeploymentEvent.deployment_id == dep_id,
+                                                          DeploymentEvent.id < last.id)
+                            .order_by(DeploymentEvent.id.desc()).limit(1))
+            actor = prev.actor if prev is not None and prev.to_state == "stopping" else None
     return actor == "sleep"
 
 
@@ -223,9 +233,10 @@ def fit_per_node(prep: Prepared, placement: Placement, budgets: dict, need: dict
 
 
 def insufficient(fit: FitResult, placement: Placement, node: str) -> InsufficientMemory:
-    """InsufficientMemory for ``fit``; on a cluster, naming the node (extra ``node``) like ``_fit``."""
+    """InsufficientMemory for ``fit``; on a cluster or a remote node, naming the node (extra ``node``) like ``_fit``
+    (a single local placement: unchanged)."""
     e = InsufficientMemory(fit)
-    if placement.kind == "cluster":
+    if placement.kind == "cluster" or node != LOCAL_NODE_ID:
         e.message = f"node {node}: {e.message}"
         e.args = (e.message,)
         e.extra["node"] = node
