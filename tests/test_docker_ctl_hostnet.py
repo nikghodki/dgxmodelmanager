@@ -17,7 +17,11 @@ def spec(**kw) -> ContainerSpec:
 
 
 def test_existing_spec_kwargs_unchanged(fake_docker):
-    """Baseline: an existing spec (no new fields) produces the exact same kwargs as before."""
+    """Baseline: an existing spec (no new fields) produces the exact same kwargs as before.
+    
+    This test ensures backward compatibility by verifying the complete kwargs dict passed to
+    docker-py for a typical vLLM deployment matches the expected structure exactly.
+    """
     ctl = DockerController(fake_docker)
     ctl.run(spec(
         name="vllm-model",
@@ -30,11 +34,37 @@ def test_existing_spec_kwargs_unchanged(fake_docker):
         gpus=True,
         ipc_host=True,
     ))
-    kw = fake_docker.containers.last_run_kwargs
+    kw = fake_docker.containers.last_run_raw_kwargs
+    
+    # Assert exact key set
+    expected_keys = {
+        "image", "command", "name", "detach", "environment", "labels", "network",
+        "volumes", "restart_policy", "entrypoint", "ports", "device_requests", "ipc_mode", "remove"
+    }
+    assert set(kw.keys()) == expected_keys, f"Key mismatch: {set(kw.keys()) ^ expected_keys}"
+    
+    # Assert values of every key
+    assert kw["image"] == "vllm/vllm:latest"
+    assert kw["command"] == ["python", "-m", "vllm.entrypoints.openai.api_server"]
+    assert kw["name"] == "vllm-model"
+    assert kw["detach"] is True
+    assert kw["environment"] == {"MODEL": "meta-llama/Llama-3.1-8B"}
+    assert kw["labels"] == {MANAGED_LABEL: "true"}
     assert kw["network"] == "dgxmm-bridge"
+    assert kw["volumes"] == {}
+    assert kw["restart_policy"] == {"Name": "no"}
+    assert kw["entrypoint"] is None
     assert kw["ports"] == {"8000/tcp": ("198.51.100.1", 8000)}
     assert kw["ipc_mode"] == "host"
-    assert "device_requests" in kw
+    assert kw["remove"] is False
+    
+    # DeviceRequest comparison by fields
+    assert len(kw["device_requests"]) == 1
+    dr = kw["device_requests"][0]
+    assert dr["Count"] == -1
+    assert dr["Capabilities"] == [["gpu"]]
+    
+    # New fields should NOT be present
     assert "network_mode" not in kw
     assert "devices" not in kw
     assert "cap_add" not in kw

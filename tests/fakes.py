@@ -206,8 +206,13 @@ class FakeContainers:
 
     @property
     def last_run_kwargs(self) -> dict:
-        """Return the kwargs from the most recent run() call."""
+        """Return the kwargs from the most recent run() call (only non-None values recorded)."""
         return self.client.run_calls[-1] if self.client.run_calls else {}
+
+    @property
+    def last_run_raw_kwargs(self) -> dict:
+        """Return the raw kwargs as passed to containers.run(), including None values."""
+        return self.client.run_calls_raw[-1] if self.client.run_calls_raw else {}
 
     def list(self, all=False, filters=None, sparse=False):
         self.client._maybe_raise()
@@ -249,9 +254,15 @@ class FakeContainers:
             if self.client.helper_action:
                 self.client.helper_action(call)
             return FakeHelperContainer(self.client)
+        # Record raw kwargs (all args as passed to docker-py, for baseline tests)
+        raw_kwargs = dict(image=image, command=command, name=name, environment=environment,
+                         labels=labels, network=network, volumes=volumes, ports=ports,
+                         entrypoint=entrypoint, remove=remove, **kw)
+        self.client.run_calls_raw.append(raw_kwargs)
+        
+        # Record filtered kwargs (only non-None values, for easier test assertions)
         call_kwargs = dict(image=image, command=command, name=name, environment=environment,
-                                          labels=labels, entrypoint=entrypoint, remove=remove, **kw)
-        # Only include network/volumes/ports if they were explicitly passed (not None from defaults)
+                          labels=labels, entrypoint=entrypoint, remove=remove, **kw)
         if network is not None:
             call_kwargs["network"] = network
         if volumes is not None:
@@ -306,6 +317,7 @@ class FakeDockerClient:
         self.missing_images: set[str] = set()
         self.image_labels: dict[str, dict] = {}  # tag -> labels (default: a decider image built from this tree)
         self.run_calls: list[dict] = []
+        self.run_calls_raw: list[dict] = []  # raw kwargs including None values, for baseline tests
         self.fail_run = False
         self.busy_host_ports: set[int] = set()
         self.oneshot_output = ""
