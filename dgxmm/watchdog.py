@@ -9,7 +9,8 @@ are never stopped.
 
 Per node (multi-node): every node's budget (BudgetService.all()) is checked on its own, with its own alert level and
 once-per-minute auto-protect limit; a victim is always a deployment on the pressured node, stopped through that node's
-controller (Deployer.stop). A remote node whose memory reading is stale is not evaluated (no action on stale data).
+controller (Deployer.stop). A cluster counts as on every node of its placement; the victim choice weighs only its share
+on the pressured node (Deployer.reserved_on), and stopping it frees every node (all ranks). A remote node whose memory reading is stale is not evaluated (no action on stale data).
 The decider runs on the local node, so the runaway check and ``level`` (read by the decider supervisor) are the local
 node's; ``state()`` reports the worst node, plus every node under "nodes" when remote nodes are configured."""
 from __future__ import annotations
@@ -202,5 +203,6 @@ class Watchdog:
         if deciders:
             return deciders[0]
         cands = [v for v in active if not v.get("system")]
-        cands.sort(key=lambda v: (v["priority"], -v["reserved_bytes"]))
+        share = getattr(self.deployer, "reserved_on", None)  # what it holds on this node (a cluster: its share)
+        cands.sort(key=lambda v: (v["priority"], -(share(v, node) if share is not None else v["reserved_bytes"])))
         return cands[0] if cands else None

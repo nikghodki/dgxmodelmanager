@@ -369,8 +369,11 @@ async def test_llamacpp_cluster_deploys_without_nccl(deployer_two_nodes, llama_c
     await d.aclose()
 
 
-async def test_llamacpp_cluster_sleep_and_mode_refused(deployer_two_nodes, ready_llama_cluster):
+async def test_llamacpp_cluster_sleep_stops_every_rank_and_mode_works(deployer_two_nodes, ready_llama_cluster):
+    """llama.cpp has no sleep: a llama.cpp cluster's "sleep" stops every rank; on-demand mode is allowed."""
     d, row = deployer_two_nodes, ready_llama_cluster
-    with pytest.raises(DeployError) as e:
-        d.set_mode(row.id, "on_demand", None)
-    assert e.value.code == "cluster_unsupported"
+    assert d.set_mode(row.id, "on_demand", None)["mode"] == "on_demand"
+    v = d.view(row.id)
+    assert v["sleep_capable"] is False and v["sleep_label"] == "sleep (stops all nodes)"
+    assert (await d.sleep(row.id))["state"] == "stopped"
+    assert [d.fake(n).containers.list() for n in ("local", "dgx-2")] == [[], []]

@@ -537,23 +537,25 @@ class Deployer:
             est = self.calibration.adjust(engine.name, artifact.ref, config_hash(cfg.model_dump(mode="json")), est)
         return Prepared(engine, artifact, cfg, draft, est)
 
-    def _replacing_credit(self, replacing: int | None) -> int:
+    def _replacing_credit(self, replacing: int | None, node: str = LOCAL_NODE_ID, budget=None) -> int:
         # Credit stop-equivalent memory (max(reserved, actual)) since switch() auto-escalates
         # from sleep to stop when sleep won't free enough. This makes preview accurate.
+        # Per node (``budget``: that node's, default its current one): a cluster's share there only.
         if replacing is None:
             return 0
         dep = self._get(replacing)
-        if dep is None or dep.state not in ACTIVE_STATES:
+        if dep is None or dep.state not in ACTIVE_STATES or not cluster.on_node(dep, node):
             return 0
-        current = self.budget.current()
+        current = budget if budget is not None else self.budget.current(node)
         actual = next((u.actual for u in current.deployments if u.deployment_id == replacing), 0) if current else 0
-        return max(dep.reserved_bytes, actual) if dep.state != "sleeping" else actual
+        return max(cluster.reserved_on(dep, node), actual) if dep.state != "sleeping" else actual
 
-    def _action_frees(self, action: PlanAction, budget) -> int:
-        """Memory a plan action releases: sleep frees KV/activations of a ready deployment;
-        stop frees max(reserved, actual), or only the measured memory of a sleeping one."""
+    def _action_frees(self, action: PlanAction, budget, node: str = LOCAL_NODE_ID) -> int:
+        """Memory a plan action releases on ``node`` (``budget``: that node's): sleep frees KV/activations of a
+        ready deployment; stop frees max(reserved, actual), or only the measured memory of a sleeping one. A
+        cluster's share on ``node`` only; nothing for a deployment that does not run there."""
         dep = self._get(action.deployment_id)
-        if dep is None or dep.state not in ACTIVE_STATES:
+        if dep is None or dep.state not in ACTIVE_STATES or not cluster.on_node(dep, node):
             return 0
         actual = next((u.actual for u in budget.deployments if u.deployment_id == dep.id), 0) if budget else 0
         if action.type == "sleep":
@@ -562,7 +564,7 @@ class Deployer:
             est = dep.estimate or {}
             return max(dep.reserved_bytes - est.get("weights", 0) - est.get("draft_weights", 0)
                        - est.get("runtime", 0), 0)
-        return actual if dep.state == "sleeping" else max(dep.reserved_bytes, actual)
+        return actual if dep.state == "sleeping" else max(cluster.reserved_on(dep, node), actual)
 
     async def preview(self, engine: str, model_ref: str, raw_cfg: dict, replacing: int | None = None,
                       priority: int | None = None, consult=None) -> dict:
@@ -1453,8 +1455,9 @@ class Deployer:
             "model_name": d.alias or served,  # what clients pass as "model" to the single LiteLLM endpoint
             "litellm_error": self.litellm_error(d.id, d.state) if self.litellm_error is not None else None,
             **self._endpoints(d),
-            "sleep_capable": bool(engine and engine.supports_sleep and d.config.get("enable_sleep_mode"))
-                             and not cluster.is_cluster(d),  # clusters cannot sleep yet (cluster_unsupported)
+            "sleep_capable": self.supports_sleep(d),
+            # a cluster: what "sleep" does to it ("sleep (stops all nodes)" while sleep fails across nodes)
+            **({"sleep_label": cluster.sleep_label(d, engine)} if cluster.is_cluster(d) else {}),
             "placement": self._read_placement(d),
             "placement_label": self._placement_label(self._read_placement(d)),
             "created_at": d.created_at.isoformat() if d.created_at else None,
@@ -1494,13 +1497,22 @@ class Deployer:
         with self.db.session() as s:
             return [self._view(d) for d in s.scalars(select(Deployment).order_by(Deployment.name))]
 
-    def active_deps(self, exclude: int | None = None, facts: dict | None = None) -> list[ActiveDep]:
-        """Stop/sleep candidates. ``facts`` (plan_facts) adds the ranking hints: idle minutes and whether stopping
-        it would disrupt something (the safety filter would reject it)."""
+    def active_deps(self, exclude: int | None = None, facts: dict | None = None,
+                    node: str = LOCAL_NODE_ID) -> list[ActiveDep]:
+        """Stop/sleep candidates for memory on ``node`` (the deployments that hold memory there; a cluster with its
+        share there). ``facts`` (plan_facts) adds the ranking hints: idle minutes and whether stopping it would
+        disrupt something (the safety filter would reject it)."""
         out = []
+        current = self.budget.current(node) if node != LOCAL_NODE_ID and self.budget is not None else None
         for v in self.list_views():
             if v["id"] == exclude or v["system"] or v["state"] not in ("ready", "sleeping", "unknown", "loading", "starting"):
                 continue  # system deployments are never stop/sleep candidates
+            row = self._get(v["id"])
+            if row is None or not cluster.on_node(row, node):
+                continue  # frees nothing on this node
+            reserved = cluster.reserved_on(row, node)
+            actual = (v["actual_bytes"] or 0) if node == LOCAL_NODE_ID else next(
+                (u.actual for u in current.deployments if u.deployment_id == v["id"]), 0) if current else 0
             est = v["estimate"] or {}
             sleep_frees = max(v["reserved_bytes"] - est.get("weights", 0) - est.get("draft_weights", 0)
                               - est.get("runtime", 0), 0)
@@ -1510,8 +1522,8 @@ class Deployer:
                 idle = f.last_traffic_min if f.last_traffic_min is not None else (
                     f.ready_for_min if f.traffic_known else None)
                 disruptive = bool(f.active_reason() or f.unknown_reason() or f.dependents)
-            out.append(ActiveDep(v["id"], v["name"], v["state"], v["priority"], v["reserved_bytes"],
-                                 v["actual_bytes"] or 0, v["sleep_capable"] and v["state"] == "ready", sleep_frees,
+            out.append(ActiveDep(v["id"], v["name"], v["state"], v["priority"], reserved, actual,
+                                 v["sleep_capable"] and v["state"] == "ready", sleep_frees,
                                  idle_min=idle, disruptive=disruptive))
         return out
 
@@ -1551,18 +1563,18 @@ class Deployer:
         """``precheck``: as for ``stop``."""
         async with self._lock(dep_id):
             dep = self._require(dep_id)
-            cluster.refuse(dep, "sleep")
             if dep.state != "ready":
                 raise DeployError("not_ready", f"deployment is {dep.state}", 409)
             if precheck is not None and (why := await precheck()):
                 raise DeployError("precheck", why, 409)
+            if cluster.is_cluster(dep) and not self.supports_sleep(dep):
+                return await cluster.sleep_as_stop(self, dep)  # every rank stopped: frees every node
             engine = self.engines[dep.engine]
             cfg = engine.validate_config(dep.config)
             if not (engine.supports_sleep and engine.sleep_enabled(cfg)):
                 raise DeployError("sleep_unsupported", "this deployment was not started with sleep mode", 409)
             try:
-                await engine.sleep(self.http, self.base_url(dep.name, dep.port, node=self._node_of(dep)),
-                                   api_key=dep.engine_api_key)
+                await engine.sleep(self.http, self._engine_url(dep), api_key=dep.engine_api_key)
             except httpx.HTTPError as e:
                 raise DeployError("engine_error", f"sleep failed: {e}", 502)
             return self._transition(dep_id, "sleeping", message="sleeping (level 1: KV freed, weights offloaded)")
@@ -1631,16 +1643,17 @@ class Deployer:
                 engine = self.engines[dep.engine]
                 async with self.mem_lock:
                     self.require_model_name(self._model_name(dep), dep_id)
-                    budget = self._node_budget(self._node_of(dep), await self.budget.refresh())
-                    actual = next((u.actual for u in budget.deployments if u.deployment_id == dep_id), 0)
-                    need = max(dep.reserved_bytes - actual, 0)
-                    if need > budget.free_for_new:
-                        raise InsufficientMemory(FitResult(False, need, budget.free_for_new,
-                                                           budget.free_for_new - need, self._stored_estimate(dep),
-                                                           budget))
+                    local = await self.budget.refresh()
+                    for node in cluster.nodes_of(dep) if cluster.is_cluster(dep) else [self._node_of(dep)]:
+                        budget = self._node_budget(node, local)
+                        actual = next((u.actual for u in budget.deployments if u.deployment_id == dep_id), 0)
+                        need = max(cluster.reserved_on(dep, node) - actual, 0)
+                        if need > budget.free_for_new:
+                            raise InsufficientMemory(FitResult(False, need, budget.free_for_new,
+                                                               budget.free_for_new - need,
+                                                               self._stored_estimate(dep), budget))
                     try:
-                        await engine.wake(self.http, self.base_url(dep.name, dep.port, node=self._node_of(dep)),
-                                          api_key=dep.engine_api_key)
+                        await engine.wake(self.http, self._engine_url(dep), api_key=dep.engine_api_key)
                     except httpx.HTTPError as e:
                         raise DeployError("engine_error", f"wake failed: {e}", 502)
                     return self._transition(dep_id, "ready", message="woken up", last_error=None)
@@ -1769,8 +1782,6 @@ class Deployer:
         dep = self._require(dep_id)
         if dep.system:
             raise DeployError("system_deployment", f"{dep.name} is a system deployment and is always on", 409)
-        if "on_demand" in (mode, pending_mode):
-            cluster.refuse(dep, "on-demand mode")
         with self.db.session() as s:
             row = s.get(Deployment, dep_id)
             row.mode, row.idle_timeout_s, row.pending_mode = mode, idle_timeout_s, pending_mode
@@ -1794,21 +1805,58 @@ class Deployer:
             s.get(Deployment, dep_id).alias = alias
         self.events.publish("deployment", self.view(dep_id))
 
+    def supports_sleep(self, dep: "Deployment | dict") -> bool:
+        """Can ``dep`` (row or view) be put to sleep (KV cache freed, weights kept, a fast wake-up)? A single
+        deployment: its engine sleeps and it was configured with sleep mode. A cluster: cluster.supports_sleep (no:
+        its "sleep" stops every rank). Anything else with an ``id`` is looked up."""
+        if not isinstance(dep, (dict, Deployment)):
+            dep = self._require(dep.id)
+        engine = self.engines.get(dep["engine"] if isinstance(dep, dict) else dep.engine)
+        if cluster.is_cluster(dep):
+            return cluster.supports_sleep(dep, engine)
+        cfg = (dep.get("config") if isinstance(dep, dict) else dep.config) or {}
+        return bool(engine and engine.supports_sleep and cfg.get("enable_sleep_mode"))
+
+    def reserved_on(self, dep: "Deployment | dict", node: str) -> int:
+        """A deployment's (row or view) reservation on ``node``: a cluster's share there (cluster.reserved_on)."""
+        row = self._get(dep["id"]) if isinstance(dep, dict) else dep
+        return cluster.reserved_on(row, node) if row is not None else 0
+
+    def frees_on(self, v: dict, node: str) -> int:
+        """What stopping the deployment of view ``v`` returns to ``node``'s budget (cluster.frees_on)."""
+        row = self._get(v["id"])
+        return cluster.frees_on(self, row, v["state"], node) if row is not None else 0
+
+    def _engine_url(self, dep: Deployment) -> str:
+        """Where the deployer talks to the engine (sleep / wake): a cluster's head, else as base_url."""
+        if cluster.is_cluster(dep):
+            return cluster.head_url(self, dep)
+        return self.base_url(dep.name, dep.port, node=self._node_of(dep))
+
     def _can_sleep(self, dep: Deployment) -> bool:
-        engine = self.engines.get(dep.engine)
-        return bool(dep.state == "ready" and engine and engine.supports_sleep and dep.config.get("enable_sleep_mode"))
+        """Agrees with ``sleep``: ready, and a real sleep (never the stop a cluster "sleep" is)."""
+        return dep.state == "ready" and self.supports_sleep(dep)
+
+    async def _placement_budgets(self, placement: Placement) -> dict:
+        """Fresh budgets of every node of ``placement`` (the local refresh; a remote node's last reading, refused
+        while stale)."""
+        local = await self.budget.refresh()
+        return {n: self._node_budget(self._require_node(n), local) for n in placement.nodes}
 
     async def switch(self, old_id: int, req: DeployRequest, actions, user_id: int | None) -> dict:
         old = self._require(old_id)
         self._refuse_system_change(old, "switched")
-        cluster.refuse(old, "switching")
-        if req.placement.kind == "cluster":
-            raise cluster.unsupported("switching")
         acts = [a if isinstance(a, PlanAction) else PlanAction.model_validate(a) for a in actions]
 
-        # Check memory fit before touching anything; auto-escalate sleep→stop if needed
+        # Check memory fit before touching anything; auto-escalate sleep→stop if needed. Per node of the new
+        # placement (a single node, or every node of a cluster with its rank's share), each action crediting only
+        # what it frees on that node.
         prep = self.prepare(req.engine, req.model_ref, req.config)
-        budget = await self.budget.refresh()
+        budgets = await self._placement_budgets(req.placement)
+        need = cluster.need_per_node(prep, req.placement, budgets)
+
+        def fit_with(extra: Callable[[str], int]) -> tuple[FitResult, str]:
+            return cluster.fit_per_node(prep, req.placement, budgets, need, extra)
 
         # Memory freed by the user's chosen actions (each deployment counted once)
         seen: set[int] = set()
@@ -1818,28 +1866,29 @@ class Deployer:
                 seen.add(a.deployment_id)
                 unique.append(a)
         acts = unique
-        freed = sum(self._action_frees(a, budget) for a in acts)
+
+        def freed(node: str) -> int:
+            return sum(self._action_frees(a, budgets[node], node) for a in acts)
 
         # The old deployment's own credit, unless the user already chose what to do with it.
         # Prefer sleep when it is enough; otherwise stop (agrees with preview's _replacing_credit).
         if old_id not in seen and old.state in ("ready", "sleeping", "unknown"):
             sleep_act = PlanAction(type="sleep", deployment_id=old_id)
             stop_act = PlanAction(type="stop", deployment_id=old_id)
-            if self._can_sleep(old) and check_fit(prep.estimate, budget,
-                                                  extra_free=freed + self._action_frees(sleep_act, budget)).fits:
+            if self._can_sleep(old) and fit_with(
+                    lambda n: freed(n) + self._action_frees(sleep_act, budgets[n], n))[0].fits:
                 chosen = sleep_act
-            elif old.state == "sleeping" and check_fit(prep.estimate, budget, extra_free=freed).fits:
+            elif old.state == "sleeping" and fit_with(freed)[0].fits:
                 chosen = None  # already asleep and nothing more is needed
             else:
                 chosen = stop_act
             if chosen is not None:
                 acts.insert(0, chosen)
-                freed += self._action_frees(chosen, budget)
 
         # Final fit check
-        fit = check_fit(prep.estimate, budget, extra_free=freed)
+        fit, node = fit_with(freed)
         if not fit.fits:
-            raise InsufficientMemory(fit)
+            raise cluster.insufficient(fit, req.placement, node)
 
         alias = old.alias
         if "mode" not in req.model_fields_set:  # the replacement keeps the old deployment's mode unless one is given
@@ -1889,16 +1938,19 @@ class Deployer:
                           user_id: int | None = None) -> dict:
         dep = self._require(dep_id)
         self._refuse_system_change(dep, "reconfigured")
-        cluster.refuse(dep, "reconfiguring")
         old_cfg, old_ref = dict(dep.config), dep.model_ref
         old_reserved, old_estimate, old_port = dep.reserved_bytes, dict(dep.estimate), dep.port
+        old_ranks = [dict(r) for r in dep.ranks or []]  # a cluster's rank reservations (restart rewrites them)
         was_active = dep.state in ("ready", "sleeping", "unknown", "starting", "loading")
         prep = self.prepare(dep.engine, model_ref or old_ref, new_config, existing_ref=old_ref)
-        if not actions:
-            budget = await self.budget.refresh()
-            fit = check_fit(prep.estimate, budget, extra_free=self._replacing_credit(dep_id))
+        if not actions:  # per node of its placement, crediting what stopping it frees there
+            placement = Placement(**cluster.placement_of(dep)) if cluster.is_cluster(dep) else \
+                Placement(kind="single", nodes=[self._node_of(dep)])
+            budgets = await self._placement_budgets(placement)
+            fit, node = cluster.fit_per_node(prep, placement, budgets, cluster.need_per_node(prep, placement, budgets),
+                                             lambda n: self._replacing_credit(dep_id, n, budgets[n]))
             if not fit.fits:
-                raise InsufficientMemory(fit)
+                raise cluster.insufficient(fit, placement, node)
         applied = await self.apply_actions(actions, user_id)
         try:
             if was_active:
@@ -1923,6 +1975,8 @@ class Deployer:
                     row.config, row.model_ref = old_cfg, old_ref
                     if not was_active:
                         row.reserved_bytes, row.estimate, row.port = old_reserved, old_estimate, old_port
+                        if cluster.is_cluster(row):
+                            row.ranks = old_ranks
             except Exception as e:
                 log.exception("rollback config restore of %s failed", dep_id)
                 rollback_failures.append(f"restore config: {e}")

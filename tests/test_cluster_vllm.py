@@ -222,25 +222,6 @@ async def test_cluster_weights_checked_on_every_node(deployer_two_nodes, deepsee
     assert d.count_rows() == 0
 
 
-async def test_cluster_refuses_sleep_switch_mode_reconfigure(deployer_two_nodes, ready_cluster_dep, qwen_req,
-                                                              deepseek_cluster_req):
-    d = deployer_two_nodes
-    dep_id = ready_cluster_dep.id
-    calls = [d.sleep(dep_id), d.switch(dep_id, qwen_req.model_copy(update={"name": "new"}), [], 1),
-             d.reconfigure(dep_id, dict(SMALL_VLLM, max_num_seqs=4))]
-    for c in calls:
-        with pytest.raises(DeployError) as e:
-            await c
-        assert e.value.code == "cluster_unsupported"
-    with pytest.raises(DeployError) as e:
-        d.set_mode(dep_id, "on_demand", None)
-    assert e.value.code == "cluster_unsupported"
-    with pytest.raises(DeployError) as e:
-        await d.deploy(deepseek_cluster_req.model_copy(update={"name": "od", "alias": "od", "mode": "on_demand"}), 1)
-    assert e.value.code == "cluster_unsupported"
-    assert d.state(dep_id) == "ready"
-
-
 # ---------- reconcile / LiteLLM / watchdog ----------
 
 async def test_reconcile_adopts_cluster_ranks(deployer_two_nodes, starting_cluster_dep):
@@ -471,6 +452,7 @@ async def test_stop_while_cleanup_pending(deployer_two_nodes, ready_cluster_dep)
 
 
 def test_cluster_specs_never_enable_sleep_mode(vllm_engine, cluster_launch):
+    """Sleep failed across nodes (cluster.SLEEP_ACROSS_NODES, Task 14 hardware check): no dev endpoints."""
     cluster_launch["cfg"] = cluster_launch["cfg"].model_copy(update={"enable_sleep_mode": True})
     for r in vllm_engine.cluster_specs(**cluster_launch):
         assert "--enable-sleep-mode" not in r.spec.command

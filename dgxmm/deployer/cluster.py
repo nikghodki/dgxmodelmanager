@@ -17,11 +17,20 @@ come here.
 - Failure: any rank exiting or vanishing fails the whole deployment: it goes "stopping", every rank is removed (head
   first), and only once every rank container is confirmed gone does it become "failed" (or "stopped"); until then the
   reservation stays committed and removal is retried with backoff (``cleanup``).
-- Sleep, switch, on-demand mode and reconfigure are refused (``cluster_unsupported``)."""
+- Parity (Task 14): on-demand mode, schedules, switch (single <-> cluster: the new placement is deployed as usual),
+  reconfigure (a restart through ``restart``), the watchdog and the planner work for clusters. Memory decisions
+  about one node count only the cluster's share there (``reserved_on`` / ``frees_on``); stopping a cluster always
+  frees every node (all ranks removed, the reservation held until each is confirmed gone).
+- Sleep: vLLM's level-1 sleep across nodes failed the hardware check of 2026-11-15 (two GB10 nodes, TP=2: both
+  nodes freed about 52 GB on /sleep, but after /wake_up the model produced garbage and each node had about 17 GB
+  less available than before the sleep), so ``SLEEP_ACROSS_NODES`` is False: a cluster "sleep" stops every rank
+  (``SLEEP_AS_STOP_LABEL``) and the ranks never get --enable-sleep-mode or the dev endpoints. llama.cpp has no
+  sleep at all, so the same holds for its clusters."""
 from __future__ import annotations
 
 import asyncio
 import logging
+from typing import Callable
 
 from dgxmm.config import LOCAL_NODE_ID
 from dgxmm.db import Deployment, DeploymentEvent
@@ -30,7 +39,7 @@ from dgxmm.deployer.service import _SKIPPED, DeployError, InsufficientMemory, Pl
 from dgxmm.deployer.states import ACTIVE_STATES
 from dgxmm.engines.base import LaunchContext, SpecError, container_name
 from dgxmm.engines.decision import is_system_engine
-from dgxmm.memory.budget import RELEASING
+from dgxmm.memory.budget import COMMITTED_STATES, RELEASING
 from dgxmm.nodes.registry import NodeUnreachable
 from dgxmm.planner.fit import FitResult
 
@@ -38,6 +47,10 @@ log = logging.getLogger(__name__)
 
 CLUSTER_RETRY_BASE_S = 1.0  # first wait before retrying the removal of rank containers (doubles each try)
 CLUSTER_RETRY_MAX_S = 60.0
+# vLLM /sleep + /wake_up across nodes: failed the 2026-11-15 hardware check (output corrupted after the wake-up);
+# while False a cluster "sleep" is a stop of every rank, and VllmEngine.cluster_specs never enables sleep mode
+SLEEP_ACROSS_NODES = False
+SLEEP_AS_STOP_LABEL = "sleep (stops all nodes)"
 
 
 # ---------- the row ----------
@@ -114,13 +127,52 @@ def _save_ranks(d, dep_id: int, ranks: list[dict], **fields) -> None:
             setattr(row, k, v)
 
 
-def unsupported(what: str) -> DeployError:
-    return DeployError("cluster_unsupported", f"{what} is not supported for cluster deployments yet", 409)
-
-
-def refuse(dep, what: str) -> None:
+def reserved_on(dep, node: str) -> int:
+    """A deployment's (row) reservation on ``node``: a cluster's rank share there, a single deployment's whole
+    reservation on its own node, 0 elsewhere."""
     if is_cluster(dep):
-        raise unsupported(what)
+        return sum(int(r.get("reserved") or 0) for r in ranks_of(dep) if r["node"] == node)
+    return int(dep.reserved_bytes or 0) if (dep.node or LOCAL_NODE_ID) == node else 0
+
+
+def on_node(dep, node: str) -> bool:
+    """``dep`` (row) holds memory on ``node``: a cluster on every node of its placement, a single deployment on
+    its ``node`` column."""
+    return node in nodes_of(dep) if is_cluster(dep) else (dep.node or LOCAL_NODE_ID) == node
+
+
+def frees_on(d, dep: Deployment, state: str, node: str) -> int:
+    """What stopping ``dep`` (in ``state``) returns to ``node``'s budget, as memory.budget counts it there: its
+    committed share (max(reserved there, measured there)), or only the measured memory of a sleeping or stopping
+    one; 0 for a deployment that holds nothing on ``node``."""
+    if not on_node(dep, node):
+        return 0
+    b = d.budget.current(node) if d.budget is not None else None
+    actual = sum(u.actual for u in b.deployments if u.deployment_id == dep.id) if b is not None else 0
+    if state in COMMITTED_STATES or state == "planned":
+        return max(reserved_on(dep, node), actual)
+    if state in ("sleeping", "stopping"):
+        return actual
+    return 0
+
+
+# ---------- sleep ----------
+def supports_sleep(dep, engine) -> bool:
+    """Deployer.supports_sleep of a cluster: the engine sleeps and the row was configured with sleep mode, and sleep
+    works across nodes (``SLEEP_ACROSS_NODES``; llama.cpp never sleeps)."""
+    cfg = dep.get("config") if isinstance(dep, dict) else dep.config
+    return bool(SLEEP_ACROSS_NODES and engine is not None and engine.supports_sleep
+                and (cfg or {}).get("enable_sleep_mode"))
+
+
+def sleep_label(dep, engine) -> str | None:
+    """What "sleep" does to a cluster, for the API: a real sleep, or a stop of every rank."""
+    return "sleep" if supports_sleep(dep, engine) else SLEEP_AS_STOP_LABEL
+
+
+async def sleep_as_stop(d, dep: Deployment) -> dict:
+    """Deployer.sleep of a cluster that cannot sleep (under its lock, ``dep`` ready): every rank is stopped."""
+    return await stop(d, dep, "sleep", f"{SLEEP_AS_STOP_LABEL}: stopping every rank")
 
 
 # ---------- fit and ports ----------
@@ -133,6 +185,40 @@ async def _unmanaged(d, nodes: list[str]) -> dict[str, set[int]]:
         except NodeUnreachable as e:
             raise DeployError("node_unreachable", str(e), 503)
     return out
+
+
+def need_per_node(prep: Prepared, placement: Placement, budgets: dict) -> dict[str, int]:
+    """Memory a deployment of ``prep`` needs on each node of ``placement``: the whole estimate on a single node;
+    each rank's share on a cluster's nodes (planner.placement.rank_bytes)."""
+    if placement.kind != "cluster":
+        return {placement.nodes[0]: prep.estimate.total}
+    from dgxmm.planner.placement import rank_bytes
+    return rank_bytes(prep.engine.name, prep.estimate, placement, budgets)
+
+
+def fit_per_node(prep: Prepared, placement: Placement, budgets: dict, need: dict[str, int],
+                 extra: Callable[[str], int]) -> tuple[FitResult, str]:
+    """(fit, node): the first node of ``placement`` whose need does not fit its free memory plus ``extra(node)``
+    (memory released there first), else the head's (fitting) result. A single node: exactly planner.fit.check_fit."""
+    first = None
+    for n in placement.nodes:
+        b = budgets[n]
+        free = b.free_for_new + extra(n)
+        fit = FitResult(need[n] <= free, need[n], free, free - need[n], prep.estimate, b)
+        if not fit.fits:
+            return fit, n
+        first = first or (fit, n)
+    return first
+
+
+def insufficient(fit: FitResult, placement: Placement, node: str) -> InsufficientMemory:
+    """InsufficientMemory for ``fit``; on a cluster, naming the node (extra ``node``) like ``_fit``."""
+    e = InsufficientMemory(fit)
+    if placement.kind == "cluster":
+        e.message = f"node {node}: {e.message}"
+        e.args = (e.message,)
+        e.extra["node"] = node
+    return e
 
 
 async def _fit(d, prep: Prepared, placement: Placement, credit: dict[str, int] | None = None):
@@ -208,8 +294,6 @@ async def deploy(d, req, user_id: int | None) -> dict:
     placement = req.placement
     prep = d.prepare(req.engine, req.model_ref, req.config)
     d.validate_placement(placement, req.engine, is_system_engine(prep.engine))  # refuses system engines
-    if req.mode == "on_demand":
-        raise unsupported("on-demand mode")
     with d.db.session() as s:
         if s.scalar(select(Deployment).where(Deployment.name == req.name)):
             raise DeployError("name_in_use", f"a deployment named {req.name} already exists", 409)
@@ -225,7 +309,7 @@ async def deploy(d, req, user_id: int | None) -> dict:
             dep = Deployment(name=req.name, engine=req.engine, model_ref=req.model_ref, node=placement.head,
                              config=prep.cfg.model_dump(mode="json"), state="planned", port=port,
                              priority=req.priority, alias=req.alias, reserved_bytes=sum(need.values()),
-                             estimate=prep.estimate.as_dict(), created_by=user_id, system=None, mode="always_on",
+                             estimate=prep.estimate.as_dict(), created_by=user_id, system=None, mode=req.mode,
                              idle_timeout_s=req.idle_timeout_s, engine_api_key=new_engine_key(),
                              placement=placement.model_dump(),
                              ranks=_fresh_ranks(req.engine, placement.nodes, need, port, mport))
@@ -464,6 +548,17 @@ async def check_live(d, dep: Deployment, skip_nodes: set[str]) -> bool:
     return False
 
 
+async def _remove_rank(docker, dep: Deployment, r: dict) -> None:
+    """Stop and remove one rank's container, by id and by name; raises unless it is confirmed gone."""
+    if r.get("container_id"):
+        await asyncio.to_thread(docker.stop_and_remove, r["container_id"])
+    name = rank_name(dep.name, r["rank"])
+    if not await asyncio.to_thread(docker.remove_leftover, name, dep.id):
+        left = await asyncio.to_thread(docker.get, name)  # remove_leftover logs its errors, never raises
+        if left is not None and left.labels.get("dgxmm.deployment_id") == str(dep.id):
+            raise RuntimeError(f"container {name} is still there")
+
+
 async def remove_ranks(d, dep_id: int) -> bool:
     """Stop and remove every rank container (the head first, then the workers); True once all are confirmed gone. A
     rank on a node that is no longer configured counts as gone (nothing can be reached there, ruling R11)."""
@@ -478,14 +573,7 @@ async def remove_ranks(d, dep_id: int) -> bool:
             r["container_id"] = None
             continue
         try:
-            docker = d._docker_for(node)
-            if r.get("container_id"):
-                await asyncio.to_thread(docker.stop_and_remove, r["container_id"])
-            name = rank_name(dep.name, r["rank"])
-            if not await asyncio.to_thread(docker.remove_leftover, name, dep_id):
-                left = await asyncio.to_thread(docker.get, name)  # remove_leftover logs its errors, never raises
-                if left is not None and left.labels.get("dgxmm.deployment_id") == str(dep_id):
-                    raise RuntimeError(f"container {name} is still there")
+            await _remove_rank(d._docker_for(node), dep, r)
             r["container_id"] = None
         except Exception as e:
             gone = False
@@ -572,14 +660,15 @@ async def stop(d, dep: Deployment, reason: str, message: str | None) -> dict:
 
 
 async def remove(d, dep: Deployment) -> None:
-    """The containers part of Deployer.remove of a cluster (stopped or failed): every rank, by id and by name."""
+    """The containers part of Deployer.remove of a cluster (stopped or failed): every rank, by id and by name, each
+    confirmed gone (as strict as ``remove_ranks``); otherwise the row stays and the removal can be retried."""
     for r in ranks_of(dep):
         node = r["node"]
         if not d.node_configured(node):
             continue  # R11: nothing to reach there
-        docker = d._docker_for(node)
         try:
-            await asyncio.to_thread(docker.stop_and_remove, r.get("container_id"))
-            await asyncio.to_thread(docker.remove_leftover, rank_name(dep.name, r["rank"]), dep.id)
+            await _remove_rank(d._docker_for(node), dep, r)
         except NodeUnreachable as e:
             raise DeployError("node_unreachable", f"could not remove container: {e}", 503)
+        except Exception as e:
+            raise DeployError("docker_error", f"could not remove rank {r['rank']} on node {node}: {e}", 502)

@@ -58,6 +58,8 @@ class DepFacts:
     traffic_known: bool = False  # metrics cover >= COVERAGE_MIN of the last ACTIVE_WINDOW_MIN minutes
     uncovered_min: int = ACTIVE_WINDOW_MIN  # minutes of that window without metrics
     ready_for_min: float | None = None  # minutes since the latest transition to ready (None = unknown)
+    placement: dict | None = None  # {"kind", "nodes"} as in the deployment view (never its ranks)
+    placement_label: str | None = None  # "dgx-1", "dgx-1 + dgx-2 (cluster)"
 
     def active_reason(self) -> str | None:
         if self.state in ("starting", "loading"):
@@ -151,6 +153,12 @@ def _option(plan: dict, deps: dict[int, DepFacts]) -> Option:
     return Option(plan["id"], plan["title"], desc)
 
 
+def _off_local(d: DepFacts) -> bool:
+    """Placed anywhere but the local node alone (a remote node or a cluster): the state names where it runs."""
+    p = d.placement or {}
+    return bool(d.placement_label) and (p.get("kind") == "cluster" or (p.get("nodes") or ["local"]) != ["local"])
+
+
 def build_state(*, shortfall: int, model_ref: str, engine: str, cfg: dict, deps: dict[int, DepFacts]) -> str:
     lines = [f"Memory shortfall: {gib(shortfall)}", f"Engine: {engine}",
              quoted_block("NEW MODEL", model_ref, max_chars=300),
@@ -160,6 +168,7 @@ def build_state(*, shortfall: int, model_ref: str, engine: str, cfg: dict, deps:
              "Running deployments:"]
     for d in sorted(deps.values(), key=lambda d: d.id):
         lines.append(f"- {d.name}: state {d.state}, priority {d.priority}, {idle_text(d)}"
+                     + (f", runs on {d.placement_label}" if _off_local(d) else "")
                      + (f", used by {', '.join(d.dependents)}" if d.dependents else ""))
     return "\n".join(lines)
 
@@ -350,7 +359,8 @@ def facts_for(views: list[dict], store, exclude: int | None = None, now: float |
                                 system=bool(v.get("system")) or v.get("engine") == "decision",
                                 last_traffic_min=t.last_min, running_now=t.running_now, traffic_known=t.known,
                                 uncovered_min=ACTIVE_WINDOW_MIN - t.covered_min,
-                                ready_for_min=(now - r) / 60 if r is not None else None)
+                                ready_for_min=(now - r) / 60 if r is not None else None,
+                                placement=v.get("placement"), placement_label=v.get("placement_label"))
     for v in active:
         for w in active:
             if w["id"] == v["id"]:

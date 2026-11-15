@@ -385,14 +385,15 @@ class OnDemandController:
                         await deployer.restart(dep_id, None)
                 except InsufficientMemory as exc:
                     need, free = exc.fit.required, exc.fit.free_for_new
+                    node = self._short_node(exc, v)  # where the memory is missing (a cluster: that node)
                     total = need + (v.get("actual_bytes") or 0 if kind == "wake" else 0)  # a wake keeps its own
-                    most = self._capacity(exc.fit)
+                    most = self._capacity(exc.fit, node)
                     if most is not None and total > most and not tried and not self._settling():
                         self._reserved.pop(dep_id, None)
                         raise OnDemandUnavailable("does_not_fit", f"{_model(v)} needs {total / GIB:.1f} GiB but at "
                                                                   f"most {most / GIB:.1f} GiB can be freed for "
                                                                   "on-demand models")
-                    victims = self._victims(dep_id, need - free, tried) if make_room else []
+                    victims = self._victims(dep_id, need - free, tried, node) if make_room else []
                     if not victims:
                         if make_room:
                             self._blocked.add(dep_id)
@@ -401,9 +402,10 @@ class OnDemandController:
                     stopped = 0
                     for victim in victims:
                         tried.add(victim["id"])
+                        frees = self._frees_on(victim, node)  # before the stop (it reads the victim's state)
                         if await self._put_to_sleep(victim, f"Put to sleep to make room for {v['name']}",
                                                     reason="make_room", for_deployment=v["name"]):
-                            stopped += _frees(victim)
+                            stopped += frees
                     if stopped:
                         self._reserved[dep_id] = need  # until it starts or gives up: later entries keep off
                         await self._settle(free + stopped, need)
@@ -424,10 +426,22 @@ class OnDemandController:
                     pass
                 return "started"
 
-    def _capacity(self, fit) -> int | None:
-        """The most memory on-demand deployments could ever have: the usable budget minus what always-on and system
-        deployments hold. Independent of ``external`` (where a just-stopped model's memory sits until the host returns
-        it). None when no budget is known (then nothing is refused as too big)."""
+    @staticmethod
+    def _short_node(exc, v: dict) -> str | None:
+        """The node a start found short of memory: the one a cluster's fit check names, else where it runs."""
+        node = (getattr(exc, "extra", None) or {}).get("node")
+        return node or ((v.get("placement") or {}).get("nodes") or [None])[0]
+
+    def _frees_on(self, v: dict, node: str | None) -> int:
+        """What stopping ``v`` returns on ``node`` (a cluster: its share there; nothing for a deployment on another
+        node), as the deployer counts it; ``_frees`` without a node or a deployer that cannot tell."""
+        fn = getattr(self.ctx.deployer, "frees_on", None)
+        return _frees(v) if fn is None or node is None else fn(v, node)
+
+    def _capacity(self, fit, node: str | None = None) -> int | None:
+        """The most memory on-demand deployments could ever have on ``node``: the usable budget minus what always-on
+        and system deployments hold there. Independent of ``external`` (where a just-stopped model's memory sits until
+        the host returns it). None when no budget is known (then nothing is refused as too big)."""
         b = getattr(fit, "budget", None)
         if b is None:
             budget = getattr(self.ctx, "budget", None)
@@ -435,7 +449,7 @@ class OnDemandController:
         usable = getattr(b, "usable", None)
         if usable is None:
             return None
-        held = sum(_frees(v) for v in self.ctx.deployer.list_views()
+        held = sum(self._frees_on(v, node) for v in self.ctx.deployer.list_views()
                    if v["mode"] != "on_demand" or v.get("system"))
         return usable - held
 
@@ -513,19 +527,22 @@ class OnDemandController:
             return False
         return v["state"] == "sleeping" or not self._engine_busy(i)
 
-    def _victims(self, for_dep: int, shortfall: int, tried: set[int]) -> list[dict]:
-        """Idle on-demand deployments to stop so that ``shortfall`` bytes free, least recently used first; [] when
-        even all of them would not be enough (then nothing is stopped)."""
+    def _victims(self, for_dep: int, shortfall: int, tried: set[int], node: str | None = None) -> list[dict]:
+        """Idle on-demand deployments to stop so that ``shortfall`` bytes free on ``node``, least recently used
+        first; [] when even all of them would not be enough (then nothing is stopped). Stopping a cluster frees
+        every node; only its share on ``node`` counts here."""
         now = self.clock()
-        cands = [v for v in self._on_demand_views()
-                 if v["id"] != for_dep and v["id"] not in tried and self._idle_eligible(v, now) and _frees(v) > 0]
+        eligible = [v for v in self._on_demand_views()
+                    if v["id"] != for_dep and v["id"] not in tried and self._idle_eligible(v, now)]
+        frees = {v["id"]: self._frees_on(v, node) for v in eligible}
+        cands = [v for v in eligible if frees[v["id"]] > 0]
         cands.sort(key=lambda v: self._idle_since.get(v["id"], now))
         picked, freed = [], 0
         for v in cands:
             if freed >= shortfall:
                 break
             picked.append(v)
-            freed += _frees(v)
+            freed += frees[v["id"]]
         return picked if freed >= shortfall else []
 
     def _next_retry(self) -> float:

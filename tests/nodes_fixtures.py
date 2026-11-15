@@ -361,6 +361,13 @@ def deployer_two_nodes(two_node_registry, tmp_path, fake_hf_repo):
     deployer.count_rows = count_rows
     deployer.row = deployer._get
 
+    def row_by_name(name: str):
+        from sqlalchemy import select
+        from dgxmm.db import Deployment
+        with deployer.db.session() as s:
+            return s.scalar(select(Deployment).where(Deployment.name == name))
+    deployer.row_by_name = row_by_name
+
     def insert_row(*, node: str, state: str, container_id: str | None = None, name: str | None = None,
                    port: int = 8150) -> int:
         """A deployment row as a dgxmm restart finds it (no monitor, no start-up slot)."""

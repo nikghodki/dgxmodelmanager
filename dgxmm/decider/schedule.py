@@ -217,7 +217,9 @@ def allowed_actions(view: dict) -> tuple[str, ...]:
     mode, else stop/start only. System deployments (the decision model) get none."""
     if view.get("system") or view.get("engine") == "decision":
         return ()
-    return ("sleep", "wake", "stop", "start") if view.get("sleep_capable") else ("stop", "start")
+    # a cluster's "sleep" stops every rank and its "wake" starts them again (effective_action)
+    return ("sleep", "wake", "stop", "start") if view.get("sleep_capable") or view.get("sleep_label") \
+        else ("stop", "start")
 
 
 # ---------------- CRUD ----------------
