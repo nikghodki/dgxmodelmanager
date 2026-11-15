@@ -212,6 +212,7 @@ async def test_two_node_context_admits_remote_deploy_once_probe_is_fresh(two_nod
         assert (e.value.code, e.value.status) == ("node_stale", 503)
 
         fakes["dgx-2"].exec_output = "MemTotal: 127000000 kB\nMemAvailable: 100000000 kB\n"
+        fakes["dgx-2"].weights_on_node = {"Qwen/Qwen3-Tiny"}  # the snapshot is in dgx-2's HF cache
         loop = asyncio.create_task(remote_probe_loop(ctx))  # the production sampler
         for _ in range(100):
             if ctx.node_probe.last("dgx-2") is not None:

@@ -333,6 +333,34 @@ class Deployer:
             log.warning("could not list containers for the port check", exc_info=True)
             return set()
 
+    async def _require_weights(self, node_id: str, prep: Prepared) -> None:
+        """A remote node must have the snapshot in its HF cache (409 weights_missing, with the copy_weights action
+        that puts it there). Checked through the node's probe container, before mem_lock and in a worker thread
+        (never SSH I/O on the event loop or under the lock). A stale node is refused first (as under the lock); a
+        check that cannot run is 503, never reported as missing weights."""
+        if not self._is_remote(node_id) or prep.artifact.source != "hf":
+            return
+        if self._node_stale(node_id):
+            raise DeployError("node_stale", f"no recent memory reading from node {node_id}; it may be offline", 503)
+        probe = self.node_probe if self.node_probe is not None else getattr(self.budget, "probe", None)
+        if getattr(probe, "exec", None) is None:
+            raise DeployError("weights_check_failed", f"cannot check the weights on node {node_id}: no node probe",
+                              503)
+        from dgxmm.nodes.weights_sync import weights_present
+        art = prep.artifact
+        try:
+            present = await asyncio.to_thread(weights_present, probe, node_id, art)
+        except Exception as e:
+            if is_transport_error(e):
+                raise DeployError("node_unreachable", f"node {node_id} is unreachable: {e}", 503)
+            raise DeployError("weights_check_failed", f"could not check the weights of {art.ref} on node {node_id}: "
+                                                      f"{e}", 503)
+        if not present:
+            raise DeployError("weights_missing", f"{art.ref} (revision {art.revision}) is not in the HF cache of node "
+                                                 f"{node_id}; copy it there first", 409,
+                              action={"type": "copy_weights", "node": node_id, "ref": art.ref,
+                                      "revision": art.revision})
+
     async def _remote_unmanaged_ports(self, node_id: str) -> set[int]:
         """_unmanaged_ports of a remote node, taken before mem_lock (never SSH I/O while holding it)."""
         try:
@@ -504,18 +532,6 @@ class Deployer:
     async def deploy(self, req: DeployRequest, user_id: int | None) -> dict:
         node = self._require_node(req.node)
         prep = self.prepare(req.engine, req.model_ref, req.config)
-        # Check weights presence on remote nodes (Task 6)
-        if self._is_remote(node) and prep.artifact.source == "hf":
-            if self.node_probe is None:
-                raise DeployError("node_probe_unavailable", "node probe is not configured", 500)
-            from dgxmm.nodes.weights_sync import weights_present
-            if not weights_present(self.node_probe, node, prep.artifact):
-                raise DeployError(
-                    "weights_missing",
-                    f"weights for {req.model_ref} are not present on node {node}",
-                    409,
-                    action={"type": "copy_weights", "node": node, "ref": prep.artifact.ref, "revision": prep.artifact.revision}
-                )
         system = is_system_engine(prep.engine)
         if system and node != LOCAL_NODE_ID:
             raise DeployError("node_unsupported", f"the {req.engine} engine runs only on the local node", 422)
@@ -529,6 +545,7 @@ class Deployer:
         if system:
             self._require_single_system(req.engine)
         remote = self._is_remote(node)
+        await self._require_weights(node, prep)  # before mem_lock, in a worker thread (SSH)
         # a remote node: its container list is read before mem_lock, its launch happens after it (never SSH I/O
         # while holding the lock that every local deploy, restart and wake needs)
         unmanaged = await self._remote_unmanaged_ports(node) if remote else set()
@@ -1081,6 +1098,7 @@ class Deployer:
                                 existing_ref=dep.model_ref)
             if not dep.system:
                 await self.require_not_foreign(dep.alias or prep.engine.served_name(prep.cfg, ref))
+            await self._require_weights(node, prep)  # before mem_lock, in a worker thread (SSH)
             unmanaged = await self._remote_unmanaged_ports(node) if remote else set()  # before mem_lock
             async with self.mem_lock:
                 if not dep.system:

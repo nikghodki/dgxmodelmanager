@@ -175,7 +175,7 @@ class DownloadService:
             d = s.get(Download, dl_id)
             return {"id": d.id, "repo_id": d.repo_id, "revision": d.revision, "files": d.files, "state": d.state,
                     "bytes_done": d.bytes_done, "bytes_total": d.bytes_total, "error": d.error,
-                    "kind": d.kind, "created_at": d.created_at.isoformat()}
+                    "kind": d.kind or "download", "node": d.node, "created_at": d.created_at.isoformat()}
 
     def list(self, limit: int = 50) -> list[dict]:
         with self.db.session() as s:
@@ -290,6 +290,13 @@ class DownloadService:
         run = self._run_pinned if dl_id in self._pinned else self._run
         self._tasks[dl_id] = asyncio.get_running_loop().create_task(run(dl_id))
         await asyncio.sleep(0)
+
+    def track(self, dl_id: int, task: asyncio.Task, job) -> None:
+        """A job run by another service in a Download row (a weight copy, dgxmm/nodes/weights_sync.py): cancel()
+        sees its task and stops it with ``job.kill()``."""
+        self._tasks[dl_id] = task
+        self._jobs[dl_id] = job
+        task.add_done_callback(lambda _t: (self._tasks.pop(dl_id, None), self._jobs.pop(dl_id, None)))
 
     def recover(self) -> int:
         """At startup: no download task survives a restart, so queued/running rows are stale."""

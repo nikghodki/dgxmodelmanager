@@ -1,270 +1,319 @@
-"""Weights presence check and copy to remote nodes (Task 6)."""
+"""Weights on remote nodes (Task 6).
+
+``weights_present``: the check a remote deploy runs first. The node's probe container (dgxmm/nodes/probe.py) has the
+node's HF cache mounted read-only at ``/hf``; one exec there tests every file of the snapshot (the paths are the
+script's arguments, never part of its code) and prints ``present`` only when all of them are regular files (links
+followed, so a link to a blob that is not there counts as missing).
+
+``copy_argv`` / ``WeightsSync.copy_weights``: copy one snapshot from this node's HF cache to a node's cache over the
+cluster link as ``tar -c | ssh <node> tar -x``: two processes started with ``asyncio.create_subprocess_exec`` (no
+local shell), joined by one pipe. Only the requested snapshot, the blobs its links point to and the repo's ``refs/``
+are archived (never a ``blobs/`` wildcard); the snapshot's links come last, so a copy that is cut short leaves no link
+to a blob that was not fully written. The job is a Download row with ``kind="copy"`` (migration 44), so it shows on
+the Downloads page and is cancelled from there (DownloadService.cancel -> CopyJob.kill: both processes are killed).
+"""
 from __future__ import annotations
 
+import asyncio
+import logging
+import os
+import posixpath
 import re
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any, Callable
 
-from dgxmm.config import NodeConfig
+from sqlalchemy import select
+
+from dgxmm.config import LOCAL_NODE_ID, NodeConfig
+from dgxmm.db import Download
 from dgxmm.inventory.artifact import REPO_RE, ModelArtifact
+
+log = logging.getLogger(__name__)
+
+PROBE_HF = "/hf"  # where NodeProbe mounts the node's HF cache
+PRESENT = "present"
+WEIGHTS_CHECK_SCRIPT = 'for f in "$@"; do [ -f "$f" ] || exit 0; done; echo ' + PRESENT
+REVISION_RE = r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+REPO_DIR_RE = r"^models--[A-Za-z0-9][A-Za-z0-9._-]*$"
+BLOB_RE = r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+SSH_USER_RE = r"^[A-Za-z_][A-Za-z0-9._-]{0,31}$"
+STDERR_LINES, STDERR_CHARS = 10, 1000
+KILL_WAIT_S = 5.0
+
+
+class CopyError(Exception):
+    def __init__(self, code: str, message: str, status: int = 400):
+        super().__init__(message)
+        self.code, self.message, self.status = code, message, status
+
+
+def repo_dir_for(ref: str) -> str:
+    """The HF cache dir of a repo id (``org/name`` -> ``models--org--name``); ValueError if it is not a repo id."""
+    if not isinstance(ref, str) or not re.fullmatch(REPO_RE, ref) or ".." in ref:
+        raise ValueError(f"invalid repo id {ref!r}")
+    return "models--" + ref.replace("/", "--")
+
+
+def validate_repo_dir(repo_dir: str) -> None:
+    """``models--org--name`` of a valid repo id, nothing else (no path separators, no ``..``)."""
+    if not isinstance(repo_dir, str) or ".." in repo_dir or not re.fullmatch(REPO_DIR_RE, repo_dir):
+        raise ValueError(f"invalid repo dir {repo_dir!r}")
+    org, sep, name = repo_dir[len("models--"):].partition("--")
+    if not sep or not re.fullmatch(REPO_RE, f"{org}/{name}"):
+        raise ValueError(f"invalid repo dir {repo_dir!r}")
+
+
+def validate_revision(revision: str) -> None:
+    """A snapshot dir name (a commit hash in practice): one path component, no ``..``, never an option."""
+    if not isinstance(revision, str) or ".." in revision or not re.fullmatch(REVISION_RE, revision):
+        raise ValueError(f"invalid revision {revision!r}")
+
+
+def weights_paths(artifact: ModelArtifact) -> list[str]:
+    """The probe-side paths of every file of an HF snapshot (config.json first)."""
+    repo_dir = repo_dir_for(artifact.ref)
+    validate_revision(artifact.revision or "")
+    snap = f"{PROBE_HF}/hub/{repo_dir}/snapshots/{artifact.revision}"
+    files = ["config.json"] + sorted({f for f in artifact.files if f and f != "config.json"})
+    for f in files:
+        if f.startswith("/") or ".." in f.split("/"):
+            raise ValueError(f"invalid snapshot file {f!r}")
+    return [f"{snap}/{f}" for f in files]
 
 
 def weights_present(probe, node_id: str, artifact: ModelArtifact) -> bool:
-    """Check if weights are present on a remote node using NodeProbe.exec.
-    
-    Checks for config.json and all weight files listed in artifact.files under the snapshot directory.
-    Uses a single exec call with shell test commands.
-    """
+    """True if every file of ``artifact``'s snapshot is in node ``node_id``'s HF cache. Blocking (SSH): call it from
+    a worker thread. Errors of the exec itself (node unreachable, no probe container) propagate: they are not an
+    answer."""
     if artifact.source != "hf":
-        # GGUF files are not synced between nodes
-        return False
-    
-    # Compute repo_dir from ref
-    repo_dir = "models--" + artifact.ref.replace("/", "--")
-    
-    # Build test commands for each file
-    snapshot_base = f"/hf/hub/{repo_dir}/snapshots/{artifact.revision}"
-    
-    # Check config.json and all weight files
-    files_to_check = ["config.json"] + [f for f in artifact.files if f and f != "config.json"]
-    
-    # Build a compound test command: test -f file1 && test -f file2 && ...
-    test_parts = [f'test -f "{snapshot_base}/{f}"' for f in files_to_check]
-    test_cmd = " && ".join(test_parts)
-    
-    try:
-        # exec with a shell command to run compound test
-        probe.exec(node_id, ["sh", "-c", test_cmd])
-        return True
-    except Exception:
-        return False
+        raise ValueError("only Hugging Face snapshots are checked on a node")
+    out = probe.exec(node_id, ["sh", "-c", WEIGHTS_CHECK_SCRIPT, "sh", *weights_paths(artifact)])
+    return out.strip() == PRESENT
 
 
-def _validate_repo_dir(repo_dir: str) -> None:
-    """Validate repo_dir to prevent path traversal and ensure valid format."""
-    # Check for path traversal
-    if ".." in repo_dir or repo_dir.startswith("/"):
-        raise ValueError(f"invalid repo_dir: {repo_dir}")
-    
-    # Extract the ref from repo_dir (remove "models--" prefix and convert "--" back to "/")
-    if not repo_dir.startswith("models--"):
-        raise ValueError(f"repo_dir must start with 'models--': {repo_dir}")
-    
-    ref = repo_dir[8:].replace("--", "/", 1)  # Remove "models--" and replace first "--" with "/"
-    
-    # Validate ref matches REPO_RE pattern
-    if not re.match(REPO_RE, ref):
-        raise ValueError(f"invalid repo format: {ref}")
+def _ssh_user(node: NodeConfig) -> str:
+    user = node.ssh_user
+    if not user and node.docker_url.startswith("ssh://") and "@" in node.docker_url:
+        user = node.docker_url[len("ssh://"):].split("@", 1)[0]
+    if not user or not re.fullmatch(SSH_USER_RE, user):
+        raise ValueError(f"node {node.id} has no valid ssh user")
+    return user
+
+
+def _snapshot_blobs(repo: Path, snap: Path) -> list[str]:
+    """Names of the blobs the snapshot's links point to; ValueError for a link that leaves ``repo/blobs``."""
+    blobs: set[str] = set()
+    for root, dirs, files in os.walk(snap):
+        for name in dirs + files:
+            p = Path(root) / name
+            if not p.is_symlink():
+                continue
+            target = os.path.normpath(os.path.join(root, os.readlink(p)))
+            rel = os.path.relpath(target, repo).split(os.sep)
+            if len(rel) != 2 or rel[0] != "blobs" or not re.fullmatch(BLOB_RE, rel[1]):
+                raise ValueError(f"snapshot entry {p.relative_to(snap)} does not point into the repo's blobs")
+            blobs.add(rel[1])
+    return sorted(blobs)
 
 
 def copy_argv(local_hf: str, node: NodeConfig, repo_dir: str, revision: str) -> tuple[list[str], list[str]]:
-    """Generate tar and ssh argv lists for copying weights to a remote node.
-    
-    The tar command reads from local_hf/hub and the ssh command extracts to node.hf_cache_host/hub.
-    Only copies the requested snapshot dir, its blobs (symlink targets), and refs/ for that repo.
-    
-    Args:
-        local_hf: Local HF cache path (inside DGXMM container)
-        node: Target node configuration
-        repo_dir: Repository directory name (e.g., "models--Qwen--Qwen3-0.6B")
-        revision: Git revision/snapshot ID
-    
-    Returns:
-        Tuple of (tar_argv, ssh_argv) to be piped together
-    """
-    # Validate repo_dir
-    _validate_repo_dir(repo_dir)
-    
-    # Build paths
-    local_hub = Path(local_hf) / "hub"
-    remote_hub = Path(node.hf_cache_host) / "hub"
-    
-    # Snapshot path
-    snapshot_rel = f"{repo_dir}/snapshots/{revision}"
-    
-    # Build tar command to create archive from local cache
-    # Include: snapshot dir, refs/ for this repo
-    # The snapshot dir contains symlinks to blobs - tar will follow them
-    tar_argv = [
-        "tar",
-        "-C", str(local_hub),
-        "-chf", "-",  # -c create, -h follow symlinks, -f - to stdout
-        snapshot_rel,
-        f"{repo_dir}/refs",
-    ]
-    
-    # Build ssh command to extract on remote node
-    # Use BatchMode=yes for non-interactive
-    ssh_argv = [
-        "ssh",
-        "-o", "BatchMode=yes",
-        f"{node.ssh_user}@{node.cluster_ip}",
-        "tar",
-        "-C", str(remote_hub),
-        "-xf", "-",  # -x extract, -f - from stdin
-    ]
-    
-    return tar_argv, ssh_argv
+    """The ``tar -c`` argv (run here, on this node's HF cache ``local_hf``) and the ``ssh … tar -x`` argv (into the
+    node's ``hf_cache_host``) whose stdout/stdin are piped together. Reads the local snapshot's links (blocking)."""
+    validate_repo_dir(repo_dir)
+    validate_revision(revision)
+    host = node.hf_cache_host
+    if not node.cluster_ip:
+        raise ValueError(f"node {node.id} has no cluster_ip")
+    if not host or not host.startswith("/") or ".." in host.split("/"):
+        raise ValueError(f"node {node.id} needs an absolute hf_cache_host")
+    user = _ssh_user(node)
+    hub = Path(local_hf) / "hub"
+    repo = hub / repo_dir
+    snap = repo / "snapshots" / revision
+    blobs = _snapshot_blobs(repo, snap) if snap.is_dir() else []
+    refs = [f"{repo_dir}/refs"] if (repo / "refs").is_dir() else []
+    tar = ["tar", "-C", str(hub), "-cf", "-",
+           "--no-recursion", repo_dir,  # the repo dir entry itself, not its contents
+           "--recursion", *[f"{repo_dir}/blobs/{b}" for b in blobs], *refs,
+           f"{repo_dir}/snapshots/{revision}"]  # links last (module docstring)
+    # ssh runs the remote command through the remote user's shell: every word is a validated constant (no quoting
+    # needed: the path is absolute, checked above, and node config comes from the admin's settings file)
+    remote_hub = posixpath.join(host, "hub")
+    if not re.fullmatch(r"^/[A-Za-z0-9._/-]+$", remote_hub):
+        raise ValueError(f"node {node.id}: hf_cache_host {host!r} has characters a remote shell would interpret")
+    ssh = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-l", user, "--", node.cluster_ip,
+           "tar", "-C", remote_hub, "-xf", "-"]
+    return tar, ssh
 
 
-async def copy_weights(db, settings, nodes, node_id: str, ref: str, revision: str, user_id: int | None = None,
-                      events=None) -> dict:
-    """Copy model weights to a remote node via tar | ssh tar pipeline.
-    
-    Creates a Download record with kind="copy" and spawns the copy process.
-    Returns the job view dict.
-    """
-    import asyncio
-    from dgxmm.db import Download
-    from dgxmm.inventory.artifact import REPO_RE
-    from sqlalchemy import select
-    
-    # Validate inputs
-    if node_id == "local":
-        raise ValueError("cannot copy to local node")
-    if not nodes or node_id not in nodes.ids():
-        raise ValueError(f"unknown node: {node_id}")
-    if not re.match(REPO_RE, ref):
-        raise ValueError(f"invalid ref: {ref}")
-    
-    # Compute repo_dir
-    repo_dir = "models--" + ref.replace("/", "--")
-    _validate_repo_dir(repo_dir)
-    
-    # Check if already copying
-    with db.session() as s:
-        existing = s.scalar(select(Download).where(
-            Download.repo_id == ref,
-            Download.kind == "copy",
-            Download.state.in_(("queued", "running"))
-        ))
-        if existing:
-            raise ValueError(f"{ref} is already being copied")
-    
-    # Create Download record
-    with db.session() as s:
-        row = Download(
-            repo_id=ref,
-            revision=revision,
-            files=[],  # We don't track individual files for copies
-            bytes_total=0,  # Unknown until tar runs
-            bytes_done=0,
-            state="queued",
-            kind="copy",
-            created_by=user_id
-        )
-        s.add(row)
-        s.flush()
-        job_id = row.id
-    
-    # Spawn the copy task
-    asyncio.create_task(_run_copy(db, settings, nodes, job_id, node_id, ref, revision, repo_dir, events))
-    
-    # Return job view
-    with db.session() as s:
-        d = s.get(Download, job_id)
-        return {
-            "id": d.id,
-            "repo_id": d.repo_id,
-            "revision": d.revision,
-            "files": d.files,
-            "state": d.state,
-            "bytes_done": d.bytes_done,
-            "bytes_total": d.bytes_total,
-            "error": d.error,
-            "kind": d.kind,
-            "created_at": d.created_at.isoformat()
-        }
-
-
-async def _run_copy(db, settings, nodes, job_id: int, node_id: str, ref: str, revision: str, repo_dir: str,
-                   events=None):
-    """Run the tar | ssh tar pipeline to copy weights."""
-    import asyncio
-    
-    def update(state: str, error: str | None = None, bytes_done: int | None = None):
-        with db.session() as s:
-            d = s.get(Download, job_id)
-            d.state = state
-            if error is not None:
-                d.error = error
-            if bytes_done is not None:
-                d.bytes_done = bytes_done
-        if events:
-            with db.session() as s:
-                d = s.get(Download, job_id)
-                events.publish("download", {
-                    "id": d.id,
-                    "repo_id": d.repo_id,
-                    "revision": d.revision,
-                    "files": d.files,
-                    "state": d.state,
-                    "bytes_done": d.bytes_done,
-                    "bytes_total": d.bytes_total,
-                    "error": d.error,
-                    "kind": d.kind,
-                    "created_at": d.created_at.isoformat()
-                })
-    
-    try:
-        update("running")
-        
-        node = nodes.config(node_id)
-        tar_argv, ssh_argv = copy_argv(settings.hf_cache.local, node, repo_dir, revision)
-        
-        # Create the two subprocess pipes: tar -> ssh tar
-        tar_proc = await asyncio.create_subprocess_exec(
-            *tar_argv,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
-        )
-        
-        ssh_proc = await asyncio.create_subprocess_exec(
-            *ssh_argv,
-            stdin=tar_proc.stdout,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
-        )
-        
-        # Close tar stdout in parent so ssh gets EOF when tar exits
-        if tar_proc.stdout:
-            tar_proc.stdout.close()
-        
-        # Wait for both processes
-        tar_task = asyncio.create_task(tar_proc.wait())
-        ssh_task = asyncio.create_task(ssh_proc.wait())
-        
-        tar_code = await tar_task
-        ssh_code = await ssh_task
-        
-        # Collect stderr
-        tar_stderr = (await tar_proc.stderr.read()).decode('utf-8', errors='replace') if tar_proc.stderr else ""
-        ssh_stderr = (await ssh_proc.stderr.read()).decode('utf-8', errors='replace') if ssh_proc.stderr else ""
-        
-        if tar_code != 0:
-            tail = tar_stderr.strip().split('\n')[-10:]  # Last 10 lines
-            update("failed", f"tar failed with code {tar_code}: {' '.join(tail)}")
-        elif ssh_code != 0:
-            tail = ssh_stderr.strip().split('\n')[-10:]
-            update("failed", f"ssh failed with code {ssh_code}: {' '.join(tail)}")
-        else:
-            update("done")
-    
-    except asyncio.CancelledError:
-        # Kill both processes
-        if 'tar_proc' in locals():
+def _snapshot_bytes(snap: Path) -> int:
+    total = 0
+    for root, _dirs, files in os.walk(snap):
+        for f in files:
             try:
-                tar_proc.kill()
-                await tar_proc.wait()
-            except Exception:
+                total += (Path(root) / f).stat().st_size  # follows the link to the blob
+            except OSError:
                 pass
-        if 'ssh_proc' in locals():
+    return total
+
+
+def _tail(err: bytes | None) -> str:
+    text = (err or b"").decode("utf-8", errors="replace").strip()
+    return "\n".join(text.splitlines()[-STDERR_LINES:])[-STDERR_CHARS:]
+
+
+@dataclass
+class CopyJob:
+    id: int
+    node: str
+    ref: str
+    revision: str
+    task: asyncio.Task | None = None
+    procs: list = field(default_factory=list)
+
+    def kill(self) -> None:
+        """Stop the copy: the task's cancellation kills both processes and marks the row cancelled."""
+        if self.task is not None and not self.task.done():
+            self.task.cancel()
+
+
+class WeightsSync:
+    """Copies of snapshots to remote nodes (admin API: POST /api/nodes/{node_id}/copy-weights)."""
+
+    def __init__(self, settings, db, nodes, events, downloads, spawn: Callable[..., Any] | None = None):
+        self.settings, self.db, self.nodes, self.events, self.downloads = settings, db, nodes, events, downloads
+        self.spawn = spawn or asyncio.create_subprocess_exec
+        self.jobs: dict[int, CopyJob] = {}
+
+    def _target(self, node_id: str) -> NodeConfig:
+        if node_id == LOCAL_NODE_ID:
+            raise CopyError("local_node", "weights are copied from the local node to a remote node", 400)
+        if self.nodes is None or node_id not in self.nodes.ids() or not self.nodes.is_remote(node_id):
+            raise CopyError("unknown_node", f"node {node_id!r} is not configured", 400)
+        return self.nodes.config(node_id)
+
+    async def copy_weights(self, node_id: str, ref: str, revision: str, user_id: int | None = None) -> CopyJob:
+        node = self._target(node_id)
+        try:
+            repo_dir = repo_dir_for(ref)
+        except ValueError as e:
+            raise CopyError("invalid_ref", str(e), 400)
+        try:
+            validate_revision(revision)
+        except ValueError as e:
+            raise CopyError("invalid_revision", str(e), 400)
+        snap = Path(self.settings.hf_cache.local) / "hub" / repo_dir / "snapshots" / revision
+
+        def plan():
+            if not snap.is_dir():
+                return None
+            return copy_argv(self.settings.hf_cache.local, node, repo_dir, revision), _snapshot_bytes(snap)
+        try:
+            planned = await asyncio.to_thread(plan)
+        except ValueError as e:
+            raise CopyError("invalid_snapshot", str(e), 400)
+        if planned is None:
+            raise CopyError("not_local", f"{ref} revision {revision} is not in this node's HF cache", 404)
+        (tar_argv, ssh_argv), total = planned
+        with self.db.session() as s:
+            if s.scalar(select(Download.id).where(Download.kind == "copy", Download.node == node_id,
+                                                  Download.repo_id == ref,
+                                                  Download.state.in_(("queued", "running")))):
+                raise CopyError("already_copying", f"{ref} is already being copied to {node_id}", 409)
+            row = Download(repo_id=ref, revision=revision, files=[], bytes_total=total, bytes_done=0, state="queued",
+                           kind="copy", node=node_id, created_by=user_id)
+            s.add(row)
+            s.flush()
+            job = CopyJob(id=row.id, node=node_id, ref=ref, revision=revision)
+        self._publish(job.id)
+        job.task = asyncio.get_running_loop().create_task(self._run(job, tar_argv, ssh_argv))
+        self.jobs[job.id] = job
+        self.downloads.track(job.id, job.task, job)  # Downloads cancel -> job.kill()
+        return job
+
+    def _update(self, dl_id: int, **fields) -> None:
+        with self.db.session() as s:
+            d = s.get(Download, dl_id)
+            for k, v in fields.items():
+                setattr(d, k, v)
+        self._publish(dl_id)
+
+    def _publish(self, dl_id: int) -> None:
+        if self.events is not None:
+            self.events.publish("download", self.downloads.view(dl_id))
+
+    async def _run(self, job: CopyJob, tar_argv: list[str], ssh_argv: list[str]) -> None:
+        procs: list = []
+        try:
+            self._update(job.id, state="running")
+            r, w = os.pipe()
             try:
-                ssh_proc.kill()
-                await ssh_proc.wait()
-            except Exception:
+                procs.append(await self.spawn(*tar_argv, stdin=asyncio.subprocess.DEVNULL, stdout=w,
+                                              stderr=asyncio.subprocess.PIPE))
+                procs.append(await self.spawn(*ssh_argv, stdin=r, stdout=asyncio.subprocess.DEVNULL,
+                                              stderr=asyncio.subprocess.PIPE))
+            finally:
+                os.close(r)  # the children hold their ends; ssh sees EOF when tar exits
+                os.close(w)
+            job.procs = procs
+            error = await self._wait(*procs)
+            if error:
+                self._update(job.id, state="failed", error=error)
+                log.warning("copy of %s to %s failed: %s", job.ref, job.node, error)
+            else:
+                self._update(job.id, state="done", bytes_done=self.downloads.view(job.id)["bytes_total"])
+                log.info("copied %s@%s to %s", job.ref, job.revision, job.node)
+        except asyncio.CancelledError:
+            await self._kill(procs)
+            self._update(job.id, state="cancelled")
+            raise
+        except Exception as e:
+            await self._kill(procs)
+            self._update(job.id, state="failed", error=f"copy failed: {e}")
+            log.warning("copy of %s to %s failed", job.ref, job.node, exc_info=True)
+        finally:
+            self.jobs.pop(job.id, None)
+
+    async def _wait(self, tar, ssh) -> str | None:
+        """Wait for both; when one exits non-zero the other is killed. The error text (None: both exited 0) has the
+        stderr tail of each side that failed by itself (ssh first: its error is the cause when tar only saw a broken
+        pipe)."""
+        tasks = {asyncio.ensure_future(p.communicate()): p for p in (tar, ssh)}
+        killed: set[int] = set()
+        try:
+            pending = set(tasks)
+            while pending:
+                done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+                if pending and any(tasks[t].returncode != 0 for t in done):
+                    for t in pending:
+                        killed.add(id(tasks[t]))
+                        self._kill_one(tasks[t])
+        finally:
+            for t in tasks:
+                if not t.done():
+                    t.cancel()
+        stderr = {id(p): t.result()[1] for t, p in tasks.items()}
+        parts = []
+        for name, p in (("ssh", ssh), ("tar", tar)):
+            if p.returncode != 0 and id(p) not in killed:
+                tail = _tail(stderr[id(p)])
+                parts.append(f"{name} exited {p.returncode}" + (f": {tail}" if tail else ""))
+        return "; ".join(parts) or None
+
+    @staticmethod
+    def _kill_one(p) -> None:
+        if p.returncode is None:
+            try:
+                p.kill()
+            except ProcessLookupError:
                 pass
-        update("cancelled")
-        raise
-    except Exception as e:
-        update("failed", str(e))
-        raise
+
+    async def _kill(self, procs: list) -> None:
+        for p in procs:
+            self._kill_one(p)
+        for p in procs:
+            try:
+                await asyncio.wait_for(asyncio.shield(p.wait()), KILL_WAIT_S)
+            except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
+                pass

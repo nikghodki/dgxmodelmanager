@@ -253,8 +253,9 @@ class FakeNodesProbe:
     """Budget probe for two-node tests: the local host sample (sample(container ids)) like FakeProbe, and per remote
     node a memory sample (sample(node_id)) and staleness (stale(node_id)) like NodeProbe."""
 
-    def __init__(self, total_gib: float = 121, available_gib: float = 100):
+    def __init__(self, total_gib: float = 121, available_gib: float = 100, registry=None):
         from tests.fakes import FakeProbe
+        self.registry = registry  # exec(): the node's FakeDockerClient answers, like NodeProbe's probe container
         self.local = FakeProbe(total_gib, available_gib)
         self.remote_total = int(total_gib * GIB)
         self.remote_available: dict[str, int] = {}
@@ -275,6 +276,15 @@ class FakeNodesProbe:
 
     def stale(self, node_id: str) -> bool:
         return node_id in self.stale_nodes
+
+    def exec(self, node_id: str, argv: list[str]) -> str:
+        """NodeProbe.exec on the node's fake client (no probe container is listed on the node)."""
+        client = self.registry.fake(node_id)
+        client._maybe_raise()  # the node's transport is down
+        code, out = client.exec(argv)
+        if code != 0:
+            raise RuntimeError(f"exec failed with code {code}")
+        return out.decode()
 
     def processes(self, managed=None, names=None):
         return []
@@ -300,12 +310,8 @@ def deployer_two_nodes(two_node_registry, tmp_path, fake_hf_repo):
     inventory = InventoryService(settings)
     inventory.refresh()
     engines_http = FakeEngines()
-    probe = FakeNodesProbe()
-
-    # Create NodeProbe for remote weight checks
-    from dgxmm.nodes.probe import NodeProbe
-    node_probe = NodeProbe(two_node_registry, settings)
-    
+    probe = FakeNodesProbe(registry=two_node_registry)
+    two_node_registry.fake("dgx-2").weights_on_node = {"Qwen/Qwen3-Tiny"}  # dgx-2 has the model's snapshot
     deployer = Deployer(
         settings=settings,
         db=db,
@@ -314,17 +320,12 @@ def deployer_two_nodes(two_node_registry, tmp_path, fake_hf_repo):
         engines=build_engines(settings),
         http=engines_http.client(),
         events=EventBroker(),
-        nodes=two_node_registry,
-        node_probe=node_probe
+        nodes=two_node_registry
     )
     deployer.budget = BudgetService(settings, probe, deployer.usage_rows, nodes=two_node_registry)
     deployer.engines_http = engines_http
     deployer.probe = probe
     deployer.fake = two_node_registry.fake
-    
-    # Set up probe container for weights presence checks (Task 6)
-    two_node_registry.fake("dgx-2").add_unmanaged("dgxmm-node-probe", image="probe:latest", status="running")
-    two_node_registry.fake("dgx-2").exec_code = 0  # weights present by default
 
     def set_free(node_id: str, available: int) -> None:
         if node_id == "local":

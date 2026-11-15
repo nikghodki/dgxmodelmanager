@@ -11,7 +11,8 @@ from pathlib import Path
 from fastapi import FastAPI
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 
-from dgxmm.api import auth as auth_api, users as users_api, host as host_api, inventory as inventory_api, nodes as nodes_api
+from dgxmm.api import auth as auth_api, users as users_api, host as host_api, inventory as inventory_api
+from dgxmm.api import nodes as nodes_api
 from dgxmm.api import engines as engines_api, deployments as deployments_api, stream as stream_api
 from dgxmm.api import audit as audit_api, containers as containers_api
 from dgxmm.api import catalog as catalog_api, downloads as downloads_api, planner as planner_api

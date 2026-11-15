@@ -65,15 +65,7 @@ class FakeContainer:
 
     def exec_run(self, cmd, **kwargs):
         """Execute command in container; returns (exit_code, output)."""
-        output = self.client.exec_output if hasattr(self.client, 'exec_output') and self.client.exec_output else ""
-        # Check for exec_code first (if explicitly set), then exec_fail, default to 0
-        if hasattr(self.client, 'exec_code') and self.client.exec_code is not None:
-            exit_code = self.client.exec_code
-        elif hasattr(self.client, 'exec_fail') and self.client.exec_fail:
-            exit_code = 1
-        else:
-            exit_code = 0
-        return exit_code, output.encode() if isinstance(output, str) else output
+        return self.client.exec(cmd)
 
 
 class FakeHelperContainer:
@@ -320,10 +312,27 @@ class FakeDockerClient:
         self.helper_killed = 0
         self.exec_output = ""
         self.exec_fail = False
-        self.exec_code = None
+        self.exec_calls: list[list[str]] = []  # argv of every exec (probe container)
+        self.exec_hooks: list = []             # callables(argv) run by every exec (before it answers)
+        # the HF repo ids whose snapshots this node's cache holds, for the weights check of dgxmm/nodes/weights_sync.py
+        # (None: that check gets exec_output like any other exec)
+        self.weights_on_node: set[str] | None = None
         # an exception raised by every containers.get/list/run (e.g. the node's SSH transport is down)
         self.raise_on_all: Exception | None = None
         self.raised = 0  # how many times raise_on_all was raised
+
+    def exec(self, cmd) -> tuple[int, bytes]:
+        """An exec in a container of this node: (exit code, output)."""
+        from dgxmm.nodes.weights_sync import PRESENT, WEIGHTS_CHECK_SCRIPT
+        self.exec_calls.append(list(cmd))
+        for hook in self.exec_hooks:
+            hook(cmd)
+        if self.weights_on_node is not None and list(cmd[:3]) == ["sh", "-c", WEIGHTS_CHECK_SCRIPT]:
+            have = {"models--" + r.replace("/", "--") for r in self.weights_on_node}
+            present = all(p.split("/")[3] in have for p in cmd[4:])  # /hf/hub/<repo dir>/snapshots/...
+            return 0, (PRESENT + "\n" if present else "").encode()
+        out = self.exec_output or ""
+        return (1 if self.exec_fail else 0), out.encode() if isinstance(out, str) else out
 
     def _maybe_raise(self) -> None:
         if self.raise_on_all is not None:

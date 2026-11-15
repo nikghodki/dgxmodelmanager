@@ -191,15 +191,17 @@ def _deployment_node(conn: sqlite3.Connection) -> None:
     conn.execute("UPDATE deployments SET node = 'local' WHERE node IS NULL")
 
 
-
 def _download_kind(conn: sqlite3.Connection) -> None:
-    """Version 44: downloads get a `kind` column (Task 6: weight copies). ``add_missing_columns`` adds the column
-    when creating a fresh database; it is added here when missing. Existing downloads are NULL (= "download")."""
+    """Version 44: downloads get `kind` ("copy": a copy of a snapshot to a remote node) and `node` (its target).
+    ``add_missing_columns`` adds them when creating a fresh database; added here when missing. Existing rows stay
+    NULL (= a download from the Hub)."""
     if not _table_exists(conn, "downloads"):
         return
     cols = {r[1] for r in conn.execute('PRAGMA table_info("downloads")')}
     if "kind" not in cols:
         conn.execute('ALTER TABLE downloads ADD COLUMN "kind" VARCHAR(16)')
+    if "node" not in cols:
+        conn.execute('ALTER TABLE downloads ADD COLUMN "node" VARCHAR(32)')
 
 # Version numbers reserved for the parallel feature lanes of the advanced decision-model features, so their
 # branches merge without renumbering: 4-9 deploy-time features, 10-19 operations features, 20-29 schedules/commands;
@@ -212,7 +214,7 @@ MIGRATIONS: list[Migration] = [
     Migration(30, "deployments: ids are never reused (AUTOINCREMENT)", _deployment_ids_never_reused, rebuilds=True),
     Migration(40, "deployments: on-demand mode", _ondemand_mode),
     Migration(41, "deployments: node", _deployment_node),
-    Migration(44, "downloads: kind", _download_kind),
+    Migration(44, "downloads: kind and node (weight copies)", _download_kind),
 ]
 LATEST = max(m.version for m in MIGRATIONS)
 

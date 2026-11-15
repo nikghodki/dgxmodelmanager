@@ -35,6 +35,7 @@ class AppContext:
     litellm: Any = None
     catalog: Any = None
     downloads: Any = None
+    weights_sync: Any = None  # WeightsSync (dgxmm/nodes/weights_sync.py): copies of snapshots to remote nodes
     metrics: Any = None
     archs: Any = None
     hub: Any = None
@@ -230,6 +231,8 @@ def build_context(settings: Settings, client_factory=None) -> AppContext:
 
     from dgxmm.downloads import DownloadService
     ctx.downloads = DownloadService(settings, db, inventory, hub, events, token=hf_token)
+    from dgxmm.nodes.weights_sync import WeightsSync
+    ctx.weights_sync = WeightsSync(settings, db, nodes, events, ctx.downloads)
 
     from dgxmm.inventory.weights import WeightsDeleter
     ctx.weights = WeightsDeleter(settings, db, inventory, docker=docker, deployer=deployer, downloads=ctx.downloads)
