@@ -7,7 +7,7 @@ from typing import Any, Protocol
 import httpx
 from pydantic import BaseModel
 
-from dgxmm.config import LOCAL_NODE_ID, Mount, Settings
+from dgxmm.config import LOCAL_NODE_ID, Mount, Settings, unsafe_publish_reason
 from dgxmm.inventory.artifact import ModelArtifact
 from dgxmm.memory.estimate import MemoryEstimate
 
@@ -79,7 +79,10 @@ def remote_hf_mount(settings: Settings, node_id: str) -> tuple[Mount, str]:
     node = settings.node(node_id)
     if not node.hf_cache_host:
         raise SpecError("node_hf_cache_missing", f"node {node_id} has no hf_cache_host configured")
-    return Mount(host=node.hf_cache_host, target=HF_TARGET, mode="ro"), node.publish_bind or node.cluster_ip
+    bind = node.engine_address()
+    if (why := unsafe_publish_reason(bind)) is not None:  # defensive: Settings validates it already
+        raise SpecError("unsafe_publish_bind", f"node {node_id}: publish address {bind!r} {why}")
+    return Mount(host=node.hf_cache_host, target=HF_TARGET, mode="ro"), bind
 
 
 class Engine(Protocol):

@@ -97,6 +97,8 @@ def test_base_url_local_unchanged_remote_uses_cluster_ip(deployer_two_nodes):
 
 async def test_remote_health_check_goes_to_cluster_ip(deployer_two_nodes, ready_remote_dep):
     assert ready_remote_dep.view["state"] == "ready"
+    health = [h for h in deployer_two_nodes.engines_http.hosts if h[1] == ready_remote_dep.port]
+    assert health and {h[0] for h in health} == {"192.0.2.2"}
 
 
 async def test_ports_are_allocated_per_node(deployer_two_nodes, qwen_req):
@@ -215,6 +217,8 @@ async def test_sleep_and_wake_on_remote_use_remote_url_and_node_budget(deployer_
     d.set_free("local", 0)  # the local box is full: waking a dgx-2 deployment must not care
     out = await d.wake(v["id"])
     assert out["state"] == "ready" and v["port"] not in d.engines_http.sleeping
+    hosts = {path: host for host, port, path in d.engines_http.hosts if port == v["port"]}
+    assert hosts["/sleep"] == hosts["/wake_up"] == "192.0.2.2"
 
 
 async def test_wake_refused_when_remote_node_is_full(deployer_two_nodes, qwen_req):
@@ -469,3 +473,149 @@ async def test_blocked_remote_docker_does_not_stall_budget_loop(deployer_two_nod
     assert len(refreshed) >= 4 and max(gaps) < 2 * interval  # every refresh within one interval (+ bounded wait)
     assert len(blocked) == 1  # one hung lookup in flight; later passes skip the node instead of piling up threads
     assert d.state(ready_remote_dep.id) == "ready"
+
+
+# ---------- fix round 1 ----------
+async def _until(pred, timeout=5.0):
+    import asyncio
+    for _ in range(int(timeout / 0.01)):
+        if pred():
+            return True
+        await asyncio.sleep(0.01)
+    return pred()
+
+
+async def test_unreachable_remote_startup_times_out_and_frees_the_gate(deployer_two_nodes, qwen_req):
+    """A remote start-up whose node stays unreachable must not hold the global start-up slot forever."""
+    from dgxmm.deployer.service import MonitorState
+    d = deployer_two_nodes
+    r = await d.deploy(qwen_req.model_copy(update={"node": "dgx-2", "name": "r", "alias": "r"}), user_id=1)
+    d._monitors.pop(r["id"]).cancel()  # driven by hand below
+    loc = await d.deploy(qwen_req.model_copy(update={"name": "l", "alias": "l"}), user_id=1)
+    assert loc["state"] == "queued" and d.gate.holds(r["id"])
+    d.fake("dgx-2").raise_on_all = NodeUnreachable("ssh: connect timed out")
+    st = MonitorState(start=d.clock() - d.settings.startup_timeout_s - 1)
+    d.monitor_states[r["id"]] = st
+    assert await d._monitor_tick(r["id"], st) is True
+    row = d._get(r["id"])
+    assert row.state == "failed" and "unreachable" in row.last_error
+    assert row.container_id  # kept: a stop once the node is back removes the container
+    assert not d.gate.holds(r["id"])
+    assert await _until(lambda: d.state(loc["id"]) in ("starting", "loading"))
+    assert len(d.fake("local").containers.list()) == 1
+
+
+async def test_unreachable_remote_before_timeout_keeps_slot(deployer_two_nodes, qwen_req):
+    from dgxmm.deployer.service import MonitorState
+    d = deployer_two_nodes
+    r = await d.deploy(qwen_req.model_copy(update={"node": "dgx-2"}), user_id=1)
+    d._monitors.pop(r["id"]).cancel()
+    d.fake("dgx-2").raise_on_all = NodeUnreachable("down")
+    st = MonitorState(start=d.clock())
+    assert await d._monitor_tick(r["id"], st) is False
+    assert d.state(r["id"]) in ("starting", "loading") and d.gate.holds(r["id"])
+
+
+def _block(fake, attr, release, calls):
+    """Make fake.containers.<attr> hang until ``release`` (dgx-2's Docker over SSH stuck), then time out."""
+    def blocked(*a, **kw):
+        calls.append(attr)
+        release.wait(5)
+        raise TimeoutError("ssh: timed out")
+    setattr(fake.containers, attr, blocked)
+
+
+@pytest.mark.parametrize("stuck", ["list", "run"])
+async def test_hung_remote_docker_does_not_delay_local_deploy(deployer_two_nodes, qwen_req, stuck):
+    """Remote SSH I/O never happens under mem_lock: a hung dgx-2 (port listing before the lock, or the container
+    launch after it) leaves local deploys free to proceed."""
+    import asyncio
+    import threading
+    import time
+    d = deployer_two_nodes
+    release, calls = threading.Event(), []
+    _block(d.fake("dgx-2"), stuck, release, calls)
+    remote = asyncio.create_task(d.deploy(qwen_req.model_copy(update={"node": "dgx-2", "name": "r", "alias": "r"}),
+                                          user_id=1))
+    try:
+        assert await _until(lambda: calls)  # dgx-2 is now hanging
+        t0 = time.monotonic()
+        v = await asyncio.wait_for(d.deploy(qwen_req.model_copy(update={"name": "l", "alias": "l"}), user_id=1), 2)
+        took = time.monotonic() - t0
+        assert took < 0.5
+        # list stuck: the remote deploy has not claimed anything yet, local starts; run stuck: remote holds the
+        # start-up slot, so the local deploy is queued (not blocked)
+        assert v["state"] in (("starting", "loading") if stuck == "list" else ("queued",))
+    finally:
+        release.set()
+        with pytest.raises(DeployError) as e:
+            await asyncio.wait_for(remote, 10)
+        assert e.value.code == "node_unreachable"
+
+
+async def test_remote_launch_reservation_counts_while_off_the_lock(deployer_two_nodes, qwen_req):
+    """Between mem_lock and the container start, a remote deployment's memory stays committed on its node."""
+    import asyncio
+    import threading
+    d = deployer_two_nodes
+    release, calls = threading.Event(), []
+    _block(d.fake("dgx-2"), "run", release, calls)
+    remote = asyncio.create_task(d.deploy(qwen_req.model_copy(update={"node": "dgx-2"}), user_id=1))
+    try:
+        assert await _until(lambda: calls)
+        await d.budget.refresh()
+        b = d.budget.current("dgx-2")
+        [u] = [u for u in b.deployments]
+        assert u.state == "queued" and u.reserved > 0 and b.committed >= u.reserved
+    finally:
+        release.set()
+        with pytest.raises(DeployError):
+            await asyncio.wait_for(remote, 10)
+    await d.budget.refresh()
+    assert d.budget.current("dgx-2").deployments == ()  # the failed deploy left nothing behind
+
+
+async def test_remote_port_conflict_retry_runs_off_the_event_loop(deployer_two_nodes, qwen_req):
+    import threading
+    d = deployer_two_nodes
+    lo = d.settings.port_range[0]
+    d.fake("dgx-2").busy_host_ports = {lo}
+    threads = []
+    orig = d._next_port
+
+    def spy(dep_id, tried):
+        threads.append(threading.current_thread() is threading.main_thread())
+        return orig(dep_id, tried)
+    d._next_port = spy
+    v = await d.deploy(qwen_req.model_copy(update={"node": "dgx-2"}), user_id=1)
+    assert v["port"] == lo + 1 and threads == [False]
+
+
+def test_used_ports_does_not_swallow_a_down_remote_node(deployer_two_nodes):
+    d = deployer_two_nodes
+    d.fake("dgx-2").raise_on_all = requests.exceptions.ConnectionError("refused")
+    with pytest.raises(NodeUnreachable):
+        d._used_ports(None, "dgx-2")
+    d.fake("local").raise_on_all = docker.errors.APIError("boom")  # local: logged, as before
+    assert d._used_ports(None, "local") == set()
+
+
+async def test_one_address_for_bind_base_url_and_views(deployer_two_nodes, qwen_req):
+    d = deployer_two_nodes
+    d.nodes.config("dgx-2").publish_bind = "192.0.2.12"  # a second address on the cluster link
+    v = await d.deploy(qwen_req.model_copy(update={"node": "dgx-2"}), user_id=1)
+    call = d.fake("dgx-2").run_calls[-1]
+    assert call["ports"] == {f"{v['port']}/tcp": ("192.0.2.12", v["port"])}
+    assert d.base_url_for(v) == f"http://192.0.2.12:{v['port']}"
+    assert v["endpoint"] == v["host_endpoint"] == f"http://192.0.2.12:{v['port']}/v1"
+
+
+@pytest.mark.parametrize("bind", ["0.0.0.0", "::", "127.0.0.1", "224.0.0.1"])
+async def test_remote_spec_refuses_unsafe_bind(deployer_two_nodes, qwen_req, bind):
+    """Defensive: even if the node config were changed after validation, no engine publishes on such an address."""
+    d = deployer_two_nodes
+    d.nodes.config("dgx-2").publish_bind = bind
+    with pytest.raises(DeployError) as e:
+        await d.deploy(qwen_req.model_copy(update={"node": "dgx-2"}), user_id=1)
+    assert e.value.code == "unsafe_publish_bind"
+    assert d.fake("dgx-2").run_calls == []

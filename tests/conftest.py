@@ -6,6 +6,13 @@ from dgxmm.config import PathMapping, Settings
 from dgxmm.db import Database
 
 
+@pytest.fixture(autouse=True)
+def _isolated_home_dir(tmp_path_factory, monkeypatch):
+    """Every test runs with HOME in a temporary directory: no test may write the real ~/.ssh (NodeRegistry writes
+    $HOME/.ssh/config for remote nodes) or anything else under the real home."""
+    monkeypatch.setenv("HOME", str(tmp_path_factory.mktemp("home")))
+
+
 @pytest.fixture
 def settings(tmp_path) -> Settings:
     for d in ("data", "static", "proc", "cgroup", "hf/hub", "gguf"):

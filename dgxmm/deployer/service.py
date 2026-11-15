@@ -194,7 +194,7 @@ class Deployer:
         """engine_base_host (if set) for engines with a published port; the container name otherwise (the decider
         has no published port and is reachable only on its docker network). On a remote node: its cluster IP."""
         if self._is_remote(node):
-            return f"http://{self.nodes.config(node).cluster_ip}:{port}"
+            return f"http://{self.nodes.config(node).engine_address()}:{port}"
         host = (self.settings.engine_base_host if self._publishes(engine) else None) or container_name(name)
         return f"http://{host}:{port}"
 
@@ -306,21 +306,43 @@ class Deployer:
             if node != LOCAL_NODE_ID:
                 return self._allocate_port(exclude_dep=dep_id, skip=tried, node_id=node)
             return self._allocate_port(exclude_dep=dep_id, skip=tried)
-        except DeployError:
+        except (DeployError, NodeUnreachable):
             return None
 
     def _used_ports(self, exclude_dep: int | None = None, node_id: str = "local") -> set[int]:
         """Ports held by other active/planned deployments on the given node and by unmanaged containers (blocking: docker call)."""
+        return self._db_ports(exclude_dep, node_id) | self._unmanaged_ports(node_id)
+
+    def _db_ports(self, exclude_dep: int | None, node_id: str) -> set[int]:
+        """Ports of the other active/planned deployments on ``node_id`` (DB only, no docker call)."""
         with self.db.session() as s:
-            used = {d.port for d in s.scalars(select(Deployment)) if d.port and d.state in ACTIVE_STATES | {"planned"}
+            return {d.port for d in s.scalars(select(Deployment)) if d.port and d.state in ACTIVE_STATES | {"planned"}
                     and d.id != exclude_dep and (d.node or "local") == node_id}
+
+    def _unmanaged_ports(self, node_id: str) -> set[int]:
+        """Host ports of containers DGXMM does not manage on ``node_id`` (blocking: docker call). A remote node that
+        cannot be reached raises NodeUnreachable (its ports are unknown, so nothing may be placed there)."""
         try:
-            # Get docker client for the specified node
-            docker = self.nodes.docker(node_id) if self.nodes else self.docker
-            used |= {p for c in docker.list_all() for p in c.host_ports if not c.managed}
+            return {p for c in self._docker_for(node_id).list_all() for p in c.host_ports if not c.managed}
+        except NodeUnreachable:
+            raise
         except Exception:
             log.warning("could not list containers for the port check", exc_info=True)
-        return used
+            return set()
+
+    async def _remote_unmanaged_ports(self, node_id: str) -> set[int]:
+        """_unmanaged_ports of a remote node, taken before mem_lock (never SSH I/O while holding it)."""
+        try:
+            return await asyncio.to_thread(self._unmanaged_ports, node_id)
+        except NodeUnreachable as e:
+            raise DeployError("node_unreachable", str(e), 503)
+
+    def _remote_port(self, dep_id: int | None, current: int | None, node_id: str, unmanaged: set[int]) -> int:
+        """Under mem_lock: ``current`` if still free on the node (DB rows rechecked now + the unmanaged ports listed
+        before the lock), else the lowest free port."""
+        used = self._db_ports(dep_id, node_id) | unmanaged
+        return current if current and current not in used else self._allocate_port(exclude_dep=dep_id, used=used,
+                                                                                    node_id=node_id)
 
     def _allocate_port(self, exclude_dep: int | None = None, skip: set[int] | frozenset = frozenset(),
                        used: set[int] | None = None, node_id: str = "local") -> int:
@@ -491,6 +513,10 @@ class Deployer:
         await self.require_not_foreign(model_name)
         if system:
             self._require_single_system(req.engine)
+        remote = self._is_remote(node)
+        # a remote node: its container list is read before mem_lock, its launch happens after it (never SSH I/O
+        # while holding the lock that every local deploy, restart and wake needs)
+        unmanaged = await self._remote_unmanaged_ports(node) if remote else set()
         async with self.mem_lock:
             self.require_model_name(model_name, None)  # again under the lock: concurrent deploys
             if system:
@@ -499,8 +525,7 @@ class Deployer:
             fit = check_fit(prep.estimate, budget)
             if not fit.fits:
                 raise InsufficientMemory(fit)
-            port = self._allocate_port() if node == LOCAL_NODE_ID else \
-                await asyncio.to_thread(self._allocate_port, node_id=node)  # lists the node's containers over SSH
+            port = self._remote_port(None, None, node, unmanaged) if remote else self._allocate_port()
             with self.db.session() as s:
                 dep = Deployment(name=req.name, engine=req.engine, model_ref=req.model_ref, node=node,
                                  config=prep.cfg.model_dump(mode="json"), state="planned", port=port,
@@ -512,7 +537,12 @@ class Deployer:
                 s.add(dep)
                 s.flush()
                 dep_id = dep.id
-            launched = await self._launch_or_queue(dep_id, req.name, port, prep, budget.total)
+            if remote:
+                launched = self._claim_or_queue(dep_id, req.name, prep)
+            else:
+                launched = await self._launch_or_queue(dep_id, req.name, port, prep, budget.total)
+        if remote and launched:
+            await self._launch(dep_id, req.name, port, prep, budget.total)
         if launched:
             self._spawn_monitor(dep_id)
         return self.view(dep_id)
@@ -524,12 +554,29 @@ class Deployer:
         if self.gate.try_acquire(dep_id, "launch", name):
             await self._launch(dep_id, name, port, prep, mem_total)
             return True
+        self._queue(dep_id, name)
+        return False
+
+    def _claim_or_queue(self, dep_id: int, name: str, prep: Prepared) -> bool:
+        """A remote deployment, under mem_lock after the fit check: take a start-up slot (True; the caller launches
+        after releasing the lock) or queue it (False). With a slot, its reservation is counted from now
+        (``launching`` -> usage_rows) so the memory stays claimed between the lock and the container start."""
+        if self.gate.try_acquire(dep_id, "launch", name):
+            self.launching[dep_id] = self._refs(prep)
+            return True
+        self._queue(dep_id, name)
+        return False
+
+    @staticmethod
+    def _refs(prep: Prepared) -> tuple[str, ...]:
+        return tuple(r for r in (prep.artifact.ref, prep.draft.ref if prep.draft else None) if r)
+
+    def _queue(self, dep_id: int, name: str) -> None:
         self.gate.enqueue(dep_id, "launch", name)
         info = self.gate.info(dep_id) or {}
         self._transition(dep_id, "queued", message=f"queued: {info.get('reason', 'waiting for a start-up slot')}",
                          last_error=None, exit_code=None, oom_killed=None)
         self._spawn_queued(dep_id)
-        return False
 
     def _spawn_queued(self, dep_id: int) -> None:
         old = self._queued.get(dep_id)
@@ -602,8 +649,11 @@ class Deployer:
             except DeployError as e:
                 self._fail_queued(dep_id, f"cannot start: {e.message}")
                 return False
+            node = self._node_of(dep)
+            remote = self._is_remote(node)
+            unmanaged = await self._remote_unmanaged_ports(node) if remote else set()  # before mem_lock
             async with self.mem_lock:
-                budget = self._node_budget(self._node_of(dep), await self.budget.refresh())
+                budget = self._node_budget(node, await self.budget.refresh())
                 # the queued row's reservation is already counted as committed; credit it back
                 fit = check_fit(prep.estimate, budget, extra_free=max(dep.reserved_bytes, 0))
                 if not fit.fits:
@@ -611,12 +661,17 @@ class Deployer:
                                               f"{fit.required / GIB_F:.1f} GiB but only "
                                               f"{fit.free_for_new / GIB_F:.1f} GiB is free")
                     return False
-                port = await self._free_port(dep_id, dep.port)
+                port = self._remote_port(dep_id, dep.port, node, unmanaged) if remote else \
+                    await self._free_port(dep_id, dep.port)
                 with self.db.session() as s:
                     row = s.get(Deployment, dep_id)
                     row.port, row.reserved_bytes, row.estimate = port, prep.estimate.total, prep.estimate.as_dict()
-                await self._launch(dep_id, dep.name, port, prep, budget.total)  # errors: see _run_queued
-                return True
+                if not remote:
+                    await self._launch(dep_id, dep.name, port, prep, budget.total)  # errors: see _run_queued
+                    return True
+            # remote: launched after mem_lock; the row stays "queued" (committed) until the container starts
+            await self._launch(dep_id, dep.name, port, prep, budget.total)
+            return True
 
     async def _free_port(self, dep_id: int, current: int | None) -> int:
         """``current`` unless another deployment or an unmanaged container uses it now, else a new port."""
@@ -683,8 +738,13 @@ class Deployer:
                     tried.add(port)
                     # A HOST process (invisible from this container) holds the port: docker fails at start.
                     # Take the next free port a few times before giving up.
-                    nxt = self._next_port(dep_id, tried) if _PORT_CONFLICT.search(str(e)) and \
-                        len(tried) < PORT_ATTEMPTS else None
+                    retry = _PORT_CONFLICT.search(str(e)) and len(tried) < PORT_ATTEMPTS
+                    if not retry:
+                        nxt = None
+                    elif self._is_remote(node):  # lists the remote node's containers: off the event loop
+                        nxt = await asyncio.to_thread(self._next_port, dep_id, tried)
+                    else:
+                        nxt = self._next_port(dep_id, tried)
                     if nxt is None:
                         try:  # docker creates the container before starting it: don't leave it behind
                             await asyncio.to_thread(docker.remove_by_name, spec.name)
@@ -760,6 +820,16 @@ class Deployer:
             st.errors = st.unreachable = 0  # Reset on success
             return False
         except NodeUnreachable as e:  # only raised for a remote node: never counts toward the 5-errors rule
+            if self.clock() - st.start > self.settings.startup_timeout_s:
+                # never hold the (global) start-up slot forever: fail it; container_id is kept, so a stop once the
+                # node is back removes the container
+                msg = f"startup timed out after {self.settings.startup_timeout_s}s while its node was unreachable"
+                try:
+                    self._transition(dep_id, "failed", message=msg, last_error=f"{msg}: {e}")
+                except Exception:
+                    log.exception("failed to transition deployment %s to failed after its startup timeout", dep_id)
+                    self.gate.release(dep_id)
+                return True
             st.unreachable += 1
             log.warning("deployment %s: its node is unreachable (poll %d, retrying in %.1fs): %s", dep_id,
                         st.unreachable, self._monitor_wait(st), e)
@@ -991,10 +1061,12 @@ class Deployer:
                 raise DeployError("not_stopped", f"deployment is {dep.state}; stop it first", 409)
             ref = model_ref or dep.model_ref
             node = self._require_node(self._node_of(dep))
+            remote = self._is_remote(node)
             prep = self.prepare(dep.engine, ref, config_override if config_override is not None else dep.config,
                                 existing_ref=dep.model_ref)
             if not dep.system:
                 await self.require_not_foreign(dep.alias or prep.engine.served_name(prep.cfg, ref))
+            unmanaged = await self._remote_unmanaged_ports(node) if remote else set()  # before mem_lock
             async with self.mem_lock:
                 if not dep.system:
                     self.require_model_name(dep.alias or prep.engine.served_name(prep.cfg, ref), dep_id)
@@ -1002,12 +1074,18 @@ class Deployer:
                 fit = check_fit(prep.estimate, budget)
                 if not fit.fits:
                     raise InsufficientMemory(fit)
-                port = await self._free_port(dep_id, dep.port)  # active/planned rows + unmanaged containers
+                port = self._remote_port(dep_id, dep.port, node, unmanaged) if remote else \
+                    await self._free_port(dep_id, dep.port)  # active/planned rows + unmanaged containers
                 with self.db.session() as s:
                     row = s.get(Deployment, dep_id)
                     row.model_ref, row.config, row.port = ref, prep.cfg.model_dump(mode="json"), port
                     row.reserved_bytes, row.estimate = prep.estimate.total, prep.estimate.as_dict()
-                launched = await self._launch_or_queue(dep_id, dep.name, port, prep, budget.total)
+                if remote:
+                    launched = self._claim_or_queue(dep_id, dep.name, prep)
+                else:
+                    launched = await self._launch_or_queue(dep_id, dep.name, port, prep, budget.total)
+            if remote and launched:  # after mem_lock, still under the deployment's own lock
+                await self._launch(dep_id, dep.name, port, prep, budget.total)
         if launched:
             self._spawn_monitor(dep_id)
         return self.view(dep_id)
@@ -1059,9 +1137,17 @@ class Deployer:
 
     # ---------- views ----------
     def usage_rows(self) -> list[tuple[int, str, str, int, str | None, str]]:
+        """A remote deployment that is being launched outside mem_lock (planned/stopped/failed row, in
+        ``launching``) counts as "queued": its reservation is committed until the container starts."""
         with self.db.session() as s:
-            return [(d.id, d.name, d.state, d.reserved_bytes, d.container_id, d.node or "local")
-                    for d in s.scalars(select(Deployment)) if d.state in ACTIVE_STATES]
+            rows = []
+            for d in s.scalars(select(Deployment)):
+                node = d.node or "local"
+                if d.state in ACTIVE_STATES:
+                    rows.append((d.id, d.name, d.state, d.reserved_bytes, d.container_id, node))
+                elif node != LOCAL_NODE_ID and d.id in self.launching:
+                    rows.append((d.id, d.name, "queued", d.reserved_bytes, d.container_id, node))
+            return rows
 
     def _actual(self, dep_id: int) -> int | None:
         b = self.budget.current() if self.budget else None
@@ -1102,8 +1188,7 @@ class Deployer:
     def _endpoints(self, d: Deployment) -> dict:
         node = self._node_of(d)
         if self._is_remote(node):  # no docker DNS across hosts: both are the node's published address
-            url = f"http://{self.nodes.config(node).publish_bind or self.nodes.config(node).cluster_ip}:{d.port}/v1" \
-                if d.port else None
+            url = f"http://{self.nodes.config(node).engine_address()}:{d.port}/v1" if d.port else None
             return {"endpoint": url, "host_endpoint": url}
         return {"endpoint": f"http://{container_name(d.name)}:{d.port}/v1" if d.port else None,
                 "host_endpoint": f"http://{self.settings.publish_bind}:{d.port}/v1"

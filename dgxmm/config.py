@@ -73,6 +73,24 @@ class Mount(BaseModel):
 LOCAL_NODE_ID = "local"
 
 
+def unsafe_publish_reason(addr: str | None) -> str | None:
+    """Why ``addr`` may not be a remote engine's publish address (None = a concrete unicast IP). Engine ports are
+    published on the node's cluster link only: never all interfaces, loopback or a group address."""
+    try:
+        ip = ipaddress.ip_address(str(addr))
+    except ValueError:
+        return "is not an IP address"
+    if ip.is_unspecified:
+        return "is the unspecified address (all interfaces)"
+    if ip.is_loopback:
+        return "is a loopback address"
+    if ip.is_multicast:
+        return "is a multicast address"
+    if ip.version == 4 and str(ip) == "255.255.255.255":
+        return "is the broadcast address"
+    return None
+
+
 class NcclConfig(BaseModel):
     """NCCL network configuration for multi-node training."""
     ib_hca: str
@@ -90,6 +108,11 @@ class NodeConfig(BaseModel):
     ssh_user: str | None = None
     known_hosts: str | None = None
     nccl: NcclConfig | None = None
+
+    def engine_address(self) -> str | None:
+        """The address a remote node's engines publish on and are reached at (one value for the published bind,
+        base URLs and the views, so they never disagree): publish_bind (defaults to cluster_ip)."""
+        return self.publish_bind or self.cluster_ip
 
 
 def _default_hf_cache() -> PathMapping:
@@ -333,6 +356,9 @@ class Settings(BaseModel):
                 # Default publish_bind to cluster_ip for remote nodes
                 if not node.publish_bind:
                     node.publish_bind = node.cluster_ip
+                if (why := unsafe_publish_reason(node.publish_bind)) is not None:
+                    raise ValueError(f"remote node {node.id}: publish_bind {node.publish_bind!r} {why}; it must be "
+                                     "the node's cluster IP (a concrete unicast address)")
             
             # Default local node's hf_cache_host to hf_cache.host
             if not local_nodes[0].hf_cache_host:

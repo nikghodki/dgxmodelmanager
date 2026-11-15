@@ -31,3 +31,31 @@ def test_duplicate_or_missing_local_rejected(settings_factory):
     with pytest.raises(ValidationError, match="exactly one local node"):
         settings_factory(nodes=[{"id": "dgx-2", "label": "b", "docker_url": "ssh://u@198.51.100.2",
                                  "cluster_ip": "198.51.100.2", "known_hosts": "198.51.100.2 ssh-ed25519 AAAA"}])
+
+
+def _remote(**extra):
+    return [{"id": "local", "label": "dgx-1", "docker_url": "unix:///var/run/docker.sock"},
+            {"id": "dgx-2", "label": "dgx-2", "docker_url": "ssh://dgxuser@192.0.2.2", "cluster_ip": "192.0.2.2",
+             "known_hosts": "192.0.2.2 ssh-ed25519 AAAA", **extra}]
+
+
+@pytest.mark.parametrize("bind", ["0.0.0.0", "::", "127.0.0.1", "::1", "224.0.0.1", "ff02::1", "255.255.255.255",
+                                  "dgx-host"])
+def test_remote_publish_bind_must_be_a_concrete_unicast_ip(settings_factory, bind):
+    with pytest.raises(ValidationError, match="publish_bind"):
+        settings_factory(nodes=_remote(publish_bind=bind))
+
+
+@pytest.mark.parametrize("cluster_ip", ["0.0.0.0", "127.0.0.1"])
+def test_remote_cluster_ip_default_bind_is_checked_too(settings_factory, cluster_ip):
+    nodes = _remote()
+    nodes[1]["cluster_ip"] = cluster_ip
+    with pytest.raises(ValidationError, match="publish_bind"):
+        settings_factory(nodes=nodes)
+
+
+def test_remote_publish_bind_accepts_cluster_addresses(settings_factory):
+    s = settings_factory(nodes=_remote(publish_bind="192.0.2.12"))
+    assert s.node("dgx-2").publish_bind == "192.0.2.12" and s.node("dgx-2").engine_address() == "192.0.2.12"
+    s = settings_factory(nodes=_remote())
+    assert s.node("dgx-2").engine_address() == "192.0.2.2"
