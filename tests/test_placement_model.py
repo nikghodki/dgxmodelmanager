@@ -289,3 +289,4 @@ def test_system_deployment_cluster_rejected_in_validation(deployer_two_nodes):
     with pytest.raises(DeployError) as e:
         deployer_two_nodes.validate_placement(placement, "decision", system=True)
     assert e.value.code == "cluster_unsupported"
+

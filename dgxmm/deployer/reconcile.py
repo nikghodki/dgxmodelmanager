@@ -282,7 +282,9 @@ async def _reconcile_node(deployer, node: str, remote: bool, rows: list[Deployme
                 row = Deployment(name=name, engine=engine, model_ref=model_ref,
                                  config={}, state="unknown", container_id=cid, port=port_i, reserved_bytes=0,
                                  estimate={}, last_error="found running without a database record",
-                                 system=system or None, node=node)
+                                 system=system or None, node=node,
+                                 placement={"kind": "single", "nodes": [node]},
+                                 ranks=[])
                 s.add(row)
                 s.flush()
                 s.add(DeploymentEvent(deployment_id=row.id, from_state="unknown", to_state="unknown",

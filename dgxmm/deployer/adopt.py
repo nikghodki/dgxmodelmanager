@@ -140,6 +140,7 @@ async def adopt(deployer, container: str, name: str, user_id: int | None) -> dic
     with deployer.db.session() as s:
         if s.scalar(select(Deployment).where(Deployment.name == name)):
             raise AdoptError("name_in_use", f"a deployment named {name} already exists", 409)
+        # adopt() is local-only by design: deployer.docker is nodes.docker("local") (dgxmm/context.py)
         row = Deployment(name=name, engine="vllm", model_ref=ref, config=prep.cfg.model_dump(mode="json"),
                          state="stopped", reserved_bytes=prep.estimate.total, estimate=prep.estimate.as_dict(),
                          adopted_from=info.name, created_by=user_id,
