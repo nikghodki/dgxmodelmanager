@@ -88,7 +88,8 @@ def test_weights_present_execs_in_the_probe_and_reads_its_answer(two_node_regist
                         weights_bytes=1, size_bytes=1, complete=True, kind="llm", arch=None, architecture=None,
                         quant=None, files=["model.safetensors", "sub/tokenizer.json"])
     fake = two_node_registry.fake("dgx-2")
-    fake.add_unmanaged("dgxmm-node-probe", image="probe", status="running")
+    fake.add_unmanaged("dgxmm-node-probe", image="probe", status="running",
+                       labels={"dgxmm.managed": "true", "dgxmm.role": "probe"})  # as NodeProbe.ensure makes it
     probe = NodeProbe(two_node_registry, two_node_registry.settings)
     fake.exec_output = ""  # the script prints nothing when a file is missing
     assert weights_present(probe, "dgx-2", art) is False
