@@ -257,7 +257,8 @@ class Settings(BaseModel):
     trusted_proxies: str = "127.0.0.1,::1"  # IPs/CIDRs that may set X-Forwarded-For
     nodes: list[NodeConfig] = []
     remote_probe_interval_s: float = Field(5.0, gt=0)
-    node_ssh_key_file: str = "/run/secrets/node_ssh_key"
+    # SSH key for Docker-over-SSH on remote nodes (mode 600). None -> <data_dir>/secrets/node_ssh_key.
+    node_ssh_key_file: str | None = None
 
     @field_validator("litellm_public_url")
     @classmethod
@@ -388,6 +389,11 @@ class Settings(BaseModel):
     def decider_key_path(self) -> Path:
         return Path(self.decider_key_file) if self.decider_key_file else Path(self.data_dir) / "secrets" / "decider_api_key"
 
+
+    @property
+    def node_ssh_key_path(self) -> Path:
+        """SSH key for Docker-over-SSH on remote nodes."""
+        return Path(self.node_ssh_key_file) if self.node_ssh_key_file else Path(self.data_dir) / "secrets" / "node_ssh_key"
     @property
     def admin_socket_path(self) -> Path:
         """Unix socket of the admin listener (CLI tokens are accepted only there)."""

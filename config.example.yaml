@@ -60,7 +60,7 @@ publish_bind: 127.0.0.1       # host interface engine ports are published on (ke
 #       ib_hca: rocep1s0f0,roceP2p1s0f0
 #       socket_ifname: enp1s0f0np0
 # remote_probe_interval_s: 5.0         # interval for checking remote node health
-# node_ssh_key_file: /run/secrets/node_ssh_key  # SSH key for remote docker contexts
+# node_ssh_key_file: null  # SSH key for Docker-over-SSH on remote nodes; null -> <data_dir>/secrets/node_ssh_key
 
 startup_timeout_s: 900        # seconds an engine may take to become ready before it is failed
 max_concurrent_startups: 1    # engines starting/loading at once; others wait in state "queued" (vLLM's start-up

@@ -138,7 +138,7 @@ class NodeRegistry:
             config_lines.extend([
                 f"Host {node.cluster_ip}",
                 f"  User {ssh_user}",
-                f"  IdentityFile {self.settings.node_ssh_key_file}",
+                f"  IdentityFile {self.settings.node_ssh_key_path}",
                 f"  UserKnownHostsFile {known_hosts_path}",
                 "  StrictHostKeyChecking yes",
                 "  ServerAliveInterval 15",

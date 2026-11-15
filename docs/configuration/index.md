@@ -219,11 +219,11 @@ docker save dgxmm-llamacpp-rpc:61dbf49 | ssh dgxuser@192.0.2.2 docker load
 the data directory, pointed to by `node_ssh_key_file` in `config.yaml`:
 
 ```yaml
-node_ssh_key_file: data/secrets/node_ssh_key
+# node_ssh_key_file: null  # null -> <data_dir>/secrets/node_ssh_key
 ```
 
-Default: `data/secrets/node_ssh_key`. The key must have mode 0600 and be accessible inside the DGXMM container
-at the path specified. To set it up:
+Default: `null`, which resolves to `<data_dir>/secrets/node_ssh_key` (inside the container: `/app/data/secrets/node_ssh_key`;
+on the host: `data/secrets/node_ssh_key` relative to `docker-compose.yaml`). The key must have mode 0600. To set it up:
 
 1. **Create a dedicated SSH key** (no passphrase):
    ```bash

@@ -21,7 +21,7 @@ def test_registry_writes_ssh_config_with_pinned_known_hosts(two_node_settings, t
     cfg = (tmp_path / ".ssh" / "config").read_text()
     assert "Host 192.0.2.2" in cfg and "StrictHostKeyChecking yes" in cfg
     assert "BatchMode yes" in cfg
-    assert f"IdentityFile {two_node_settings.node_ssh_key_file}" in cfg
+    assert f"IdentityFile {two_node_settings.node_ssh_key_path}" in cfg
     kh_path = tmp_path / ".ssh" / "known_hosts_dgx-2"
     kh = kh_path.read_text()
     assert kh.strip() == two_node_settings.node("dgx-2").known_hosts
