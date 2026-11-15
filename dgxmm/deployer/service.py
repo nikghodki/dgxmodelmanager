@@ -11,10 +11,10 @@ import secrets
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Literal
+from typing import Annotated, Any, Awaitable, Callable, Literal
 
 import httpx
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, StringConstraints, ValidationError, model_validator
 from sqlalchemy import select
 
 from dgxmm.config import LOCAL_NODE_ID, Settings
@@ -61,10 +61,23 @@ def cluster_ready(node, engine: str) -> bool:
     return node.cluster_ip is not None and (engine != "vllm" or node.nccl is not None)
 
 
+NodeId = Annotated[str, StringConstraints(pattern=NODE_ID_PATTERN)]
+
+
 class Placement(BaseModel):
-    """Deployment placement: single-node or multi-node cluster."""
+    """Deployment placement: single-node or multi-node cluster. Shape checked here (a 422 for a request): exactly
+    one node for a single deployment, at least two for a cluster, each a valid node id. Whether the nodes are
+    configured, distinct and cluster-ready is Deployer.validate_placement's (needs the settings)."""
     kind: Literal["single", "cluster"]
-    nodes: list[str]  # head first
+    nodes: list[NodeId] = Field(min_length=1, max_length=16)  # head first
+
+    @model_validator(mode="after")
+    def _node_count(self):
+        if self.kind == "single" and len(self.nodes) != 1:
+            raise ValueError("a single placement has exactly one node")
+        if self.kind == "cluster" and len(self.nodes) < 2:
+            raise ValueError("a cluster placement needs at least two nodes")
+        return self
 
     @property
     def head(self) -> str:

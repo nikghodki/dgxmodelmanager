@@ -291,3 +291,26 @@ def test_system_deployment_cluster_rejected_in_validation(deployer_two_nodes):
         deployer_two_nodes.validate_placement(placement, "decision", system=True)
     assert e.value.code == "cluster_unsupported"
 
+
+
+# ---------- final review I10: placement validated by the model (422, never a 500) ----------
+
+@pytest.mark.parametrize("placement", [
+    {"kind": "single", "nodes": []},
+    {"kind": "cluster", "nodes": []},
+    {"kind": "single", "nodes": ["local", "dgx-2"]},
+    {"kind": "cluster", "nodes": ["local"]},
+    {"kind": "single", "nodes": ["DGX_2"]},
+    {"kind": "cluster", "nodes": ["local", "../x"]},
+    {"kind": "cluster", "nodes": ["local", "a" * 33]},
+])
+def test_invalid_placements_are_validation_errors(placement):
+    from pydantic import ValidationError
+    with pytest.raises(ValidationError):
+        DeployRequest(name="a", engine="vllm", model_ref="x/y", placement=placement)
+
+
+def test_api_rejects_an_empty_placement_with_422(client_admin_two_nodes):
+    r = client_admin_two_nodes.post("/api/deployments", json={"name": "a", "engine": "vllm", "model_ref": "x/y",
+                                                              "placement": {"kind": "single", "nodes": []}})
+    assert r.status_code == 422, r.text
