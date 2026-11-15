@@ -187,7 +187,7 @@ def _deployment_node(conn: sqlite3.Connection) -> None:
         return
     cols = {r[1] for r in conn.execute('PRAGMA table_info("deployments")')}
     if "node" not in cols:
-        conn.execute('ALTER TABLE deployments ADD COLUMN "node" VARCHAR(32) DEFAULT "local"')
+        conn.execute("ALTER TABLE deployments ADD COLUMN \"node\" VARCHAR(32) DEFAULT 'local'")
     conn.execute("UPDATE deployments SET node = 'local' WHERE node IS NULL")
 
 
