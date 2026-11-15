@@ -119,12 +119,12 @@ async def remote_probe_loop(ctx: AppContext) -> None:
         return
     
     while True:
-        try:
-            for node_id in remote_nodes:
-                ctx.probe.ensure(node_id)
-                ctx.probe.sample(node_id)
-        except Exception:
-            log.exception("remote probe failed")
+        for node_id in remote_nodes:
+            try:
+                await asyncio.to_thread(ctx.probe.ensure, node_id)
+                await asyncio.to_thread(ctx.probe.sample, node_id)
+            except Exception:
+                log.exception("remote probe failed for %s", node_id)
         await asyncio.sleep(ctx.settings.remote_probe_interval_s)
 
 

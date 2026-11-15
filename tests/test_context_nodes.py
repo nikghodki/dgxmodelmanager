@@ -63,3 +63,110 @@ def test_remote_probe_loop_started_for_multi_node(two_node_settings):
         return True
     
     assert asyncio.run(run_briefly())
+
+
+def test_remote_probe_loop_continues_after_node_failure(three_node_registry):
+    """If one node's probe fails, remaining nodes should still be sampled."""
+    import asyncio
+    from dgxmm.context import remote_probe_loop, AppContext
+    from dgxmm.nodes.probe import NodeProbe
+    
+    # Set up dgx-2 to fail, dgx-3 to succeed
+    three_node_registry.fake("dgx-2").exec_fail = True
+    three_node_registry.fake("dgx-3").exec_output = "MemTotal: 127000000 kB\nMemAvailable: 100000000 kB\n"
+    
+    probe = NodeProbe(three_node_registry, three_node_registry.settings)
+    
+    # Create minimal context
+    class FakeCtx:
+        pass
+    
+    ctx = FakeCtx()
+    ctx.probe = probe
+    ctx.nodes = three_node_registry
+    ctx.settings = three_node_registry.settings
+    
+    # Run one iteration of the loop
+    async def run_one_iteration():
+        task = asyncio.create_task(remote_probe_loop(ctx))
+        await asyncio.sleep(0.05)  # Let one iteration complete
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+    
+    asyncio.run(run_one_iteration())
+    
+    # dgx-2 should have no sample (failed)
+    assert probe._samples.get("dgx-2") is None
+    
+    # dgx-3 should have been sampled (success)
+    assert probe._samples.get("dgx-3") is not None
+    assert probe._samples["dgx-3"].total == 127000000 * 1024
+
+
+def test_remote_probe_loop_does_not_block_event_loop(two_node_registry):
+    """Blocking probe calls should not prevent other coroutines from running."""
+    import asyncio
+    import time
+    from dgxmm.context import remote_probe_loop, AppContext
+    from dgxmm.nodes.probe import NodeProbe
+    
+    # Set up dgx-2 with a slow exec
+    two_node_registry.fake("dgx-2").exec_output = "MemTotal: 127000000 kB\nMemAvailable: 100000000 kB\n"
+    
+    probe = NodeProbe(two_node_registry, two_node_registry.settings)
+    
+    # Make exec_run block briefly
+    original_exec_run = two_node_registry.fake("dgx-2")._containers.get
+    
+    def slow_get(name):
+        if name == "dgxmm-node-probe":
+            time.sleep(0.05)  # 50ms block
+        # Create a fake container
+        from tests.fakes import FakeContainer
+        c = FakeContainer(two_node_registry.fake("dgx-2"), "probe-cid", "dgxmm-node-probe",
+                         two_node_registry.settings.images.probe, ["sleep", "2147483647"],
+                         {}, {}, [], [], [], status="running")
+        return c
+    
+    two_node_registry.fake("dgx-2").containers.get = slow_get
+    
+    # Create minimal context
+    class FakeCtx:
+        pass
+    
+    ctx = FakeCtx()
+    ctx.probe = probe
+    ctx.nodes = two_node_registry
+    ctx.settings = two_node_registry.settings
+    
+    # Run probe loop alongside another coroutine
+    progress = []
+    
+    async def other_task():
+        for i in range(5):
+            await asyncio.sleep(0.02)  # 20ms per iteration
+            progress.append(i)
+    
+    async def run_both():
+        probe_task = asyncio.create_task(remote_probe_loop(ctx))
+        other_task_coro = asyncio.create_task(other_task())
+        
+        # Wait for other_task to complete
+        await other_task_coro
+        
+        # Cancel probe task
+        probe_task.cancel()
+        try:
+            await probe_task
+        except asyncio.CancelledError:
+            pass
+    
+    asyncio.run(run_both())
+    
+    # If the probe blocked the event loop, other_task would not complete all iterations
+    # We expect all 5 iterations to complete despite the 50ms block in probe
+    assert len(progress) == 5
+    assert progress == [0, 1, 2, 3, 4]

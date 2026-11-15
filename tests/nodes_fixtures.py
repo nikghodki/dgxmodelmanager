@@ -129,3 +129,67 @@ def budget_service_two_nodes(two_node_registry):
     budget = BudgetService(two_node_registry.settings, node_probe, usage_provider, nodes=two_node_registry)
     
     return budget
+
+
+@pytest.fixture
+def three_node_settings(settings_factory):
+    """Settings with three nodes: local (dgx-1), dgx-2, dgx-3."""
+    return settings_factory(
+        nodes=[
+            {
+                "id": "local",
+                "label": "dgx-1",
+                "docker_url": "unix:///var/run/docker.sock"
+            },
+            {
+                "id": "dgx-2",
+                "label": "dgx-2",
+                "docker_url": "ssh://dgxuser@192.0.2.2",
+                "cluster_ip": "192.0.2.2",
+                "ssh_user": "dgxuser",
+                "known_hosts": "192.0.2.2 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFakeKeyForTestingPurposesOnly",
+                "hf_cache_host": "/home/dgxuser/.cache/huggingface",
+                "nccl": {
+                    "ib_hca": "rocep1s0f0,roceP2p1s0f0",
+                    "socket_ifname": "enp1s0f0np0"
+                }
+            },
+            {
+                "id": "dgx-3",
+                "label": "dgx-3",
+                "docker_url": "ssh://dgxuser@192.0.2.3",
+                "cluster_ip": "192.0.2.3",
+                "ssh_user": "dgxuser",
+                "known_hosts": "192.0.2.3 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFakeKeyForTestingPurposesOnly2",
+                "hf_cache_host": "/home/dgxuser/.cache/huggingface",
+                "nccl": {
+                    "ib_hca": "rocep1s0f0,roceP2p1s0f0",
+                    "socket_ifname": "enp1s0f0np0"
+                }
+            }
+        ]
+    )
+
+
+@pytest.fixture
+def three_node_registry(three_node_settings):
+    """NodeRegistry with fake Docker clients for testing (3 nodes)."""
+    from dgxmm.nodes.registry import NodeRegistry
+    from tests.fakes import FakeDockerClient
+    
+    # Create a fake client for each node upfront
+    fake_clients = {
+        "local": FakeDockerClient(),
+        "dgx-2": FakeDockerClient(),
+        "dgx-3": FakeDockerClient(),
+    }
+    
+    def client_factory(node):
+        return fake_clients[node.id]
+    
+    registry = NodeRegistry(three_node_settings, client_factory=client_factory)
+    
+    # Add a helper method to get the fake client for a node
+    registry.fake = lambda node_id: fake_clients[node_id]
+    
+    return registry
