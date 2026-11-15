@@ -47,7 +47,7 @@ the container.
 |---|---|---|---|
 | `images.vllm` | string | `vllm/vllm-openai@sha256:22d3b121…352c8` | vLLM image (public multi-arch image, pinned by digest). |
 | `images.llamacpp` | string | `ghcr.io/ggml-org/llama.cpp@sha256:e4cfff28…c2b5` | llama.cpp server image (build b11669, multi-arch, pinned by digest). |
-| `images.llamacpp_rpc` | string | `dgxmm-llamacpp-rpc:61dbf49` | llama.cpp image for cluster deployments (`ggml-rpc-server` workers, `llama-server --rpc` head): built locally from `deploy/llamacpp-rpc` (commit 61dbf49, `GGML_RPC=ON`, CUDA sm_121) and loaded on every node of the cluster (`docker save … \| ssh <node> docker load`). A local build has no registry digest, so it is referenced by tag; the Dockerfile pins its bases by digest and the source by commit. |
+| `images.llamacpp_rpc` | string | `dgxmm-llamacpp-rpc:61dbf49-u1` | llama.cpp image for cluster deployments (`ggml-rpc-server` workers, `llama-server --rpc` head): built locally from `deploy/llamacpp-rpc` (commit 61dbf49, `GGML_RPC=ON`, CUDA sm_121) and loaded on every node of the cluster (`docker save … \| ssh <node> docker load`). A local build has no registry digest, so it is referenced by tag; the Dockerfile pins its bases by digest and the source by commit. |
 | `docker_network` | string | `dgxmm` | Docker network that engine containers join. **Must equal `DGXMM_NETWORK` in `.env`.** |
 | `port_range` | `[low, high]` | `[8100, 8199]` | Host ports handed to engine containers (1024–65535, ascending). Ports used by other containers are skipped. |
 | `cluster_port_range` | `[low, high]` | `[29500, 29599]` | Master ports (`vllm --master-port`) of cluster deployments, allocated per head node. A cluster's API and master ports are held on every node of its placement. |
@@ -118,65 +118,64 @@ workload labels for 15 minutes.
 
 DGXMM can manage models on one or more nodes (DGX Spark boxes or similar). With no `nodes:` key in
 `config.yaml`, DGXMM behaves exactly as today: one implicit local node. With a `nodes:` list, one
-DGXMM instance (on the first node) controls every node; other nodes run no DGXMM.
+DGXMM instance (on the node it runs on, the local node) controls every node; other nodes run no DGXMM.
 
 Per deployment you choose where it runs:
 
-- **On dgx-1** (or whichever node runs DGXMM) — single-node deployment on the local node
-- **On dgx-2** (a remote node) — single-node deployment on a remote node, managed from dgx-1's DGXMM
-- **Across both** (cluster) — one model split across both nodes' GPUs (vLLM tensor parallel over NCCL/RDMA,
+- **On the local node** (the node running DGXMM) — single-node deployment
+- **On a remote node** — single-node deployment there, managed from the local node's DGXMM
+- **Across nodes** (cluster) — one model split across the nodes' GPUs (vLLM tensor parallel over NCCL/RDMA,
   or llama.cpp RPC layer split)
 
-**Configuration.** Each node has an `id` (lowercase letters, digits and `-`), a `label` (shown in the UI), a
-`docker_url`, its `cluster_ip`, optional NCCL settings for cluster deployments, and SSH settings for remote
-nodes. The first node in the list is treated as the local node (where DGXMM runs); remote nodes need
-`ssh_user`, `known_hosts` and a key file.
+**Configuration.** The list holds exactly one local node: the entry whose `docker_url` starts with `unix://`.
+Its `id` must be `local` (deployments and the API name it so); its `label` is free (shown in the UI) and its place
+in the list does not matter. Every other entry is a remote node (`docker_url: ssh://<user>@<cluster_ip>`, the
+docker_url host must be the node's `cluster_ip`), with an `id` of lowercase letters, digits and `-` (1–32
+characters, starting with a letter or digit), its `cluster_ip`, a pinned `known_hosts` line and the SSH key file
+(`node_ssh_key_file`, below). `nccl` is needed on every node of a vLLM cluster; llama.cpp clusters need only
+`cluster_ip`.
 
 ```yaml
 nodes:
-  - id: dgx-1
+  - id: local                      # the node running DGXMM: always id "local"
     label: DGX-1
     docker_url: unix:///var/run/docker.sock
     cluster_ip: 192.0.2.1
-    publish_bind: 192.0.2.1  # cluster IP; engines bind here
-    hf_cache_host: ~/.cache/huggingface
     nccl:
       ib_hca: mlx5_0:1,mlx5_1:1
-      socket_ifname: eth0
-      gloo_socket_ifname: eth0
+      socket_ifname: eth0          # also used as GLOO_SOCKET_IFNAME
 
   - id: dgx-2
     label: DGX-2
     docker_url: ssh://dgxuser@192.0.2.2
     cluster_ip: 192.0.2.2
-    publish_bind: 192.0.2.2
+    publish_bind: 192.0.2.2        # default: cluster_ip
     hf_cache_host: /home/dgxuser/.cache/huggingface
-    ssh_user: dgxuser
+    ssh_user: dgxuser              # default: the user in docker_url
     known_hosts: |
       192.0.2.2 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI...
     nccl:
       ib_hca: mlx5_2:1,mlx5_3:1
       socket_ifname: eth1
-      gloo_socket_ifname: eth1
 ```
 
 | Node field | Type | Meaning |
 |---|---|---|
-| `id` | string | Node identifier (1–32 chars: lowercase letters, digits and `-`). Used in API placement, logs, and database. |
-| `label` | string | Human-readable name shown in the UI (1–64 chars). |
-| `docker_url` | string | Docker connection. Local: `unix:///var/run/docker.sock`. Remote: `ssh://<user>@<cluster_ip>`. |
-| `cluster_ip` | IPv4 or null | Node's IP on the cluster link (point-to-point RDMA network). Required for cluster deployments. Remote engine ports bind here. |
-| `publish_bind` | IPv4 or null | Address remote engine ports are published on. Defaults to `cluster_ip`. Keep it on the cluster link (never `0.0.0.0`). |
-| `hf_cache_host` | path | Hugging Face cache on this node's host filesystem. |
-| `ssh_user` | string | SSH user for remote Docker (remote nodes only). |
-| `known_hosts` | string | SSH `known_hosts` lines for this node (remote nodes only, see [SSH setup](#node-ssh-key-and-known-hosts)). |
-| `nccl.ib_hca` | string | NCCL InfiniBand HCAs (e.g. `mlx5_0:1,mlx5_1:1`). Needed for vLLM clusters over RDMA. |
-| `nccl.socket_ifname` | string | Network interface for NCCL (e.g. `eth0`). |
-| `nccl.gloo_socket_ifname` | string | Network interface for Gloo collective operations (e.g. `eth0`). |
+| `id` | string | `local` for the local node; a remote node: 1–32 characters, lowercase letters, digits and `-`. Used in placements, the API and the database. |
+| `label` | string | Name shown in the UI. |
+| `docker_url` | string | Docker connection. Local: `unix:///var/run/docker.sock`. Remote: `ssh://<user>@<cluster_ip>` (the host must equal `cluster_ip`). |
+| `cluster_ip` | IP or null | The node's address on the cluster link (point-to-point RDMA network). Required on remote nodes and on every node of a cluster. |
+| `publish_bind` | IP or null | Remote nodes: address their engine API ports are published on. Defaults to `cluster_ip`; must be a concrete unicast address (never `0.0.0.0`, loopback or a hostname). Not used for the local node (its engines use `publish_bind` of the main settings, `127.0.0.1`). |
+| `hf_cache_host` | path or null | The node's Hugging Face cache on its host filesystem (mounted read-only into its engines and its probe). Local node default: `hf_cache.host`. It must exist on a remote node, or its probe cannot start and the node stays stale. |
+| `ssh_user` | string or null | Remote nodes: SSH user for Docker over SSH; default the user in `docker_url`. |
+| `known_hosts` | string or null | Remote nodes (required): the pinned `known_hosts` line(s) of the node, see [SSH setup](#node-ssh-key-and-known-hosts). |
+| `nccl.ib_hca` | string | NCCL InfiniBand HCAs (`NCCL_IB_HCA`, e.g. `mlx5_0:1,mlx5_1:1`). Required with `nccl`. |
+| `nccl.socket_ifname` | string | Interface for NCCL and Gloo bootstrap traffic (`NCCL_SOCKET_IFNAME` and `GLOO_SOCKET_IFNAME`). Required with `nccl`. |
 
-**The implicit local node.** When `nodes:` is not set, DGXMM creates one implicit local node with id `local`,
-Docker socket `unix:///var/run/docker.sock`, `hf_cache_host` from `config.yaml` or settings, `publish_bind: 127.0.0.1`,
-no `cluster_ip` and no NCCL settings. Existing deployments (from before multi-node) are mapped to this node.
+**The implicit local node.** When `nodes:` is not set, DGXMM uses one implicit local node with id and label
+`local`, Docker socket `unix:///var/run/docker.sock`, `hf_cache_host` from `hf_cache.host`, no `cluster_ip` and no
+NCCL settings; its engines publish on `publish_bind` (`127.0.0.1`). Existing deployments (from before multi-node)
+are mapped to this node.
 
 **Per-node settings.** Each node uses its own `hf_cache_host`, `publish_bind` and `cluster_ip`. The Docker
 network (`docker_network`) exists only on the local node; remote engines run on their node's default bridge
@@ -184,11 +183,22 @@ network and publish their API port on `publish_bind` (typically the cluster IP).
 `startup_timeout_s`, and `vllm_cache_mounts` apply globally; `vllm_cache_mounts` (local host paths) are not
 mounted on remote nodes.
 
-**Node health.** DGXMM keeps one long-lived probe container per remote node (image pinned by digest, `/proc`
-mounted read-only) and samples `meminfo` every `remote_probe_interval_s` (default 5 s). A node whose probe is
-older than `3 × interval` is marked **stale**: new starts are refused there (fail closed), running deployments
-are left alone, and DGXMM retries the probe in the background. When the node comes back it is marked fresh
-and new deployments are admitted again.
+**Node health.** DGXMM keeps one long-lived probe container per remote node, `dgxmm-node-probe` (`images.probe`,
+pinned by digest; read-only root filesystem, no network, no capabilities; the node's `/proc` and `hf_cache_host`
+mounted read-only; labels `dgxmm.managed=true` and `dgxmm.role=probe`, so it is never shown or adopted as a
+deployment). It samples `meminfo` every `remote_probe_interval_s` (default 5 s) and checks weights on the node. A
+node whose last reading is older than `3 × interval` is marked **stale**: new starts are refused there (fail
+closed), running deployments are left alone, and DGXMM retries the probe in the background. `GET /api/nodes` gives
+the reason of the last failed attempt (`reason`, e.g. the probe could not be created because `hf_cache_host` does
+not exist there), and the Dashboard shows it. When the node answers again it is marked fresh and new deployments
+are admitted again.
+
+**Sleep mode on remote nodes.** A remote engine publishes on its node's cluster IP, which every container of the
+DGXMM host can reach (local engines publish on `127.0.0.1`), and vLLM's sleep mode turns on development routes
+(`/sleep`, `/wake_up`, `/collective_rpc`, ...) that do not check the engine key. So a single-node vLLM deployment on
+a remote node gets no sleep mode unless `remote_dev_endpoints: true` (default `false`): it then has no Sleep
+action (Stop frees its memory). Clusters never get sleep mode. See [security](../security/overview.md) for the firewall rule that keeps
+other containers off the cluster link.
 
 **Cluster port allocation.** vLLM clusters need a master port (`--master-port`) on the head node; llama.cpp
 clusters need RPC ports on worker nodes. These ports are allocated from `cluster_port_range` (default
@@ -197,26 +207,37 @@ every node in the cluster placement.
 
 **llama.cpp RPC image.** Cluster deployments using llama.cpp need a special image with RPC support, built
 locally from `deploy/llamacpp-rpc` (commit 61dbf49, `GGML_RPC=ON`, CUDA sm_121) and loaded onto every node.
-The image is referenced by tag (`images.llamacpp_rpc`, default `dgxmm-llamacpp-rpc:61dbf49`) since it has no
+Every rank runs as DGXMM's own uid:gid (`DGXMM_UID:DGXMM_GID`, never root; the image's default user is the
+unprivileged uid 10001), so each node's `hf_cache_host` must be readable by that uid (it owns the cache when the
+same user runs DGXMM's host and the remote node's account). Workers run without a local tensor cache
+(`ggml-rpc-server` without `-c`): nothing is written on a worker, at the cost of sending its share of the weights
+over the cluster link at every load (about 100 GB for a model split across two nodes).
+The image is referenced by tag (`images.llamacpp_rpc`, default `dgxmm-llamacpp-rpc:61dbf49-u1`) since it has no
 registry digest:
 
 ```yaml
 images:
-  llamacpp_rpc: dgxmm-llamacpp-rpc:61dbf49
+  llamacpp_rpc: dgxmm-llamacpp-rpc:61dbf49-u1
 ```
 
 To build and load it on both nodes (from the node running DGXMM):
 
 ```bash
 # Build locally
-docker build -t dgxmm-llamacpp-rpc:61dbf49 deploy/llamacpp-rpc
+docker build -t dgxmm-llamacpp-rpc:61dbf49-u1 deploy/llamacpp-rpc
 
 # Load on remote node
-docker save dgxmm-llamacpp-rpc:61dbf49 | ssh dgxuser@192.0.2.2 docker load
+docker save dgxmm-llamacpp-rpc:61dbf49-u1 | ssh dgxuser@192.0.2.2 docker load
 ```
 
 <a id="node-ssh-key-and-known-hosts"></a>**Node SSH key and known_hosts.** Remote nodes need an SSH key for Docker-over-SSH. The key is a file under
-the data directory, pointed to by `node_ssh_key_file` in `config.yaml`:
+the data directory, pointed to by `node_ssh_key_file` in `config.yaml`. At start DGXMM writes the ssh client
+configuration for the remote nodes to `<data_dir>/ssh/config` (inside the container `/app/data/ssh/config`, set by
+`DGXMM_SSH_CONFIG`; directories mode 0700, files 0600): per node its user, the key, the pinned `known_hosts` line,
+`StrictHostKeyChecking yes`, `BatchMode yes`, `ConnectTimeout 10` and keep-alives. It never writes a `~/.ssh`.
+Every ssh DGXMM runs uses that file: the image's `ssh` (`deploy/ssh/dgxmm-ssh`, first on `PATH`) passes it with `-F`,
+because OpenSSH reads `~/.ssh/config` only from the passwd home directory, and makes ssh work when `DGXMM_UID` has no
+passwd entry in the image.
 
 ```yaml
 # node_ssh_key_file: null  # null -> <data_dir>/secrets/node_ssh_key
@@ -256,15 +277,17 @@ on the host: `data/secrets/node_ssh_key` relative to `docker-compose.yaml`). The
          192.0.2.2 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExampleKeyHere...
    ```
 
-The key file must be readable by the user the DGXMM container runs as (set by `DGXMM_UID` in `.env`). DGXMM
-validates the `known_hosts` fingerprint on startup and refuses to start if it cannot connect to a configured
-node. Never use trust-on-first-use in production; always verify the key fingerprint out of band.
+The key file must be readable by the user the DGXMM container runs as (set by `DGXMM_UID` in `.env`). Every
+connection checks the host key against the pinned line (no trust on first use): a node whose key does not match,
+or that cannot be reached, is not a start-up error; it is marked unreachable and stale (`GET /api/nodes` and the
+Dashboard show why) and nothing is started there until it answers. Always verify the key fingerprint out of band.
 
 **Remote probe interval and cluster port range.**
 
 ```yaml
 remote_probe_interval_s: 5.0   # Sample remote node memory every 5 seconds
 cluster_port_range: [29500, 29599]  # Master/RPC ports for clusters
+remote_dev_endpoints: false    # sleep mode (vLLM dev routes) for single deployments on remote nodes
 ```
 
 **Memory budget per node.** Fit checks, memory budgets, the watchdog and the planner work per node. A cluster

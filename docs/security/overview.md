@@ -18,18 +18,42 @@ description: "The essentials of DGXMM's security: the Docker socket, network exp
   install with `DGXMM_BIND=127.0.0.1` behind an HTTPS reverse proxy (see
   [reverse proxy](../configuration/networking.md#reverse-proxy)), or use a VPN.
 - DGXMM only stops or removes containers labelled `dgxmm.managed=true`, plus the short-lived delete
-  helpers it starts itself (`dgxmm.helper=true`). Engine ports are published on `127.0.0.1` only and
-  have no authentication: give other machines access through LiteLLM and virtual keys.
+  helpers it starts itself (`dgxmm.helper=true`). Local engine ports are published on `127.0.0.1` only. Each
+  engine requires its own API key (below), which DGXMM never shows: give people and other machines access
+  through LiteLLM and virtual keys.
 - The LiteLLM master key is write-only: DGXMM never shows or logs it, and only sends it to the LiteLLM
   URL it was entered for. A virtual key is shown once, when it is created.
-- Engine containers have API keys (generated per deployment, delivered as `--api-key` to vLLM and llama.cpp).
-  LiteLLM and DGXMM's health checks send the key. Note that vLLM enforces API keys only on `/v1`, `/v2`,
-  `/inference`, and `/cohere` routes; other routes including development endpoints stay open when
-  `--enable-sleep-mode` is set (sleep mode is enabled when dev mode is, and dev mode is on for single
-  deployments that support sleep; cluster deployments never get sleep mode).
-- RPC and NCCL ports (for cluster deployments) are bound to the cluster link only (point-to-point RDMA
-  network), never exposed on the LAN. Remote engine API ports are published on the node's `publish_bind`
-  address (typically the cluster IP), not `0.0.0.0`.
+- Engine containers have API keys (generated per deployment, delivered in the environment, `VLLM_API_KEY` /
+  `LLAMA_API_KEY`, never on the command line). LiteLLM and DGXMM's health checks send the key. vLLM enforces it
+  only on `/v1`, `/v2`, `/inference` and `/cohere`: other routes (`/invocations`, `/tokenize`, `/metrics`, ...)
+  stay open, and so do the development routes (`/sleep`, `/collective_rpc`, `/update_weights`, ...) that sleep
+  mode turns on (`VLLM_SERVER_DEV_MODE`). Sleep mode is used by local single deployments only: remote single
+  deployments get it only with `remote_dev_endpoints: true` (default off), clusters never.
+- Remote engine API ports are published on the node's `publish_bind` address (default its cluster IP), never
+  `0.0.0.0`. Cluster ranks run on the host network. What DGXMM controls: the vLLM head serves its API on its
+  cluster IP (`--host`), NCCL and Gloo bootstrap use the cluster interface (`NCCL_SOCKET_IFNAME`,
+  `GLOO_SOCKET_IFNAME`, `VLLM_HOST_IP`), `--master-addr` is the head's cluster IP, a llama.cpp worker's
+  `ggml-rpc-server` (no authentication) listens on its cluster IP and the llama.cpp head on its cluster IP. Whether
+  vLLM's torch TCPStore (the master port) and its ZMQ sockets also listen on every interface is not set by DGXMM;
+  it is to be verified with `ss -ltnp` on each node during acceptance.
+- The cluster link is reachable from every container on the DGXMM host (Docker forwards bridge traffic to it),
+  unlike local engines on `127.0.0.1`. Restricting it is an owner action (DGXMM never changes firewall rules):
+  allow only the DGXMM and LiteLLM containers in the `DOCKER-USER` chain, for example with the cluster subnet
+  `192.0.2.0/30` and the two containers' addresses on the `dgxmm` network (pin them, e.g. compose
+  `ipv4_address`, so the rules stay valid):
+
+    ```bash
+    sudo iptables -I DOCKER-USER -d 192.0.2.0/30 -j DROP
+    sudo iptables -I DOCKER-USER -s <dgxmm address> -d 192.0.2.0/30 -j RETURN
+    sudo iptables -I DOCKER-USER -s <litellm address> -d 192.0.2.0/30 -j RETURN
+    sudo iptables -I DOCKER-USER -d 192.0.2.0/30 -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN
+    ```
+
+    (`-I` inserts at the top, so the DROP ends up last.) Host-network containers (the cluster ranks) and host
+  processes are not forwarded traffic and are not affected; persist the rules with your distribution's tooling.
+- Docker over SSH to remote nodes pins each node's host key (`StrictHostKeyChecking yes`, no trust on first use)
+  through the ssh configuration DGXMM writes to `<data_dir>/ssh/config` (never a `~/.ssh`), used by every ssh it
+  runs. llama.cpp cluster ranks run as DGXMM's uid, never root, and write nothing on the nodes.
 - Process command lines are visible to every signed-in user. Secrets in them are masked on a
   best-effort basis, so do not pass secrets as command-line arguments (see
   [known limitations](../operations/known-limitations.md)).

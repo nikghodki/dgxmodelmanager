@@ -29,15 +29,17 @@ All notable changes to DGXMM are documented in this file. The format is based on
   and on-demand starts launch all ranks. Any rank exiting fails the whole deployment and stops the others.
 - **Copying weights to remote nodes.** Deploying on a remote node whose HF cache lacks the model is refused with
   `409 weights_missing` and a `copy_weights` action. The action creates a background copy job (shown on Downloads)
-  that transfers the snapshot over the cluster link with rsync. For llama.cpp clusters, only the head node needs
+  that transfers the snapshot over the cluster link (tar over ssh). For llama.cpp clusters, only the head node needs
   the GGUF (workers receive tensors over RPC); for vLLM clusters, every node needs the full model.
-- **Engine API keys.** Engine containers now get an `--api-key` (generated per deployment, delivered to vLLM and
-  llama.cpp). LiteLLM and DGXMM's health checks send the key. vLLM enforces it on `/v1`, `/v2`, `/inference` and
-  `/cohere`; development endpoints stay open when sleep mode is enabled (single deployments that support sleep;
-  cluster deployments never get sleep mode).
+- **Engine API keys.** Engine containers now get an API key (generated per deployment, delivered to vLLM and
+  llama.cpp in the environment, never on the command line). LiteLLM and DGXMM's health checks send the key. vLLM
+  enforces it on `/v1`, `/v2`, `/inference` and `/cohere`; its development endpoints stay open when sleep mode is
+  enabled, so only local single deployments get sleep mode (remote ones with `remote_dev_endpoints: true` only;
+  cluster deployments never).
 - **llama.cpp RPC image.** Cluster deployments using llama.cpp need `images.llamacpp_rpc` (default
-  `dgxmm-llamacpp-rpc:61dbf49`), built locally from `deploy/llamacpp-rpc` with `GGML_RPC=ON` and loaded onto
-  every node. See [configuration](docs/configuration/index.md#nodes).
+  `dgxmm-llamacpp-rpc:61dbf49-u1`), built locally from `deploy/llamacpp-rpc` with `GGML_RPC=ON` and loaded onto
+  every node. Its ranks run as DGXMM's uid (never root) and workers keep no local tensor cache. See
+  [configuration](docs/configuration/index.md#nodes).
 - **Cluster port allocation.** vLLM clusters use `cluster_port_range` (default `[29500, 29599]`) for master ports;
   llama.cpp clusters use it for RPC ports. Separate from the main `port_range`.
 - **Deployments on removed nodes.** A deployment whose node was removed from `nodes:` shows "node not configured",
@@ -58,8 +60,12 @@ All notable changes to DGXMM are documented in this file. The format is based on
 
 - **Node SSH key.** The SSH key for Docker-over-SSH on remote nodes (`node_ssh_key_file`, default
   `data/secrets/node_ssh_key`) grants root-equivalent Docker socket access on those nodes. Protect it with mode
-  0600. Remote engine API ports are published on the cluster IP only (point-to-point link), never `0.0.0.0`. RPC
-  and NCCL ports are on the cluster link only. See [security overview](docs/security/overview.md).
+  0600. Remote engine API ports are published on the cluster IP only (point-to-point link), never `0.0.0.0`; which
+  ports the cluster ranks listen on is listed in the [security overview](docs/security/overview.md), with the
+  `DOCKER-USER` rule that keeps other containers of the DGXMM host off the cluster link.
+- **Pinned SSH for Docker over SSH.** DGXMM writes the ssh client config for remote nodes to
+  `<data_dir>/ssh/config` (pinned `known_hosts`, the key, `StrictHostKeyChecking yes`, `BatchMode yes`) and the image's
+  `ssh` passes it explicitly, so docker-py's `ssh://` transport uses it too.
 
 ### Upgrade notes
 
@@ -71,8 +77,8 @@ All notable changes to DGXMM are documented in this file. The format is based on
 - The `node_ssh_key_file` (SSH key for remote nodes) must be readable by the user the DGXMM container runs as
   (set by `DGXMM_UID` in `.env`). Create it with mode 0600 and install its public key on each remote node. See
   [configuration](docs/configuration/index.md#node-ssh-key-and-known-hosts).
-- For llama.cpp clusters, build and load the RPC image on every node: `docker build -t dgxmm-llamacpp-rpc:61dbf49
-  deploy/llamacpp-rpc`, then `docker save dgxmm-llamacpp-rpc:61dbf49 | ssh user@node docker load` for each remote node.
+- For llama.cpp clusters, build and load the RPC image on every node: `docker build -t dgxmm-llamacpp-rpc:61dbf49-u1
+  deploy/llamacpp-rpc`, then `docker save dgxmm-llamacpp-rpc:61dbf49-u1 | ssh user@node docker load` for each remote node.
 
 
 ## [Unreleased] — On-demand models

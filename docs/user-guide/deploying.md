@@ -138,7 +138,13 @@ API; worker nodes run headless. Any rank exiting fails the whole deployment and 
 
 - Cluster deployments never get sleep mode, even when the model supports it for single deployments.
 - A "sleep" of a cluster deployment is actually a **stop** that frees every node.
-- The deployment detail page shows `sleep_capable: false` and labels the action as "sleep (stops all nodes)".
+- The deployment detail page shows `sleep_capable: false` and labels the action as "Sleep (stops all nodes)"; like
+  Stop, it asks for confirmation first.
+
+**Remote single deployments and sleep.** A vLLM deployment on a remote node gets no sleep mode unless
+`remote_dev_endpoints: true` is set (default off; see [configuration](../configuration/index.md#nodes)): sleep
+mode opens vLLM routes that do not check the engine key, on an address every container of the DGXMM host can
+reach. Its Sleep is then not offered.
 - The switch dialog does not offer a placement choice yet; switching placement requires stop and redeploy.
 
 **On-demand, schedules, watchdog and switch.** On-demand mode works for cluster deployments: the first request
@@ -173,7 +179,7 @@ restart DGXMM, deployments that were on that node:
 **Copying weights to a remote node.** When you deploy on a remote node (single or cluster), DGXMM checks that
 the model exists in that node's HF cache. If not, deploy is refused with `409 weights_missing` and a
 `copy_weights` action. The action creates a background copy job (shown on the Downloads page) that transfers
-the snapshot over the cluster link with rsync. For llama.cpp clusters, only the head node needs the GGUF
+the snapshot over the cluster link (tar over ssh). For llama.cpp clusters, only the head node needs the GGUF
 (workers receive tensors over RPC); for vLLM clusters, every node needs the full model. Once the copy
 completes, try deploying again.
 
