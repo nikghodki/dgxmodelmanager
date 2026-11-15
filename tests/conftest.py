@@ -213,5 +213,13 @@ def write_gguf(path, arch="qwen3", layers=36, hidden=4096, heads=32, kv=8, head_
             f.truncate(path.stat().st_size + pad_bytes)
     return path
 
+
+@pytest.fixture
+def fake_docker():
+    """A fresh FakeDockerClient for testing DockerController."""
+    from tests.fakes import FakeDockerClient
+    return FakeDockerClient()
+
+
 # Multi-node fixtures
 from tests.nodes_fixtures import *  # noqa: F401, F403

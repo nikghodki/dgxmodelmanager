@@ -204,6 +204,11 @@ class FakeContainers:
     def __init__(self, client):
         self.client = client
 
+    @property
+    def last_run_kwargs(self) -> dict:
+        """Return the kwargs from the most recent run() call."""
+        return self.client.run_calls[-1] if self.client.run_calls else {}
+
     def list(self, all=False, filters=None, sparse=False):
         self.client._maybe_raise()
         items = list(self.client._containers.values())
@@ -244,9 +249,16 @@ class FakeContainers:
             if self.client.helper_action:
                 self.client.helper_action(call)
             return FakeHelperContainer(self.client)
-        self.client.run_calls.append(dict(image=image, command=command, name=name, environment=environment,
-                                          labels=labels, network=network, volumes=volumes, ports=ports,
-                                          entrypoint=entrypoint, remove=remove, **kw))
+        call_kwargs = dict(image=image, command=command, name=name, environment=environment,
+                                          labels=labels, entrypoint=entrypoint, remove=remove, **kw)
+        # Only include network/volumes/ports if they were explicitly passed (not None from defaults)
+        if network is not None:
+            call_kwargs["network"] = network
+        if volumes is not None:
+            call_kwargs["volumes"] = volumes
+        if ports is not None:
+            call_kwargs["ports"] = ports
+        self.client.run_calls.append(call_kwargs)
         if remove:
             return self.client.oneshot_output.encode()
         if self.client.fail_run:

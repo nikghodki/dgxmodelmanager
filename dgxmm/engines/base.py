@@ -50,6 +50,12 @@ class ContainerSpec:
     # Files written into the running container right after it starts (path -> content), through `docker exec`
     # stdin into a tmpfs: never in the environment, the command line or `docker inspect`. Not part of repr().
     secret_files: dict[str, bytes] = field(default_factory=dict, repr=False)
+    # Multi-node cluster deployment (host networking, RDMA devices, resource limits)
+    network_mode: str | None = None                     # "host" for multi-node tensor parallel; incompatible with internal_network
+    devices: list[str] = field(default_factory=list)    # host device paths (e.g. "/dev/infiniband")
+    cap_add: list[str] = field(default_factory=list)    # capabilities to add (e.g. "IPC_LOCK")
+    ulimits: dict[str, tuple[int, int]] = field(default_factory=dict)  # name -> (soft, hard); -1 = unlimited
+    shm_size: str | None = None                         # shared memory size (e.g. "16g")
 
 
 @dataclass

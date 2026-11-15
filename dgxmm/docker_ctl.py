@@ -16,7 +16,7 @@ import docker.errors
 from docker.types import DeviceRequest
 from docker.types import Mount as DockerMount
 
-from dgxmm.engines.base import MANAGED_LABEL, ContainerSpec
+from dgxmm.engines.base import MANAGED_LABEL, ContainerSpec, SpecError
 
 log = logging.getLogger(__name__)
 INSTALL_LABEL = "dgxmm.install"  # per-install id (Settings.install_id), set by the deployer
@@ -224,16 +224,23 @@ class DockerController:
     def run(self, spec: ContainerSpec) -> str:
         if spec.labels.get(MANAGED_LABEL) != "true":
             raise PermissionError("refusing to create a container without the dgxmm.managed label")
+        if spec.network_mode == "host" and spec.internal_network:
+            raise SpecError("host_network_conflict", "network_mode=host is incompatible with internal_network=True")
         if spec.internal_network:
             install = spec.labels.get(INSTALL_LABEL)
             self.ensure_internal_network(spec.network, install_id=install)
         kwargs: dict = dict(image=spec.image, command=spec.command, name=spec.name, detach=True,
-                            environment=spec.environment, labels=spec.labels, network=spec.network,
+                            environment=spec.environment, labels=spec.labels,
                             volumes={m.host: {"bind": m.target, "mode": m.mode} for m in spec.mounts},
                             restart_policy={"Name": "no"})
+        # Host networking: no network attach, no port publish (network_mode replaces both)
+        if spec.network_mode:
+            kwargs["network_mode"] = spec.network_mode
+        else:
+            kwargs["network"] = spec.network
         if spec.entrypoint is not None:
             kwargs["entrypoint"] = spec.entrypoint
-        if spec.publish_bind:
+        if spec.publish_bind and not spec.network_mode:
             kwargs["ports"] = {f"{spec.port}/tcp": (spec.publish_bind, spec.port)}
         if spec.gpus:
             kwargs["device_requests"] = [DeviceRequest(count=-1, capabilities=[["gpu"]])]
@@ -254,6 +261,15 @@ class DockerController:
         if spec.mem_limit:
             kwargs["mem_limit"] = spec.mem_limit
             kwargs["memswap_limit"] = spec.mem_limit  # no swap on top of the limit
+        if spec.devices:
+            kwargs["devices"] = [f"{d}:{d}:rwm" for d in spec.devices]
+        if spec.cap_add:
+            kwargs["cap_add"] = list(spec.cap_add)
+        if spec.ulimits:
+            from docker.types import Ulimit
+            kwargs["ulimits"] = [Ulimit(name=name, soft=soft, hard=hard) for name, (soft, hard) in spec.ulimits.items()]
+        if spec.shm_size:
+            kwargs["shm_size"] = spec.shm_size
         try:
             cid = self.client.containers.run(**kwargs).id
         except Exception:
