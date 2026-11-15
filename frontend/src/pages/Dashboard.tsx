@@ -17,9 +17,11 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Progress } from "@/components/ui/progress";
 import { fmtBytes, fmtMs, fmtNum, fmtPct, GIB } from "@/format";
 import { useActionMutation } from "@/hooks/use-action-mutation";
+import { useNodes } from "@/hooks/use-nodes";
+import { isMultiNode } from "@/lib/placement";
 import { fleetKpis } from "@/lib/fleet";
 import { cn } from "@/lib/utils";
-import type { Deployment, HostInfo } from "@/types";
+import type { Budget, Deployment, HostInfo, NodeInfo } from "@/types";
 import { SwitchDialog } from "@/components/app/switch-dialog";
 
 export function Dashboard() {
@@ -32,21 +34,23 @@ export function Dashboard() {
   const live = useQueries({ queries: ready.map((d) => ({ queryKey: ["live", d.id], queryFn: () => api<any[]>(`/deployments/${d.id}/metrics?window=live`), staleTime: Infinity })) });
   const k = fleetKpis(live.map((q) => q.data ?? []));
   const b = host.data?.budget;
+  const nodes = useNodes({ refetchInterval: 10000 });
+  const multi = isMultiNode(nodes.data);
 
   if (host.isLoading) return <PageSkeleton />;
-  const freeTone = !b ? "" : b.free_for_new < 0 ? "text-status-critical" : b.free_for_new < 8 * GIB ? "text-status-warning" : "text-status-good";
 
   return (
     <div className="space-y-6">
       <PageHeader title="Dashboard" description="Live memory, throughput and deployments on this DGX Spark." />
       <ErrorState error={host.error || deps.error} onRetry={() => { host.refetch(); deps.refetch(); }} />
 
-      {b && (
+      {multi && <NodesMemoryCard nodes={nodes.data!} admin={admin} />}
+      {b && !multi && (
         <Card className="shadow-card">
           <CardContent className="grid grid-cols-1 gap-6 p-6 md:grid-cols-[minmax(0,1fr)_minmax(0,2fr)] md:items-center">
             <div>
               <div className="text-sm text-muted-foreground">Free for new deployments</div>
-              <div className={cn("mt-1 text-4xl font-semibold tabular-nums tracking-tight", freeTone)}>{fmtBytes(b.free_for_new)}</div>
+              <div className={cn("mt-1 text-4xl font-semibold tabular-nums tracking-tight", freeTone(b))}>{fmtBytes(b.free_for_new)}</div>
               <div className="mt-1 text-xs text-muted-foreground">of {fmtBytes(b.total)} · {fmtBytes(b.margin)} safety margin kept</div>
               <div className="mt-4 flex flex-wrap gap-2">
                 {admin && <Button asChild size="sm"><Link to="/deploy"><Plus className="mr-1 h-4 w-4" />Deploy model</Link></Button>}
@@ -88,7 +92,7 @@ export function Dashboard() {
           <EmptyState icon={Rocket} title="Nothing deployed yet" description="Deploy a downloaded model to start serving it through LiteLLM."
             action={admin && <Button asChild size="sm"><Link to="/deploy">Deploy a model</Link></Button>} />
         ) : (
-          <DeploymentsTable deployments={deps.data ?? []} loading={deps.isLoading} isAdmin={admin}
+          <DeploymentsTable deployments={deps.data ?? []} loading={deps.isLoading} isAdmin={admin} nodes={nodes.data}
             onSwitch={(d) => setDialog({ mode: "switch", d })} onReconfigure={(d) => setDialog({ mode: "reconfigure", d })} />
         )}
       </section>
@@ -103,6 +107,38 @@ export function Dashboard() {
 
       {dialog && <SwitchDialog mode={dialog.mode} deployment={dialog.d} onClose={() => setDialog(null)} />}
     </div>
+  );
+}
+
+const freeTone = (b: Budget) => b.free_for_new < 0 ? "text-status-critical" : b.free_for_new < 8 * GIB ? "text-status-warning" : "text-status-good";
+
+/** More than one node: one memory bar per node (a cluster deployment's share appears on each node it uses: every
+ *  node's budget lists its rank there). */
+function NodesMemoryCard({ nodes, admin }: { nodes: NodeInfo[]; admin: boolean }) {
+  return (
+    <Card className="shadow-card">
+      <CardHeader className="flex flex-row flex-wrap items-center justify-between gap-2 space-y-0 pb-2">
+        <CardTitle className="text-sm">Unified memory per node</CardTitle>
+        <div className="flex flex-wrap gap-2">
+          {admin && <Button asChild size="sm"><Link to="/deploy"><Plus className="mr-1 h-4 w-4" />Deploy model</Link></Button>}
+          <Button asChild size="sm" variant="outline"><Link to="/planner"><Puzzle className="mr-1 h-4 w-4" />Plan combinations</Link></Button>
+        </div>
+      </CardHeader>
+      <CardContent className="space-y-6">
+        {nodes.map((n) => (
+          <section key={n.id} aria-label={`Memory on ${n.label}`} className="min-w-0 space-y-2">
+            <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
+              <span className="flex items-center gap-2 text-sm font-semibold">{n.label}
+                {(n.stale || !n.reachable) && <Badge variant="outline" className="text-[11px] text-status-warning">Node unavailable</Badge>}</span>
+              {n.budget && <span className="text-xs text-muted-foreground tabular-nums">
+                <span className={cn("font-semibold", freeTone(n.budget))}>{fmtBytes(n.budget.free_for_new)}</span> free for new of {fmtBytes(n.budget.total)}
+              </span>}
+            </div>
+            {n.budget ? <MemoryBar budget={n.budget} node={n.label} /> : <p className="text-xs text-muted-foreground">No memory reading from this node yet.</p>}
+          </section>
+        ))}
+      </CardContent>
+    </Card>
   );
 }
 

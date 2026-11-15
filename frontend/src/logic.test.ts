@@ -84,3 +84,13 @@ describe("submitState", () => {
     expect(submitState(fits, [], true, "reconfigure").label).toBe("Working… this can take minutes");
   });
 });
+
+describe("deploymentActions on a cluster", () => {
+  it("offers its sleep (a stop of every rank) by its sleep_label, and Start once slept", () => {
+    expect(deploymentActions({ state: "ready", sleep_capable: false, sleep_label: "sleep (stops all nodes)" }, true)).toContain("sleep");
+    expect(deploymentActions({ state: "ready", sleep_capable: false }, true)).not.toContain("sleep");
+    const stopped = deploymentActions({ state: "stopped", sleep_capable: false, sleep_label: "sleep (stops all nodes)" }, true);
+    expect(stopped).toContain("start");
+    expect(stopped).not.toContain("wake");
+  });
+});

@@ -13,8 +13,9 @@ import { useActionMutation } from "@/hooks/use-action-mutation";
 import { nameFixHref, takenHolder } from "@/lib/litellm";
 import { SYSTEM_REMOVE_TEXT, deploymentActions, queueShort } from "@/logic";
 import { ondemandBadge } from "@/lib/ondemand";
+import { showRunsOn, sleepLabel } from "@/lib/placement";
 import { useLive } from "@/stream";
-import type { Deployment } from "@/types";
+import type { Deployment, NodeInfo } from "@/types";
 import { ConfirmDialog } from "./confirm-dialog";
 import { DataTable } from "./data-table";
 import { SystemBadge } from "./decision-chip";
@@ -36,9 +37,11 @@ export function DeploymentStateBadge({ d, className }: { d: Deployment; classNam
 
 type Pending = { kind: "stop" | "remove"; d: Deployment } | null;
 
-export function DeploymentsTable({ deployments, isAdmin, loading, searchable, onSwitch, onReconfigure }: {
+export function DeploymentsTable({ deployments, isAdmin, loading, searchable, onSwitch, onReconfigure, nodes }: {
   deployments: Deployment[]; isAdmin: boolean; loading?: boolean; searchable?: boolean;
   onSwitch: (d: Deployment) => void; onReconfigure: (d: Deployment) => void;
+  /** GET /nodes: with more than one node (or a deployment off the local node) a Runs on column is shown. */
+  nodes?: NodeInfo[];
 }) {
   const nav = useNavigate();
   const [pending, setPending] = useState<Pending>(null);
@@ -58,6 +61,8 @@ export function DeploymentsTable({ deployments, isAdmin, loading, searchable, on
     { accessorKey: "model_ref", header: "Model", cell: ({ row }) => (
       <span title={row.original.model_ref} className="block max-w-[26ch] truncate text-muted-foreground">{shortRef(row.original.model_ref)}</span>) },
     { accessorKey: "engine", header: "Engine", meta: { hideOnMobile: true }, cell: ({ getValue }) => engineLabel(getValue()) },
+    ...(showRunsOn(nodes, deployments) ? [{ id: "runs_on", header: "Runs on", accessorFn: (d: Deployment) => d.placement_label ?? "",
+      cell: ({ row }: { row: { original: Deployment } }) => <span className="whitespace-nowrap text-xs">{row.original.placement_label ?? "—"}</span> } as ColumnDef<Deployment, any>] : []),
     { accessorKey: "state", header: "State", cell: ({ row }) => (
       row.original.startup_queue ? (
         <span className="flex flex-col items-start gap-0.5">
@@ -99,7 +104,7 @@ export function DeploymentsTable({ deployments, isAdmin, loading, searchable, on
         </DropdownMenuTrigger>
         <DropdownMenuContent align="end" className="w-48">
           <DropdownMenuItem onSelect={() => nav(`/deployments/${d.id}`)}><ExternalLink className="mr-2 h-4 w-4" />Open</DropdownMenuItem>
-          {acts.includes("sleep") && <DropdownMenuItem onSelect={() => act.mutate({ d, action: "sleep" })}><Moon className="mr-2 h-4 w-4" />Sleep</DropdownMenuItem>}
+          {acts.includes("sleep") && <DropdownMenuItem onSelect={() => act.mutate({ d, action: "sleep" })}><Moon className="mr-2 h-4 w-4" />{sleepLabel(d)}</DropdownMenuItem>}
           {acts.includes("wake") && <DropdownMenuItem onSelect={() => act.mutate({ d, action: "wake" })}><Sun className="mr-2 h-4 w-4" />Wake</DropdownMenuItem>}
           {acts.includes("start") && <DropdownMenuItem onSelect={() => act.mutate({ d, action: "start" })}><Play className="mr-2 h-4 w-4" />Start</DropdownMenuItem>}
           {acts.includes("manage") && <DropdownMenuItem onSelect={() => nav("/decision-model")}><BrainCircuit className="mr-2 h-4 w-4" />Decision model page</DropdownMenuItem>}
@@ -117,7 +122,7 @@ export function DeploymentsTable({ deployments, isAdmin, loading, searchable, on
     <>
       <DataTable columns={columns} data={deployments} getRowId={(d) => String(d.id)} loading={loading} rowActions={menu}
         searchPlaceholder={searchable ? "Search deployments" : undefined}
-        searchText={(d) => `${d.name} ${d.model_ref} ${d.engine} ${d.state} ${d.model_name ?? ""}`}
+        searchText={(d) => `${d.name} ${d.model_ref} ${d.engine} ${d.state} ${d.model_name ?? ""} ${d.placement_label ?? ""}`}
         mobileTitle={(d) => <div className="flex items-center gap-2"><Link to={`/deployments/${d.id}`} className="hover:underline">{d.name}</Link>{d.system && <SystemBadge />}</div>} />
       <ConfirmDialog open={!!pending} onOpenChange={(o) => !o && setPending(null)}
         title={pending?.kind === "stop" ? `Stop ${pending?.d.name}?` : `Remove ${pending?.d.name}?`}

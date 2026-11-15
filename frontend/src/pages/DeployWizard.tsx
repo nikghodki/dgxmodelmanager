@@ -25,12 +25,16 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { engineLabel, fmtBytes } from "@/format";
 import { useActionMutation } from "@/hooks/use-action-mutation";
 import { ModelNameTaken } from "@/components/app/model-name-taken";
+import { CopyWeightsPrompt } from "@/components/app/copy-weights";
+import { PlacementChooser } from "@/components/app/placement-chooser";
+import { useNodes } from "@/hooks/use-nodes";
+import { isMultiNode, placementKey } from "@/lib/placement";
 import { aliasProblem, isModelNameTaken, suggestAlias } from "@/lib/litellm";
 import { changedKeys, defaultGoal, GOALS, REPO_ID } from "@/lib/advice";
 import { DEFAULT_IDLE_MINUTES, fmtMinutes, minutesToSeconds, parseIdleMinutes } from "@/lib/ondemand";
 import { submitState } from "@/logic";
 import { ENGINE_FIELDS } from "@/engineFields";
-import type { Artifact, DeployGoal, DeploymentMode, EngineInfo, LiteLLMSettings, PlanAction, Preview } from "@/types";
+import type { Artifact, DeployGoal, DeploymentMode, EngineInfo, LiteLLMSettings, PlacementOptionInfo, PlanAction, Preview } from "@/types";
 
 const slug = (ref: string) => ref.split("/").pop()!.toLowerCase().replace(/\.gguf$/, "").replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40) || "model";
 
@@ -123,23 +127,53 @@ function DeployWizardPage() {
   const parsers = useParserSuggestions({ modelRef: artifact ? ref : "", engine, config, setConfig, onUserEdit: () => setPlan(null) });
 
   const body = useMemo(() => ({ engine, model_ref: ref, config, priority }), [engine, ref, config, priority]);
+
+  // Where to run (only with more than one node): the placement options for the current request, the recommended
+  // one pre-selected unless the user picked another that is still offered.
+  const nodes = useNodes();
+  const multiNode = isMultiNode(nodes.data);
+  const [options, setOptions] = useState<PlacementOptionInfo[] | null>(null);
+  const [optionsErr, setOptionsErr] = useState<unknown>(null);
+  const [placementPick, setPlacementPick] = useState<string | null>(null);
+  useEffect(() => {
+    if (!multiNode || !engine || !ref) { setOptions(null); return; }
+    let live = true;
+    const t = setTimeout(async () => {
+      try {
+        // the name is ignored by placement-options; a valid one from the model keeps typing in the name field free
+        const o = await api<PlacementOptionInfo[]>("/deployments/placement-options", { method: "POST", body: { ...body, name: slug(ref) } });
+        if (live) { setOptions(o); setOptionsErr(null); }
+      } catch (e) { if (live) { setOptionsErr(e); setOptions(null); } }
+    }, 350);
+    return () => { live = false; clearTimeout(t); };
+  }, [body, engine, ref, multiNode]);
+  const chosen = options?.find((o) => placementKey(o.placement) === placementPick) ?? options?.find((o) => o.recommended) ?? null;
+  const placement = multiNode && chosen ? chosen.placement : null;
+  const placementBlocked = multiNode && (!chosen || chosen.reason === "node_stale");
+
+  // the first preview waits for the options (it follows the pre-selected placement); later ones run on each change
+  // of the request or the placement, never again just because the options were re-read
+  const optionsReady = !multiNode || options !== null || optionsErr !== null;
+  const previewBody = useMemo(() => (placement ? { ...body, placement } : body), [body, placement?.kind, placement?.nodes.join(",")]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => {
     if (!engine || !ref) return;
+    if (!optionsReady) return;
     let live = true; // a slower, older preview must not overwrite the current one
     const t = setTimeout(async () => {
       try {
-        const p = await api<Preview>("/deployments/preview", { method: "POST", body });
+        const p = await api<Preview>("/deployments/preview", { method: "POST", body: previewBody });
         if (live) { setPreview(p); setPreviewErr(null); }
       } catch (e) { if (live) { setPreviewErr(e); setPreview(null); } }
     }, 350);
     return () => { live = false; clearTimeout(t); };
-  }, [body, engine, ref]);
+  }, [previewBody, engine, ref, optionsReady]);
 
   const actions = plan?.actions ?? [];
   const deploy = useActionMutation(() => api<{ id: number }>("/deployments", {
     method: "POST", body: {
       name, engine, model_ref: ref, config, priority, alias: alias.trim() || null, actions, mode,
       idle_timeout_s: mode === "on_demand" && idle !== idleDefault ? minutesToSeconds(parseIdleMinutes(idle)!) : null,
+      ...(placement ? { placement } : {}),
     },
   }), {
     success: (d: any) => `Deploying ${name} (id ${d.id})`,
@@ -159,7 +193,12 @@ function DeployWizardPage() {
 
   const aliasErr = aliasProblem(alias);
   const baseSubmit = submitState(preview, actions, deploy.isPending, "deploy");
-  const submit = { ...baseSubmit, disabled: baseSubmit.disabled || !!aliasErr || idleInvalid(mode, idle) };
+  // a placement that does not fit needs a plan, like a preview that does not fit (its preview says so too, unless
+  // memory changed since the options were read)
+  const submit = deploy.isPending ? baseSubmit
+    : placementBlocked ? { disabled: true, label: "Choose where to run" }
+    : multiNode && chosen && !chosen.fits && actions.length === 0 ? { disabled: true, label: "Choose a plan to fit" }
+    : { ...baseSubmit, disabled: baseSubmit.disabled || !!aliasErr || idleInvalid(mode, idle) };
   const memoryChanged = deploy.error instanceof ApiError && deploy.error.code === "insufficient_memory";
 
   const check = (
@@ -175,6 +214,7 @@ function DeployWizardPage() {
           }} />
       )}
       {memoryChanged && <p className="text-xs text-status-critical">Memory changed since the preview — choose a plan again.</p>}
+      <CopyWeightsPrompt error={deploy.error} nodes={nodes.data} />
     </div>
   );
 
@@ -246,6 +286,15 @@ function DeployWizardPage() {
                 )}
                 <Button variant="link" className="mt-3 h-auto p-0 text-xs" onClick={() => setAdvanced(!advanced)}>{advanced ? "Hide" : "Show"} advanced settings</Button>
               </Section>
+              {multiNode && (
+                <Section n={4} title="Where to run" description="One DGX, or the DGXs together as a cluster for a model too big for one. The memory check follows your choice.">
+                  <ErrorState error={optionsErr} />
+                  {options ? (
+                    <PlacementChooser options={options} nodes={nodes.data} selected={chosen ? placementKey(chosen.placement) : null}
+                      onSelect={(o) => { setPlacementPick(placementKey(o.placement)); setPlan(null); }} />
+                  ) : !optionsErr && <p className="text-sm text-muted-foreground">Checking where it fits…</p>}
+                </Section>
+              )}
             </>
           )}
         </div>

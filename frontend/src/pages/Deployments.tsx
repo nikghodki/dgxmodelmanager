@@ -8,6 +8,7 @@ import { DeploymentsTable } from "@/components/app/deployments-table";
 import { PageHeader } from "@/components/app/page-header";
 import { EmptyState, ErrorState } from "@/components/app/states";
 import { Button } from "@/components/ui/button";
+import { useNodes } from "@/hooks/use-nodes";
 import { cn } from "@/lib/utils";
 import type { Deployment } from "@/types";
 import { SwitchDialog } from "@/components/app/switch-dialog";
@@ -26,6 +27,7 @@ export function Deployments() {
   const [facet, setFacet] = useState("all");
   const [dialog, setDialog] = useState<{ mode: "switch" | "reconfigure"; d: Deployment } | null>(null);
   const deps = useQuery({ queryKey: ["deployments"], queryFn: () => api<Deployment[]>("/deployments") });
+  const nodes = useNodes();
   const all = deps.data ?? [];
   const counts = useMemo(() => Object.fromEntries(FACETS.map((f) => [f.key, all.filter((d) => f.match(d.state)).length])), [all]);
   const shown = all.filter((d) => FACETS.find((f) => f.key === facet)!.match(d.state));
@@ -46,7 +48,7 @@ export function Deployments() {
       {deps.data && all.length === 0 ? (
         <EmptyState icon={Rocket} title="No deployments yet" action={admin && <Button asChild size="sm"><Link to="/deploy">Deploy a model</Link></Button>} />
       ) : (
-        <DeploymentsTable deployments={shown} loading={deps.isLoading} isAdmin={admin} searchable
+        <DeploymentsTable deployments={shown} loading={deps.isLoading} isAdmin={admin} searchable nodes={nodes.data}
           onSwitch={(d) => setDialog({ mode: "switch", d })} onReconfigure={(d) => setDialog({ mode: "reconfigure", d })} />
       )}
       {dialog && <SwitchDialog mode={dialog.mode} deployment={dialog.d} onClose={() => setDialog(null)} />}

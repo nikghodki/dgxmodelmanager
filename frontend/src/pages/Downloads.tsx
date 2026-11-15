@@ -13,12 +13,19 @@ import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
 import { fmtBytes } from "@/format";
 import { useActionMutation } from "@/hooks/use-action-mutation";
+import { useNodes } from "@/hooks/use-nodes";
+import { isMultiNode, nodeLabel } from "@/lib/placement";
 import { etaSeconds, fmtDuration, updateRates, type Rate } from "@/lib/progress";
 
 export function Downloads() {
   const admin = useIsAdmin();
   const q = useQuery({ queryKey: ["downloads"], queryFn: () => api<any[]>("/downloads") });
   const cancel = useActionMutation((id: number) => api(`/downloads/${id}/cancel`, { method: "POST" }), { success: "Cancel requested", invalidate: [["downloads"]] });
+  const nodes = useNodes();
+  const multi = isMultiNode(nodes.data);
+  // a weight copy (kind "copy") names its target node; a download names its node once several are configured
+  const where = (d: any) => d.kind === "copy" ? `Copy to ${nodeLabel(nodes.data, d.node)}`
+    : multi ? `Download to ${nodeLabel(nodes.data, d.node)}` : null;
   const rates = useRef(new Map<number, Rate>());
   useMemo(() => {
     if (q.data && q.dataUpdatedAt) {
@@ -26,7 +33,7 @@ export function Downloads() {
     }
   }, [q.data, q.dataUpdatedAt]);
   const columns = useMemo<ColumnDef<any, any>[]>(() => [
-    { accessorKey: "repo_id", header: "Repository", cell: ({ row }) => <div className="min-w-0"><div className="max-w-[40ch] truncate font-medium" title={row.original.repo_id}>{row.original.repo_id}</div><div className="text-xs text-muted-foreground">{row.original.files.length} files</div></div> },
+    { accessorKey: "repo_id", header: "Repository", cell: ({ row }) => <div className="min-w-0"><div className="max-w-[40ch] truncate font-medium" title={row.original.repo_id}>{row.original.repo_id}</div><div className="text-xs text-muted-foreground">{where(row.original) && <>{where(row.original)} · </>}{row.original.files.length} files</div></div> },
     { id: "progress", header: "Progress", enableSorting: false, cell: ({ row }) => {
       const d = row.original;
       const pct = d.bytes_total ? Math.min(100, (d.bytes_done / d.bytes_total) * 100) : 0;
@@ -36,7 +43,7 @@ export function Downloads() {
           {d.state === "running" && <span>{r?.bps ? `${fmtBytes(r.bps)}/s · ${fmtDuration(etaSeconds(r, d.bytes_total - d.bytes_done))}` : "…"}</span>}</div></div>;
     } },
     { accessorKey: "state", header: "State", cell: ({ row }) => <div className="space-y-1"><StatusBadge state={row.original.state} />{row.original.error && <p className="max-w-sm break-words text-xs text-status-critical">{row.original.error}</p>}</div> },
-  ], []); // eslint-disable-line react-hooks/exhaustive-deps
+  ], [nodes.data]); // eslint-disable-line react-hooks/exhaustive-deps
   return (
     <div className="space-y-4">
       <PageHeader title="Downloads" description="Cancelling takes effect after the current file. Interrupted downloads are marked failed after a restart." />

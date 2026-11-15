@@ -6,12 +6,12 @@ import { fmtBytes } from "@/format";
 import { memorySegments } from "@/lib/memory";
 import type { Budget } from "@/types";
 
-export function MemoryBar({ budget, compact = false }: { budget: Budget; compact?: boolean }) {
+export function MemoryBar({ budget, compact = false, node }: { budget: Budget; compact?: boolean; /** a node label: "... on <node>" */ node?: string }) {
   const { segments, overcommitted } = memorySegments(budget);
   const [asTable, setAsTable] = useState(false);
   return (
     <div className="space-y-3">
-      <div className="flex h-4 w-full gap-[2px]" role="img" aria-label="Unified memory usage">
+      <div className="flex h-4 w-full gap-[2px]" role="img" aria-label={node ? `Unified memory usage on ${node}` : "Unified memory usage"}>
         {segments.filter((s) => s.bytes > 0).map((s) => (
           <Tooltip key={s.key}>
             <TooltipTrigger asChild>

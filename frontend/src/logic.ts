@@ -42,7 +42,7 @@ export type DeploymentAction = "open" | "manage" | "sleep" | "wake" | "switch" |
  * model) is managed on the Decision model page ("manage"): it is never switched or reconfigured, it starts only by
  * enabling the decision model there, and removing it also turns the decision model off (the backend enforces all three).
  */
-export function deploymentActions(d: { state: string; sleep_capable: boolean; system?: boolean }, isAdmin: boolean): DeploymentAction[] {
+export function deploymentActions(d: { state: string; sleep_capable: boolean; system?: boolean; sleep_label?: string | null }, isAdmin: boolean): DeploymentAction[] {
   const out: DeploymentAction[] = ["open"];
   if (!isAdmin) return out;
   if (d.system) {
@@ -51,7 +51,8 @@ export function deploymentActions(d: { state: string; sleep_capable: boolean; sy
     if (canRemove(d.state)) out.push("remove");
     return out;
   }
-  if (d.state === "ready" && d.sleep_capable) out.push("sleep");
+  // a cluster: "sleep" may stop every rank (its sleep_label says so); a wake of a slept cluster is a Start
+  if (d.state === "ready" && (d.sleep_capable || !!d.sleep_label)) out.push("sleep");
   if (d.state === "sleeping") out.push("wake");
   if (d.state === "ready" || d.state === "sleeping") out.push("switch");
   if (["ready", "sleeping", "stopped", "failed"].includes(d.state)) out.push("reconfigure");

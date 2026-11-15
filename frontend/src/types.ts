@@ -102,6 +102,30 @@ export interface Deployment {
   pending_mode?: DeploymentMode | null;
   /** On-demand controller status (on-demand deployments only). */
   ondemand?: OnDemandStatus | null;
+  /** Where it runs: one node, or several nodes as one cluster (head first). */
+  placement?: Placement;
+  /** e.g. "dgx-2", "dgx-1 + dgx-2 (cluster)" (the local node's label on a single-node install). */
+  placement_label?: string;
+  /** Clusters only: what "sleep" does to it ("sleep (stops all nodes)" while sleep fails across nodes). */
+  sleep_label?: string | null;
+  /** Clusters: each rank's node, role and status (no container ids or ports); [] for a single-node deployment. */
+  rank_summary?: RankSummary[];
+}
+export interface Placement { kind: "single" | "cluster"; nodes: string[] }
+export interface RankSummary { rank: number; node: string; node_label: string; role: "head" | "worker"; status: string }
+/** GET /nodes: every configured node (config order; a single-node install: just the local node). */
+export interface NodeInfo {
+  id: string; label: string; remote: boolean; reachable: boolean;
+  /** No recent memory reading: new deployments are refused there. */
+  stale: boolean;
+  /** Its memory budget as GET /host serialises it; null for a remote node never sampled. */
+  budget: Budget | null;
+}
+export type PlacementReason = "fits" | "too_big_for_one_node" | "insufficient_memory" | "node_stale";
+/** POST /deployments/placement-options: one per node, plus the cluster; at most one is recommended. */
+export interface PlacementOptionInfo {
+  placement: Placement; label: string; per_node: Record<string, number>; free: Record<string, number>;
+  fits: boolean; recommended: boolean; reason: PlacementReason;
 }
 export type DeploymentMode = "on_demand" | "always_on";
 export interface OnDemandStatus {

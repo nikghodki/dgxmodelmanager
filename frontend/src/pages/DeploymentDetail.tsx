@@ -25,8 +25,10 @@ import { useActionMutation } from "@/hooks/use-action-mutation";
 import { benchmarkSeries, plausibleRows, readingBadge } from "@/lib/benchmarks";
 import { estimateParts } from "@/lib/estimate";
 import { SYSTEM_REMOVE_TEXT, adviceApplicable, deploymentActions } from "@/logic";
+import { useNodes } from "@/hooks/use-nodes";
+import { rankBadge, showRunsOn, sleepLabel } from "@/lib/placement";
 import { useLive } from "@/stream";
-import type { Deployment, Workload } from "@/types";
+import type { Deployment, RankSummary, Workload } from "@/types";
 import { SwitchDialog } from "@/components/app/switch-dialog";
 import { DecisionChip, SystemBadge } from "@/components/app/decision-chip";
 import { DiagnosisCard, useDiagnosis } from "@/components/app/diagnosis-card";
@@ -182,6 +184,36 @@ function Benchmarks({ d }: { d: Deployment }) {
   );
 }
 
+/** A cluster's ranks: node, head / worker and the rank container's state (R15: no container ids or ports). */
+function RanksCard({ ranks, className }: { ranks: RankSummary[]; className?: string }) {
+  return (
+    <Card className={`min-w-0 shadow-card ${className ?? ""}`}>
+      <CardHeader className="pb-2"><CardTitle id="ranks-title" className="text-sm">Ranks</CardTitle>
+        <CardDescription className="text-xs">One container per node; the head serves the API.</CardDescription></CardHeader>
+      <CardContent className="overflow-x-auto">
+        <table aria-labelledby="ranks-title" className="w-full text-sm">
+          <thead><tr className="border-b text-left text-xs uppercase tracking-wider text-muted-foreground">
+            {["Rank", "Node", "Role", "State"].map((h) => <th key={h} className="py-2 pr-4 font-medium">{h}</th>)}
+          </tr></thead>
+          <tbody>
+            {ranks.map((r) => {
+              const b = rankBadge(r.status);
+              return (
+                <tr key={r.rank} className="border-b last:border-0">
+                  <td className="py-2 pr-4 tabular-nums">{r.rank}</td>
+                  <td className="py-2 pr-4">{r.node_label}</td>
+                  <td className="py-2 pr-4 text-muted-foreground">{r.role}</td>
+                  <td className="py-2 pr-4"><StatusBadge state={b.state} label={b.label} /></td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </CardContent>
+    </Card>
+  );
+}
+
 function LogsSheet({ id, open, onOpenChange }: { id: number; open: boolean; onOpenChange: (o: boolean) => void }) {
   const q = useQuery({ queryKey: ["logs", id], queryFn: () => api<{ logs: string }>(`/deployments/${id}/logs?tail=500`), enabled: open });
   const pre = useRef<HTMLPreElement>(null);
@@ -207,6 +239,7 @@ export function DeploymentDetail() {
   const admin = useIsAdmin();
   const nav = useNavigate();
   const dep = useQuery({ queryKey: ["deployment", id], queryFn: () => api<Deployment>(`/deployments/${id}`) });
+  const nodes = useNodes();
   const litellm = useDeploymentLiteLLM(id);
   const diagnosis = useDiagnosis(id).data?.diagnosis ?? null;
   const [logs, setLogs] = useState(false);
@@ -243,9 +276,9 @@ export function DeploymentDetail() {
     <div className="space-y-6">
       <PageHeader
         title={<span className="flex items-center gap-3">{d.name}<DeploymentStateBadge d={d} />{d.system && <SystemBadge />}</span>}
-        description={<span className="break-all">{d.model_ref} · {engineLabel(d.engine)}</span>}
+        description={<span className="break-all">{d.model_ref} · {engineLabel(d.engine)}{d.placement_label && showRunsOn(nodes.data, [d]) && <> · runs on {d.placement_label}</>}</span>}
         actions={<>
-          {acts.includes("sleep") && <Button variant="outline" size="sm" disabled={busy} onClick={() => act.mutate("sleep")}>{icon("sleep", Moon)}Sleep</Button>}
+          {acts.includes("sleep") && <Button variant="outline" size="sm" disabled={busy} onClick={() => act.mutate("sleep")}>{icon("sleep", Moon)}{sleepLabel(d)}</Button>}
           {acts.includes("wake") && <Button variant="outline" size="sm" disabled={busy} onClick={() => act.mutate("wake")}>{icon("wake", Sun)}Wake</Button>}
           {acts.includes("start") && <Button size="sm" disabled={busy} onClick={() => act.mutate("start")}>{icon("start", Play)}Start</Button>}
           {acts.includes("manage") && <Button asChild variant="outline" size="sm"><Link to="/decision-model"><BrainCircuit className="mr-1 h-4 w-4" />Decision model page</Link></Button>}
@@ -298,6 +331,7 @@ export function DeploymentDetail() {
           <DeploymentSchedulesCard deployment={d} className="lg:col-span-3" />
           <ApiAccessCard d={d} info={litellm.data} loading={litellm.isLoading} error={litellm.error} />
           <DeploymentModeCard d={d} admin={admin} />
+          {!!d.rank_summary?.length && <RanksCard ranks={d.rank_summary} className="lg:col-span-3" />}
           <Card className="min-w-0 shadow-card">
             <CardHeader className="pb-2"><CardTitle className="text-sm">Memory</CardTitle>
               <CardDescription className="text-xs">confidence: {(d.estimate as any)?.confidence ?? "—"}</CardDescription></CardHeader>
