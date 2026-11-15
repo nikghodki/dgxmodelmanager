@@ -35,6 +35,29 @@ publish_bind: 127.0.0.1       # host interface engine ports are published on (ke
                               # clients should go through LiteLLM or the DGXMM network)
 # engine_base_host: null      # null = DGXMM reaches engines by container name on docker_network;
                               # set a hostname/IP to reach them via published ports instead
+
+# --- Multi-node configuration (optional) ---------------------------------------
+# By default DGXMM runs on a single node (implicit local node). To deploy models
+# across multiple nodes, list them here. Exactly one must be local (unix:// URL,
+# id "local"); others are remote (ssh:// URL).
+# nodes:
+#   - id: local
+#     label: dgx-1
+#     docker_url: unix:///var/run/docker.sock
+#   - id: dgx-2
+#     label: dgx-2
+#     docker_url: ssh://dgxuser@192.0.2.2
+#     cluster_ip: 192.0.2.2            # IP for inter-node communication (NCCL, published ports)
+#     ssh_user: dgxuser                # SSH user for docker context
+#     known_hosts: "192.0.2.2 ssh-ed25519 AAAA..."  # SSH host key
+#     hf_cache_host: /home/dgxuser/.cache/huggingface  # HF cache on this node
+#     publish_bind: 192.0.2.2          # defaults to cluster_ip
+#     nccl:                            # NCCL network config for multi-node training
+#       ib_hca: rocep1s0f0,roceP2p1s0f0
+#       socket_ifname: enp1s0f0np0
+# remote_probe_interval_s: 5.0         # interval for checking remote node health
+# node_ssh_key_file: /run/secrets/node_ssh_key  # SSH key for remote docker contexts
+
 startup_timeout_s: 900        # seconds an engine may take to become ready before it is failed
 max_concurrent_startups: 1    # engines starting/loading at once; others wait in state "queued" (vLLM's start-up
                               # memory profile breaks if another engine allocates/frees memory meanwhile). 0 = no limit

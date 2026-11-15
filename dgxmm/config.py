@@ -69,6 +69,29 @@ class Mount(BaseModel):
         return _expand_host(v)
 
 
+
+LOCAL_NODE_ID = "local"
+
+
+class NcclConfig(BaseModel):
+    """NCCL network configuration for multi-node training."""
+    ib_hca: str
+    socket_ifname: str
+
+
+class NodeConfig(BaseModel):
+    """Configuration for a compute node (local or remote)."""
+    id: str
+    label: str
+    docker_url: str
+    cluster_ip: str | None = None
+    publish_bind: str | None = None
+    hf_cache_host: str | None = None
+    ssh_user: str | None = None
+    known_hosts: str | None = None
+    nccl: NcclConfig | None = None
+
+
 def _default_hf_cache() -> PathMapping:
     return PathMapping(host="~/.cache/huggingface", local="/data/hf")
 
@@ -201,6 +224,9 @@ class Settings(BaseModel):
     session_ttl_s: int = 12 * 3600
     secure_cookies: str = "auto"  # auto | always | never
     trusted_proxies: str = "127.0.0.1,::1"  # IPs/CIDRs that may set X-Forwarded-For
+    nodes: list[NodeConfig] = []
+    remote_probe_interval_s: float = Field(5.0, gt=0)
+    node_ssh_key_file: str = "/run/secrets/node_ssh_key"
 
     @field_validator("litellm_public_url")
     @classmethod
@@ -280,6 +306,37 @@ class Settings(BaseModel):
             raise ValueError("secure_cookies must be auto, always or never")
         if not self.dgxmm_internal_url:
             self.dgxmm_internal_url = "http://dgxmm:8090" + self.base_path.rstrip("/")
+        
+        # Validate nodes configuration
+        if self.nodes:
+            local_nodes = [n for n in self.nodes if n.docker_url.startswith("unix://")]
+            remote_nodes = [n for n in self.nodes if n.docker_url.startswith("ssh://")]
+            
+            if len(local_nodes) != 1:
+                raise ValueError("nodes must contain exactly one local node (docker_url starting with unix://)")
+            
+            if local_nodes[0].id != LOCAL_NODE_ID:
+                raise ValueError(f"local node must have id '{LOCAL_NODE_ID}'")
+            
+            # Check for duplicate IDs
+            ids = [n.id for n in self.nodes]
+            if len(ids) != len(set(ids)):
+                raise ValueError("node IDs must be unique")
+            
+            # Validate remote nodes
+            for node in remote_nodes:
+                if not node.cluster_ip:
+                    raise ValueError(f"remote node {node.id} requires cluster_ip")
+                if not node.known_hosts:
+                    raise ValueError(f"remote node {node.id} requires known_hosts")
+                # Default publish_bind to cluster_ip for remote nodes
+                if not node.publish_bind:
+                    node.publish_bind = node.cluster_ip
+            
+            # Default local node's hf_cache_host to hf_cache.host
+            if not local_nodes[0].hf_cache_host:
+                local_nodes[0].hf_cache_host = self.hf_cache.host
+        
         return self
 
     @property
@@ -310,6 +367,25 @@ class Settings(BaseModel):
             return None
         value = p.read_text().strip()
         return value or None
+
+    def all_nodes(self) -> list[NodeConfig]:
+        """Return all nodes, or a single implicit local node if none are configured."""
+        if not self.nodes:
+            return [NodeConfig(
+                id=LOCAL_NODE_ID,
+                label=LOCAL_NODE_ID,
+                docker_url="unix:///var/run/docker.sock",
+                hf_cache_host=self.hf_cache.host
+            )]
+        return self.nodes
+    
+    def node(self, node_id: str) -> NodeConfig:
+        """Get a node by ID. Raises KeyError if not found."""
+        for n in self.all_nodes():
+            if n.id == node_id:
+                return n
+        raise KeyError(f"node {node_id} not found")
+
 
 
 def load_ondemand_key(settings: Settings) -> str:
