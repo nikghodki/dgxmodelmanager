@@ -24,6 +24,16 @@ def _reachable(ctx: AppContext, node_id: str, stale: bool) -> bool:
     return (not stale) if seen is None else bool(seen and not stale)
 
 
+def _budget_out(b) -> dict | None:
+    """A node budget as GET /api/host serialises it, minus the container ids of its usage rows: a cluster has one
+    row per rank, and rank container ids never reach a view (R15)."""
+    if b is None:
+        return None
+    out = b.as_dict()
+    out["deployments"] = [{k: v for k, v in u.items() if k != "container_id"} for u in out["deployments"]]
+    return out
+
+
 @router.get("")
 async def list_nodes(p: Principal = Depends(current_principal), ctx: AppContext = Depends(get_ctx)):
     """Every configured node (config order; a single-node install: the implicit local node) with its label, whether it
@@ -38,7 +48,7 @@ async def list_nodes(p: Principal = Depends(current_principal), ctx: AppContext 
         stale = bool(remote and ctx.deployer is not None and ctx.deployer.node_stale(n.id))
         b = ctx.budget.current(n.id)
         out.append({"id": n.id, "label": n.label, "remote": remote, "reachable": _reachable(ctx, n.id, stale),
-                    "stale": stale, "budget": b.as_dict() if b is not None else None})
+                    "stale": stale, "budget": _budget_out(b)})
     return out
 
 

@@ -135,6 +135,7 @@ function DeployWizardPage() {
   const [options, setOptions] = useState<PlacementOptionInfo[] | null>(null);
   const [optionsErr, setOptionsErr] = useState<unknown>(null);
   const [placementPick, setPlacementPick] = useState<string | null>(null);
+  const [optionsTry, setOptionsTry] = useState(0); // bumped by the error's Retry
   useEffect(() => {
     if (!multiNode || !engine || !ref) { setOptions(null); return; }
     let live = true;
@@ -146,7 +147,7 @@ function DeployWizardPage() {
       } catch (e) { if (live) { setOptionsErr(e); setOptions(null); } }
     }, 350);
     return () => { live = false; clearTimeout(t); };
-  }, [body, engine, ref, multiNode]);
+  }, [body, engine, ref, multiNode, optionsTry]);
   const chosen = options?.find((o) => placementKey(o.placement) === placementPick) ?? options?.find((o) => o.recommended) ?? null;
   const placement = multiNode && chosen ? chosen.placement : null;
   const placementBlocked = multiNode && (!chosen || chosen.reason === "node_stale");
@@ -195,14 +196,22 @@ function DeployWizardPage() {
   const baseSubmit = submitState(preview, actions, deploy.isPending, "deploy");
   // a placement that does not fit needs a plan, like a preview that does not fit (its preview says so too, unless
   // memory changed since the options were read)
+  // Whether the chosen placement fits is the preview's (it follows the placement and is re-read on every change;
+  // the options' `fits` may be older). Blocked here only: nodes not known yet, no placement chosen, or a stale node.
   const submit = deploy.isPending ? baseSubmit
+    : nodes.isPending ? { disabled: true, label: "Checking nodes…" }
     : placementBlocked ? { disabled: true, label: "Choose where to run" }
-    : multiNode && chosen && !chosen.fits && actions.length === 0 ? { disabled: true, label: "Choose a plan to fit" }
     : { ...baseSubmit, disabled: baseSubmit.disabled || !!aliasErr || idleInvalid(mode, idle) };
   const memoryChanged = deploy.error instanceof ApiError && deploy.error.code === "insufficient_memory";
 
   const check = (
     <div className="space-y-4">
+      {nodes.isError && (
+        <div role="alert" className="space-y-1 rounded-lg border border-status-warning/40 bg-status-warning-bg/40 p-3 text-xs">
+          <p>Could not read the configured nodes, so this deploys on this DGX only and the Where to run step is hidden.</p>
+          <Button size="sm" variant="outline" className="h-7 text-xs" onClick={() => nodes.refetch()}>Retry</Button>
+        </div>
+      )}
       <ErrorState error={previewErr} />
       {preview ? <EstimatePanel preview={preview} /> : <p className="text-sm text-muted-foreground">Choose a model to see the memory check.</p>}
       {preview && !preview.fit.fits && (
@@ -288,7 +297,7 @@ function DeployWizardPage() {
               </Section>
               {multiNode && (
                 <Section n={4} title="Where to run" description="One DGX, or the DGXs together as a cluster for a model too big for one. The memory check follows your choice.">
-                  <ErrorState error={optionsErr} />
+                  <ErrorState error={optionsErr} onRetry={() => setOptionsTry((n) => n + 1)} />
                   {options ? (
                     <PlacementChooser options={options} nodes={nodes.data} selected={chosen ? placementKey(chosen.placement) : null}
                       onSelect={(o) => { setPlacementPick(placementKey(o.placement)); setPlan(null); }} />

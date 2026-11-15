@@ -95,3 +95,14 @@ def test_get_nodes_unreachable_before_stale(client_viewer_two_nodes, api_two_nod
     api_two_nodes.ctx.node_probe = Probe()
     remote = client_viewer_two_nodes.get("/api/nodes").json()[1]
     assert remote["reachable"] is False and remote["stale"] is False
+
+
+async def test_get_nodes_never_shows_rank_container_ids(client_viewer_two_nodes, deployer_two_nodes, ready_cluster_dep):
+    await deployer_two_nodes.budget.refresh()  # usage rows of both ranks, with their container ids, in each budget
+    assert any(u.container_id for u in deployer_two_nodes.budget.current("dgx-2").deployments)
+    r = client_viewer_two_nodes.get("/api/nodes").json()
+    raw = str(r)
+    for rank in ready_cluster_dep.ranks:
+        assert rank["container_id"] and rank["container_id"] not in raw
+    assert all("container_id" not in u for n in r for u in n["budget"]["deployments"])
+    assert {u["node"] for n in r for u in n["budget"]["deployments"]} == {"local", "dgx-2"}  # the share on both

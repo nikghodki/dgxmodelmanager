@@ -34,7 +34,7 @@ export function Dashboard() {
   const live = useQueries({ queries: ready.map((d) => ({ queryKey: ["live", d.id], queryFn: () => api<any[]>(`/deployments/${d.id}/metrics?window=live`), staleTime: Infinity })) });
   const k = fleetKpis(live.map((q) => q.data ?? []));
   const b = host.data?.budget;
-  const nodes = useNodes({ refetchInterval: 10000 });
+  const nodes = useNodes({ pollWhenMulti: 10000 });
   const multi = isMultiNode(nodes.data);
 
   if (host.isLoading) return <PageSkeleton />;

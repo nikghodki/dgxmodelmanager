@@ -16,6 +16,7 @@ vi.mock("@/api", async () => {
 const GIB = 1024 ** 3;
 const est = { total: 160 * GIB, weights: 150 * GIB, draft_weights: 0, kv_cache: 0, state: 0, activations: 0, runtime: 0, margin: 0, notes: [], confidence: "measured" };
 const fitsPreview = { estimate: est, fit: { fits: true, free_for_new: 200 * GIB, headroom: 1e9 }, plans: [] };
+const shortPreview = { estimate: est, fit: { fits: false, free_for_new: 50 * GIB, headroom: -110 * GIB }, plans: [] };
 const BIG = "deepseek-ai/DeepSeek-V4-Flash-0731";
 const artifactFor = (ref: string) => ({ ref, complete: true, kind: "llm", engines: ["vllm"], quant: "FP8", weights_bytes: 150 * GIB, architecture: "DeepseekV4", max_context: 32768, problems: [] });
 const engines = [{ name: "vllm", supports_sleep: true, defaults: { max_model_len: 4096 }, image: null }];
@@ -38,6 +39,11 @@ function opt(kind: "single" | "cluster", nodes: string[], over: Record<string, a
 let options: any[] = [];
 let nodes: any[] = TWO_NODES;
 let deployResult: () => Promise<any> = () => new Promise(() => undefined);
+// the preview of a placement: by default as the option for it says (fits or not); previewFits overrides
+let previewFits: ((placement: any) => boolean) | null = null;
+let nodesResult: () => Promise<any> = () => Promise.resolve(nodes);
+let optionsResult: () => Promise<any> = () => Promise.resolve(options);
+const keyOf = (p: any) => (p ? `${p.kind}:${p.nodes.join(",")}` : "single:local");
 const mockPlacementOptions = (o: any[]) => { options = o; };
 const mockNodes = (n: any[]) => { nodes = n; };
 const api = () => vi.mocked(apiModule.api);
@@ -51,9 +57,13 @@ function setup(ref = BIG) {
   api().mockImplementation((url: string, opts?: any) => {
     if (url === "/inventory") return Promise.resolve([artifactFor(ref)]);
     if (url === "/engines") return Promise.resolve(engines);
-    if (url === "/nodes") return Promise.resolve(nodes);
-    if (url === "/deployments/placement-options") return Promise.resolve(options);
-    if (url === "/deployments/preview") return Promise.resolve(fitsPreview);
+    if (url === "/nodes") return nodesResult();
+    if (url === "/deployments/placement-options") return optionsResult();
+    if (url === "/deployments/preview") {
+      const pl = opts?.body?.placement;
+      const fits = previewFits ? previewFits(pl) : options.find((o) => keyOf(o.placement) === keyOf(pl))?.fits ?? true;
+      return Promise.resolve(fits ? fitsPreview : shortPreview);
+    }
     if (url === "/deployments" && opts?.method === "POST") return deployResult();
     return new Promise(() => undefined);
   });
@@ -71,7 +81,10 @@ const pickModel = async (ref: string) => {
   await screen.findByRole("combobox", { name: new RegExp(`^Model\\s+${ref.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&")}$`) });
 };
 
-afterEach(() => { api().mockReset(); options = []; nodes = TWO_NODES; deployResult = () => new Promise(() => undefined); });
+afterEach(() => {
+  api().mockReset(); options = []; nodes = TWO_NODES; deployResult = () => new Promise(() => undefined); previewFits = null;
+  nodesResult = () => Promise.resolve(nodes); optionsResult = () => Promise.resolve(options);
+});
 
 describe("DeployWizard: where to run", () => {
   it("pre-selects the cluster for a model too big for one DGX", async () => {
@@ -131,6 +144,61 @@ describe("DeployWizard: where to run", () => {
     const two = (await placementRadios()).find((r) => /^dgx-2/.test(r.textContent ?? ""))!;
     await user.click(two);
     await waitFor(() => expect(screen.getAllByRole("button", { name: "Choose a plan to fit" })[0]).toBeDisabled());
+  });
+
+  it("follows the preview, not the older options, on whether the chosen placement fits", async () => {
+    mockPlacementOptions([opt("single", ["local"], { recommended: true }), opt("single", ["dgx-2"], { fits: false, reason: "insufficient_memory" })]);
+    previewFits = () => true; // memory freed on dgx-2 since the options were read
+    const user = userEvent.setup();
+    setup(); await pickModel(BIG);
+    const two = (await placementRadios()).find((r) => /^dgx-2/.test(r.textContent ?? ""))!;
+    await user.click(two);
+    await waitFor(() => expect(lastPost("/deployments/preview").placement).toEqual({ kind: "single", nodes: ["dgx-2"] }));
+    await waitFor(() => expect(screen.getAllByRole("button", { name: "Deploy" })[0]).toBeEnabled());
+  });
+
+  it("moves and selects with the arrow keys, one tab stop for the group", async () => {
+    const user = userEvent.setup();
+    mockPlacementOptions([opt("single", ["local"], { recommended: true }), opt("single", ["dgx-2"]), opt("cluster", ["local", "dgx-2"])]);
+    setup(); await pickModel(BIG);
+    const radios = await placementRadios();
+    expect(radios.map((r) => r.tabIndex)).toEqual([0, -1, -1]);
+    radios[0].focus();
+    await user.keyboard("{ArrowDown}");
+    expect(radios[1]).toHaveFocus();
+    expect(radios[1]).toBeChecked();
+    expect((await placementRadios()).map((r) => r.tabIndex)).toEqual([-1, 0, -1]);
+    await user.keyboard("{ArrowUp}{ArrowUp}");
+    expect(radios[2]).toHaveFocus();
+    expect(radios[2]).toBeChecked();
+    expect(screen.getByRole("radio", { name: "dgx-1 + dgx-2 (cluster)" })).toHaveAccessibleDescription(/needs 80(\.0)? GiB of 100(\.0)? GiB free/);
+  });
+
+  it("retries the placement options after an error", async () => {
+    const user = userEvent.setup();
+    mockPlacementOptions([opt("single", ["local"], { recommended: true }), opt("single", ["dgx-2"])]);
+    optionsResult = () => Promise.reject(new apiModule.ApiError(503, { code: "busy", message: "try again" }));
+    setup(); await pickModel(BIG);
+    await screen.findByText("try again");
+    optionsResult = () => Promise.resolve(options);
+    await user.click(screen.getByRole("button", { name: "Retry" }));
+    expect(await screen.findByRole("radiogroup", { name: "Where to run" })).toBeInTheDocument();
+  });
+
+  it("waits for the nodes before Deploy is enabled", async () => {
+    nodesResult = () => new Promise(() => undefined);
+    setup(); await pickModel(BIG);
+    await waitFor(() => expect(api().mock.calls.some((c) => c[0] === "/deployments/preview")).toBe(true));
+    await new Promise((r) => setTimeout(r, 50));
+    expect(screen.getAllByRole("button", { name: "Checking nodes…" })[0]).toBeDisabled();
+  });
+
+  it("warns when the nodes cannot be read, and deploys on this DGX", async () => {
+    nodesResult = () => Promise.reject(new apiModule.ApiError(500, { code: "x", message: "boom" }));
+    setup(); await pickModel(BIG);
+    expect((await screen.findAllByText(/Could not read the configured nodes/))[0]).toBeInTheDocument();
+    expect(screen.queryByText("Where to run")).toBeNull();
+    await waitFor(() => expect(screen.getAllByRole("button", { name: "Deploy" })[0]).toBeEnabled());
   });
 
   it("hides the step with a single node", async () => {
