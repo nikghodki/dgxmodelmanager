@@ -72,7 +72,7 @@ async def host(p: Principal = Depends(current_principal), ctx: AppContext = Depe
 
 def _managed_map(ctx: AppContext) -> dict[str, dict]:
     rows = ctx.deployer.usage_rows() if ctx.deployer is not None else []
-    return {cid: {"deployment_id": dep_id, "name": name} for (dep_id, name, _state, _res, cid) in rows if cid}
+    return {cid: {"deployment_id": dep_id, "name": name} for (dep_id, name, _state, _res, cid, _node) in rows if cid}
 
 
 def processes_payload(procs: list, scope: str, limit: int) -> dict:

@@ -43,6 +43,10 @@ class FakeContainer:
         if self.exit_code is None:
             self.exit_code = 0
 
+    def start(self):
+        self.status = "running"
+        self.exit_code = None
+
     def remove(self, force=False):
         self.client._containers.pop(self.id, None)
 

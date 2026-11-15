@@ -19,15 +19,18 @@ class NodeProbe:
         self._sample_times: dict[str, float] = {}
 
     def ensure(self, node_id: str) -> None:
-        """Ensure probe container exists on the given node."""
+        """Ensure probe container exists and is running on the given node."""
         if self.registry.is_remote(node_id):
             controller = self.registry.docker(node_id)
             docker = controller.client
             node_config = self.registry.config(node_id)
             
-            # Check if probe container already exists
+            # Check if probe container exists
             try:
-                docker.containers.get("dgxmm-node-probe")
+                container = docker.containers.get("dgxmm-node-probe")
+                # If it exists but is not running, start it
+                if container.status != "running":
+                    container.start()
                 return
             except Exception:
                 pass
@@ -69,7 +72,7 @@ class NodeProbe:
             self._sample_times[node_id] = self.clock()
             return mem
         except Exception:
-            # Return last sample if exec fails
+            # Return last sample if exec fails (do not update timestamp)
             return self._samples.get(node_id)
 
     def stale(self, node_id: str) -> bool:

@@ -106,6 +106,28 @@ async def budget_loop(ctx: AppContext) -> None:
         await asyncio.sleep(ctx.settings.budget_interval_s)
 
 
+
+async def remote_probe_loop(ctx: AppContext) -> None:
+    """Sample remote nodes every remote_probe_interval_s."""
+    from dgxmm.nodes.probe import NodeProbe
+    # Only run if we have a NodeProbe and remote nodes
+    if not isinstance(ctx.probe, NodeProbe) or not ctx.nodes:
+        return
+    
+    remote_nodes = [n for n in ctx.nodes.ids() if n != "local" and ctx.nodes.is_remote(n)]
+    if not remote_nodes:
+        return
+    
+    while True:
+        try:
+            for node_id in remote_nodes:
+                ctx.probe.ensure(node_id)
+                ctx.probe.sample(node_id)
+        except Exception:
+            log.exception("remote probe failed")
+        await asyncio.sleep(ctx.settings.remote_probe_interval_s)
+
+
 def liveness_listener(deployer):
     """Budget listener: re-check ready/sleeping/unknown containers on every budget refresh."""
     async def _check(_budget) -> None:
@@ -154,6 +176,9 @@ def build_context(settings: Settings) -> AppContext:
 
     async def _budget_loop():
         await budget_loop(ctx)
+
+    async def _remote_probe_loop():
+        await remote_probe_loop(ctx)
 
     async def _inventory_loop():
         await asyncio.sleep(settings.inventory_interval_s)
@@ -281,6 +306,10 @@ def build_context(settings: Settings) -> AppContext:
     async def _decider_rotation():
         await rotation.watch(ctx)  # admin CLI rotate-decider-key requests
 
-    ctx.background += [_budget_loop, _inventory_loop, _containers_loop, _decider_rotation, _untrusted_proxies_loop,
-                       ctx.ondemand.run]  # the on-demand idle reaper
+    tasks = [_budget_loop, _inventory_loop, _containers_loop, _decider_rotation, _untrusted_proxies_loop,
+             ctx.ondemand.run]  # the on-demand idle reaper
+    # Add remote probe loop only if we have remote nodes
+    if ctx.nodes and any(ctx.nodes.is_remote(n) for n in ctx.nodes.ids() if n != "local"):
+        tasks.insert(1, _remote_probe_loop)  # after budget, before inventory
+    ctx.background += tasks
     return ctx

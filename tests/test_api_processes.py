@@ -6,7 +6,7 @@ from tests.test_processes import CID, OTHER, SECRET, build
 def wire(api_stack, tmp_path):
     probe = build(api_stack.ctx.settings, tmp_path)
     api_stack.ctx.probe = probe
-    rows = lambda: [(7, "qwen", "ready", 0, CID), (8, "stopped-one", "starting", 0, None)]  # noqa: E731
+    rows = lambda: [(7, "qwen", "ready", 0, CID, "local"), (8, "stopped-one", "starting", 0, None, "local")]  # noqa: E731
     api_stack.ctx.deployer.usage_rows = rows
     api_stack.ctx.budget.usage_provider = rows
     return probe
@@ -89,7 +89,7 @@ def test_labelled_inactive_container_is_external_with_deployment_name(api_stack,
     assert group["managed"] is None and group["dgxmm_label"] == {"deployment_id": 7, "name": "qwen-old"}
     api_stack.ctx.budget.usage_provider = lambda: []
     api_stack.ctx.budget.probe = api_stack.ctx.probe
-    api_stack.ctx.budget._current = None
+    api_stack.ctx.budget._current = {}
     top = {p["pid"]: p for p in api_stack.get("/dgxmm/api/host").json()["external_top"]}
     assert top[100]["dgxmm_label"] == {"deployment_id": 7, "name": "qwen-old"}  # explains the external figure
 
@@ -106,3 +106,21 @@ def test_many_processes(api_stack, tmp_path):
     body = api_stack.get("/dgxmm/api/host/processes?limit=50").json()
     # timing is measured on the real box (lane report), not asserted here: wall-clock bounds are flaky in CI
     assert body["total"] == 605 and len(body["processes"]) == 50 and SECRET not in str(body)
+
+
+def test_host_endpoint_with_deployment(api_stack, tmp_path):
+    """Test /api/host with a deployment to ensure 6-field UsageRow unpacking works."""
+    from dgxmm.db import Deployment
+    wire(api_stack, tmp_path)
+    viewer(api_stack)
+    
+    # Add a deployment
+    with api_stack.ctx.db.session() as s:
+        s.add(Deployment(id=1, name="test-model", engine="vllm", model_ref="test/model",
+                        state="ready", container_id="test-cid", reserved_bytes=1024**3))
+    
+    # This should not crash with unpacking errors
+    response = api_stack.get("/dgxmm/api/host")
+    assert response.status_code == 200
+    data = response.json()
+    assert "budget" in data

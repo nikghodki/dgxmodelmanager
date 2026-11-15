@@ -75,8 +75,6 @@ class BudgetService:
         self.last_sample: HostSample | None = None
 
     def current(self, node_id: str = "local") -> Budget | None:
-        if self._current is None:
-            return None
         return self._current.get(node_id)
 
     def all(self) -> dict[str, Budget]:
@@ -84,9 +82,7 @@ class BudgetService:
         return dict(self._current)
 
     async def refresh(self) -> Budget:
-        """Refresh budget for local node (backward compatible)."""
-        if self._current is None:
-            self._current = {}
+        """Refresh budgets for all nodes (local and remote)."""
         rows = self.usage_provider()
         
         # Group usage rows by node
