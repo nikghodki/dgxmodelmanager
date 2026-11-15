@@ -223,25 +223,32 @@ class Deployer:
         except DeployError:
             return None
 
-    def _used_ports(self, exclude_dep: int | None = None) -> set[int]:
-        """Ports held by other active/planned deployments and by unmanaged containers (blocking: docker call)."""
+    def _used_ports(self, exclude_dep: int | None = None, node_id: str = "local") -> set[int]:
+        """Ports held by other active/planned deployments on the given node and by unmanaged containers (blocking: docker call)."""
         with self.db.session() as s:
             used = {d.port for d in s.scalars(select(Deployment)) if d.port and d.state in ACTIVE_STATES | {"planned"}
-                    and d.id != exclude_dep}
+                    and d.id != exclude_dep and (d.node or "local") == node_id}
         try:
-            used |= {p for c in self.docker.list_all() for p in c.host_ports if not c.managed}
+            # Get docker client for the specified node
+            docker = self.nodes.docker(node_id) if self.nodes else self.docker
+            used |= {p for c in docker.list_all() for p in c.host_ports if not c.managed}
         except Exception:
             log.warning("could not list containers for the port check", exc_info=True)
         return used
 
     def _allocate_port(self, exclude_dep: int | None = None, skip: set[int] | frozenset = frozenset(),
-                       used: set[int] | None = None) -> int:
-        used = (self._used_ports(exclude_dep) if used is None else set(used)) | set(skip)
+                       used: set[int] | None = None, node_id: str = "local") -> int:
+        used = (self._used_ports(exclude_dep, node_id=node_id) if used is None else set(used)) | set(skip)
         lo, hi = self.settings.port_range
         for port in range(lo, hi + 1):
             if port not in used:
                 return port
         raise DeployError("no_ports", "port pool exhausted", 503)
+
+    def allocate_port(self, node_id: str) -> int:
+        """Allocate a port on the specified node. Public API for tests and external callers."""
+        return self._allocate_port(node_id=node_id)
+
 
     # ---------- planning ----------
     def prepare(self, engine_name: str, model_ref: str, raw_cfg: dict, existing_ref: str | None = None) -> Prepared:
@@ -877,7 +884,7 @@ class Deployer:
     # ---------- views ----------
     def usage_rows(self) -> list[tuple[int, str, str, int, str | None, str]]:
         with self.db.session() as s:
-            return [(d.id, d.name, d.state, d.reserved_bytes, d.container_id, getattr(d, "node", "local"))
+            return [(d.id, d.name, d.state, d.reserved_bytes, d.container_id, d.node or "local")
                     for d in s.scalars(select(Deployment)) if d.state in ACTIVE_STATES]
 
     def _actual(self, dep_id: int) -> int | None:

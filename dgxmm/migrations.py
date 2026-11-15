@@ -178,6 +178,18 @@ def _ondemand_mode(conn: sqlite3.Connection) -> None:
     conn.execute("UPDATE deployments SET mode = 'always_on' WHERE mode IS NULL")
 
 
+
+
+def _deployment_node(conn: sqlite3.Connection) -> None:
+    """Version 41: deployments carry the node they run on. ``add_missing_columns`` adds the column first when
+    creating a fresh database; it is added here too when missing. Existing deployments become ``local``."""
+    if not _table_exists(conn, "deployments"):
+        return
+    cols = {r[1] for r in conn.execute('PRAGMA table_info("deployments")')}
+    if "node" not in cols:
+        conn.execute('ALTER TABLE deployments ADD COLUMN "node" VARCHAR(32) DEFAULT "local"')
+    conn.execute("UPDATE deployments SET node = 'local' WHERE node IS NULL")
+
 # Version numbers reserved for the parallel feature lanes of the advanced decision-model features, so their
 # branches merge without renumbering: 4-9 deploy-time features, 10-19 operations features, 20-29 schedules/commands;
 # fixes after them from 30 on.
@@ -188,6 +200,7 @@ MIGRATIONS: list[Migration] = [
     Migration(20, "traffic_profiles: unique (deployment_id, hour_of_week)", _traffic_profiles_unique_hour),
     Migration(30, "deployments: ids are never reused (AUTOINCREMENT)", _deployment_ids_never_reused, rebuilds=True),
     Migration(40, "deployments: on-demand mode", _ondemand_mode),
+    Migration(41, "deployments: node", _deployment_node),
 ]
 LATEST = max(m.version for m in MIGRATIONS)
 

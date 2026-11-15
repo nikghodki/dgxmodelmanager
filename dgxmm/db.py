@@ -90,6 +90,8 @@ class Deployment(Base):
     # A switch from on demand to always on that waits for the deployment to be ready: until then it stays on demand
     # (registered through the gateway), and the deployer applies this mode when it reaches ready, failed or stopped.
     pending_mode: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    # Node where this deployment runs (local | dgx-2 | ...).
+    node: Mapped[str | None] = mapped_column(String(32), nullable=True, default="local")
     created_by: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)

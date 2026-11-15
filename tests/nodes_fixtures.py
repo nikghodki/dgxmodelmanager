@@ -193,3 +193,110 @@ def three_node_registry(three_node_settings):
     registry.fake = lambda node_id: fake_clients[node_id]
     
     return registry
+
+
+@pytest.fixture
+def v40_db_with_one_deployment(tmp_path):
+    """Database at version 40 (before node column) with one deployment."""
+    import sqlite3
+    from dgxmm.db import Database
+
+    db_path = tmp_path / "v40.sqlite3"
+
+    # Create fresh database (applies all migrations including 41)
+    db = Database(f"sqlite:///{db_path}")
+    db.engine.dispose()
+
+    # Roll back migration 41: remove record and rebuild table without node
+    conn = sqlite3.connect(str(db_path), timeout=30, isolation_level=None)
+    conn.execute("PRAGMA foreign_keys=OFF")
+    conn.execute("DELETE FROM schema_version WHERE version = 41")
+
+    # Get columns except node
+    cols = [c[1] for c in conn.execute('PRAGMA table_info("deployments")') if c[1] != "node"]
+    col_list = ", ".join(f'"{c}"' for c in cols)
+
+    # Create new table without node, copy data, swap
+    conn.execute(f"""
+        CREATE TABLE deployments_new AS SELECT {col_list} FROM deployments
+    """)
+    conn.execute("DROP TABLE deployments")
+    conn.execute("ALTER TABLE deployments_new RENAME TO deployments")
+
+    # Insert test deployment
+    conn.execute("""
+        INSERT INTO deployments 
+        (id, name, engine, model_ref, config, state, priority, reserved_bytes, 
+         estimate, litellm_status, port, created_at, updated_at)
+        VALUES (1, 'test-model', 'vllm', 'Qwen/Qwen3-0.6B', '{}', 'stopped', 
+                0, 0, '{}', 'none', 8100, '2026-01-01 00:00:00', '2026-01-01 00:00:00')
+    """)
+
+    conn.execute("PRAGMA foreign_keys=ON")
+    conn.commit()
+    conn.close()
+
+    return db_path
+
+
+@pytest.fixture
+def deployer_two_nodes(two_node_registry, tmp_path):
+    """Deployer with two nodes for testing."""
+    from dgxmm.db import Database
+    from dgxmm.deployer.service import Deployer
+    from dgxmm.inventory.service import InventoryService
+    from dgxmm.events import EventBroker
+    from tests.fakes import FakeEngines
+    import httpx
+    
+    db = Database(f"sqlite:///{tmp_path / 'deployer.sqlite3'}")
+    inventory = InventoryService(two_node_registry.settings)
+    events = EventBroker()
+    engines_http = FakeEngines()
+    
+    deployer = Deployer(
+        settings=two_node_registry.settings,
+        db=db,
+        docker=two_node_registry.docker("local"),
+        inventory=inventory,
+        engines={},
+        http=engines_http.client(),
+        events=events,
+        nodes=two_node_registry
+    )
+    
+    return deployer
+
+
+def insert_deployment(deployer, *, node: str, port: int, name: str = None):
+    """Helper to insert a deployment directly into the database."""
+    from dgxmm.db import Deployment
+    from sqlalchemy import select
+    
+    if name is None:
+        # Generate unique name
+        with deployer.db.session() as s:
+            count = s.scalar(select(Deployment.id).order_by(Deployment.id.desc()))
+            name = f"model-{(count or 0) + 1}"
+    
+    with deployer.db.session() as s:
+        d = Deployment(
+            name=name,
+            engine="vllm",
+            model_ref="Qwen/Qwen3-0.6B",
+            config={},
+            state="ready",
+            port=port,
+            node=node
+        )
+        s.add(d)
+        s.commit()
+
+
+def row(db_path, query: str):
+    """Execute a SELECT query and return the first row as a tuple."""
+    import sqlite3
+    conn = sqlite3.connect(str(db_path))
+    result = conn.execute(query).fetchone()
+    conn.close()
+    return result
