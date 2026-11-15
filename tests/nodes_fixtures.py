@@ -240,33 +240,115 @@ def v40_db_with_one_deployment(tmp_path):
     return db_path
 
 
+class FakeNodesProbe:
+    """Budget probe for two-node tests: the local host sample (sample(container ids)) like FakeProbe, and per remote
+    node a memory sample (sample(node_id)) and staleness (stale(node_id)) like NodeProbe."""
+
+    def __init__(self, total_gib: float = 121, available_gib: float = 100):
+        from tests.fakes import FakeProbe
+        self.local = FakeProbe(total_gib, available_gib)
+        self.remote_total = int(total_gib * GIB)
+        self.remote_available: dict[str, int] = {}
+        self.stale_nodes: set[str] = set()
+        self.default_available = int(available_gib * GIB)
+
+    def meminfo(self):
+        return self.local.meminfo()
+
+    def sample(self, arg):
+        from dgxmm.memory.hostmem import HostMemory
+        if not isinstance(arg, str):
+            return self.local.sample(arg)
+        if arg == "local":
+            return None
+        avail = self.remote_available.get(arg, self.default_available)
+        return HostMemory(total=self.remote_total, available=avail, free=0, cached=0, swap_total=0, swap_free=0)
+
+    def stale(self, node_id: str) -> bool:
+        return node_id in self.stale_nodes
+
+    def processes(self, managed=None, names=None):
+        return []
+
+
 @pytest.fixture
-def deployer_two_nodes(two_node_registry, tmp_path):
-    """Deployer with two nodes for testing."""
+def deployer_two_nodes(two_node_registry, tmp_path, fake_hf_repo):
+    """Deployer with two nodes (local and remote dgx-2), real engines, a tiny Qwen model downloaded and a budget
+    per node. Helpers on the returned deployer: fake(node), set_free(node, bytes), mark_stale(node),
+    monitor_tick(dep_id), state(dep_id), engines_http."""
     from dgxmm.db import Database
     from dgxmm.deployer.service import Deployer
-    from dgxmm.inventory.service import InventoryService
+    from dgxmm.engines.registry import build_engines
     from dgxmm.events import EventBroker
+    from dgxmm.inventory.service import InventoryService
+    from dgxmm.memory.budget import BudgetService
+    from tests.conftest import QWEN_TINY
     from tests.fakes import FakeEngines
-    import httpx
-    
+
+    settings = two_node_registry.settings
+    fake_hf_repo("Qwen/Qwen3-Tiny", config=QWEN_TINY, files={"model.safetensors": 2 * GIB})
     db = Database(f"sqlite:///{tmp_path / 'deployer.sqlite3'}")
-    inventory = InventoryService(two_node_registry.settings)
-    events = EventBroker()
+    inventory = InventoryService(settings)
+    inventory.refresh()
     engines_http = FakeEngines()
-    
+    probe = FakeNodesProbe()
+
     deployer = Deployer(
-        settings=two_node_registry.settings,
+        settings=settings,
         db=db,
         docker=two_node_registry.docker("local"),
         inventory=inventory,
-        engines={},
+        engines=build_engines(settings),
         http=engines_http.client(),
-        events=events,
+        events=EventBroker(),
         nodes=two_node_registry
     )
-    
+    deployer.budget = BudgetService(settings, probe, deployer.usage_rows, nodes=two_node_registry)
+    deployer.engines_http = engines_http
+    deployer.probe = probe
+    deployer.fake = two_node_registry.fake
+
+    def set_free(node_id: str, available: int) -> None:
+        if node_id == "local":
+            probe.local.available = available
+        else:
+            probe.remote_available[node_id] = available
+    deployer.set_free = set_free
+    deployer.mark_stale = probe.stale_nodes.add
+
+    ticks: dict = {}
+
+    async def monitor_tick(dep_id: int) -> bool:
+        """One liveness check plus one monitor iteration (with the monitor's error accounting kept per deployment
+        across ticks). True if the monitor would stop."""
+        from dgxmm.deployer.service import MonitorState
+        st = ticks.setdefault(dep_id, MonitorState(start=deployer.clock()))
+        await deployer.check_liveness()
+        return await deployer._monitor_tick(dep_id, st)
+    deployer.monitor_tick = monitor_tick
+    deployer.monitor_states = ticks
+    deployer.state = lambda dep_id: deployer._get(dep_id).state
     return deployer
+
+
+SMALL_VLLM = {"max_model_len": 4096, "max_num_seqs": 2, "max_num_batched_tokens": 2048}
+
+
+@pytest.fixture
+def qwen_req():
+    from dgxmm.deployer.service import DeployRequest
+    return DeployRequest(name="qwen", engine="vllm", model_ref="Qwen/Qwen3-Tiny", config=dict(SMALL_VLLM))
+
+
+@pytest.fixture
+async def ready_remote_dep(deployer_two_nodes, qwen_req):
+    """A vLLM deployment on dgx-2 that reached ready."""
+    from types import SimpleNamespace
+    d = deployer_two_nodes
+    v = await d.deploy(qwen_req.model_copy(update={"node": "dgx-2"}), user_id=1)
+    d.engines_http.healthy.add(v["port"])
+    assert await d.wait_ready(v["id"], 5) == "ready"
+    return SimpleNamespace(id=v["id"], port=v["port"], view=d.view(v["id"]))
 
 
 def insert_deployment(deployer, *, node: str, port: int, name: str = None):

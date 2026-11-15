@@ -7,10 +7,11 @@ from typing import Any, Literal
 import httpx
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from dgxmm.config import Mount, Settings
+from dgxmm.config import LOCAL_NODE_ID, Mount, Settings
 from dgxmm.engines.argguard import LLAMACPP_EXTRA_FLAGS, validate_extra_args
-from dgxmm.engines.base import (SERVED_NAME_RE, ContainerSpec, EngineMetrics, LaunchContext, container_name,
-                                default_served_name, managed_labels, openai_health)
+from dgxmm.engines.base import (REMOTE_NETWORK, SERVED_NAME_RE, ContainerSpec, EngineMetrics, LaunchContext,
+                                SpecError, container_name, default_served_name, managed_labels, openai_health,
+                                remote_hf_mount)
 from dgxmm.engines.vllm import metrics_from
 from dgxmm.inventory.artifact import ModelArtifact
 from dgxmm.memory.estimate import LlamaCppSizing, MemoryEstimate, estimate_llamacpp
@@ -64,6 +65,18 @@ def container_path(local_path: str, settings: Settings) -> tuple[Mount, str]:
     raise ValueError(f"{local_path} is not under an allowed GGUF root")
 
 
+def remote_container_path(local_path: str, settings: Settings, node_id: str) -> tuple[Mount, str, str]:
+    """On a remote node only GGUF files inside the HF cache can be served (from the node's own HF cache, read-only):
+    (mount, path in the container, publish address)."""
+    p = Path(local_path)
+    hf_local = Path(settings.hf_cache.local)
+    if hf_local not in p.parents:
+        raise SpecError("not_on_node", f"{local_path} is outside the HF cache; only models in the HF cache can run "
+                                       f"on node {node_id}")
+    mount, publish_bind = remote_hf_mount(settings, node_id)
+    return mount, f"{mount.target}/{p.relative_to(hf_local)}", publish_bind
+
+
 class LlamaCppEngine:
     name = "llamacpp"
     supports_sleep = False
@@ -98,15 +111,19 @@ class LlamaCppEngine:
 
     def container_spec(self, artifact: ModelArtifact, cfg: LlamaCppConfig, draft, launch: LaunchContext,
                        settings: Settings) -> ContainerSpec:
-        mount, path = container_path(artifact.local_path, settings)
+        if launch.node == LOCAL_NODE_ID:
+            mount, path = container_path(artifact.local_path, settings)
+            network, publish_bind = settings.docker_network, settings.publish_bind
+        else:  # remote node: its own HF cache only, read-only; its default bridge, published on its cluster IP
+            mount, path, publish_bind = remote_container_path(artifact.local_path, settings, launch.node)
+            network = REMOTE_NETWORK
         cmd = ["-m", path, "--host", "0.0.0.0", "--port", str(launch.port), "-c", str(cfg.ctx_size),
                "-np", str(cfg.parallel), "-ngl", str(cfg.n_gpu_layers), "-ctk", cfg.cache_type_k,
                "-ctv", cfg.cache_type_v, "-fa", cfg.flash_attn, "-b", str(cfg.n_batch), "-ub", str(cfg.n_ubatch),
                "--metrics", "--slots", "-a", self.served_name(cfg, artifact.ref), *cfg.extra_args]
         return ContainerSpec(name=container_name(launch.name), image=settings.images.llamacpp, command=cmd,
                              environment={}, mounts=[mount], labels=managed_labels(launch.deployment_id, self.name),
-                             network=settings.docker_network, port=launch.port, publish_bind=settings.publish_bind,
-                             ipc_host=False)
+                             network=network, port=launch.port, publish_bind=publish_bind, ipc_host=False)
 
     async def health(self, http: httpx.AsyncClient, base_url: str, served_name: str) -> bool:
         return await openai_health(http, base_url, served_name)

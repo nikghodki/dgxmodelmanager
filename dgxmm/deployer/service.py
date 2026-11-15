@@ -16,7 +16,7 @@ import httpx
 from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy import select
 
-from dgxmm.config import Settings
+from dgxmm.config import LOCAL_NODE_ID, Settings
 from dgxmm.db import Database, Deployment, DeploymentEvent
 from dgxmm.deployer.logtail import SCAN_LINES, oom_evidence, stored_tail
 from dgxmm.deployer.gate import GateTimeout, GateWithdrawn, StartupGate
@@ -29,6 +29,7 @@ from dgxmm.inventory.artifact import REPO_RE, ModelArtifact
 from dgxmm.inventory.kinds import classify_kind
 from dgxmm.memory.estimate import MemoryEstimate, vllm_gpu_util
 from dgxmm.memory.redact import redact_log
+from dgxmm.nodes.registry import NodeUnreachable, RemoteDocker, UnknownNode, is_transport_error
 from dgxmm.planner.fit import FitResult, check_fit
 from dgxmm.planner.plans import ActiveDep, PlanAction, base_model_name, build_plans
 
@@ -44,6 +45,8 @@ IDLE_TIMEOUT_MIN_S, IDLE_TIMEOUT_MAX_S = 60, 86400  # per-deployment idle_timeou
 # already in use") or by a container it knows ("port is already allocated").
 _PORT_CONFLICT = re.compile(r"address already in use|port is already allocated", re.I)
 PORT_ATTEMPTS = 4
+NODE_ID_PATTERN = r"^[a-z0-9][a-z0-9-]{0,31}$"  # NodeConfig.id ("local" is the local node)
+UNREACHABLE_BACKOFF_MAX_S = 60.0  # longest wait between monitor polls while a remote node is unreachable
 
 
 class DeployRequest(BaseModel):
@@ -57,6 +60,7 @@ class DeployRequest(BaseModel):
     # an API script gets it only when it says so (the deploy wizard picks on demand when LiteLLM is set up and synced)
     mode: DeploymentMode = "always_on"  # system deployments are always_on whatever is sent
     idle_timeout_s: int | None = Field(None, ge=IDLE_TIMEOUT_MIN_S, le=IDLE_TIMEOUT_MAX_S)
+    node: str = Field(LOCAL_NODE_ID, pattern=NODE_ID_PATTERN)  # where it runs (a configured node id)
 
 
 class DeployError(Exception):
@@ -71,6 +75,16 @@ class InsufficientMemory(DeployError):
         super().__init__("insufficient_memory",
                          f"needs {fit.required / gib:.1f} GiB but only {fit.free_for_new / gib:.1f} GiB is free", 409)
         self.fit = fit
+
+
+@dataclass
+class MonitorState:
+    """Start-up monitor bookkeeping across polls: ``errors`` counts consecutive errors (5 fail the deployment);
+    ``unreachable`` counts consecutive polls on which the deployment's remote node could not be reached (never
+    counted as errors; they only lengthen the wait between polls)."""
+    start: float
+    errors: int = 0
+    unreachable: int = 0
 
 
 @dataclass
@@ -170,11 +184,57 @@ class Deployer:
     def _publishes(self, engine: str | None) -> bool:
         return getattr(self.engines.get(engine), "publishes_port", True) if engine else True
 
-    def base_url(self, name: str, port: int, engine: str | None = None) -> str:
+    def base_url(self, name: str, port: int, engine: str | None = None, node: str = LOCAL_NODE_ID) -> str:
         """engine_base_host (if set) for engines with a published port; the container name otherwise (the decider
-        has no published port and is reachable only on its docker network)."""
+        has no published port and is reachable only on its docker network). On a remote node: its cluster IP."""
+        if self._is_remote(node):
+            return f"http://{self.nodes.config(node).cluster_ip}:{port}"
         host = (self.settings.engine_base_host if self._publishes(engine) else None) or container_name(name)
         return f"http://{host}:{port}"
+
+    # ---------- nodes ----------
+    @staticmethod
+    def _node_of(dep: Deployment | None) -> str:
+        """The node a deployment runs on (NULL and rows from before migration 41: the local node)."""
+        return (getattr(dep, "node", None) or LOCAL_NODE_ID) if dep is not None else LOCAL_NODE_ID
+
+    def _is_remote(self, node_id: str) -> bool:
+        return node_id != LOCAL_NODE_ID and self.nodes is not None
+
+    def _require_node(self, node_id: str) -> str:
+        if node_id != LOCAL_NODE_ID and (self.nodes is None or node_id not in self.nodes.ids()):
+            raise DeployError("unknown_node", f"node {node_id!r} is not configured", 400)
+        return node_id
+
+    def _docker_for(self, node_id: str = LOCAL_NODE_ID):
+        """The DockerController for a node: ``self.docker`` for the local node (exactly as before); for a remote node
+        its controller, in which transport failures raise NodeUnreachable (nodes.registry.RemoteDocker). The
+        controller is built on first use inside the (worker-thread) call, never on the event loop."""
+        if not self._is_remote(node_id):
+            return self.docker
+        self._require_node(node_id)
+
+        def controller():
+            try:
+                return self.nodes.docker(node_id)
+            except UnknownNode:
+                raise
+            except Exception as e:
+                if is_transport_error(e):
+                    raise NodeUnreachable(f"node {node_id} is unreachable: {e}") from e
+                raise
+        return RemoteDocker(controller, node_id)
+
+    def _node_budget(self, node_id: str, local):
+        """The budget to fit against on ``node_id`` (``local``: the budget refresh() just returned). A remote node
+        without a fresh memory reading refuses new starts (503 node_stale)."""
+        if not self._is_remote(node_id):
+            return local
+        stale = getattr(getattr(self.budget, "probe", None), "stale", None)
+        b = self.budget.current(node_id)
+        if b is None or (stale is not None and stale(node_id)):
+            raise DeployError("node_stale", f"no recent memory reading from node {node_id}; it may be offline", 503)
+        return b
 
     def _ref_allowed(self, ref: str) -> bool:
         if re.fullmatch(REPO_RE, ref) and ".." not in ref:
@@ -218,7 +278,10 @@ class Deployer:
             log.exception("state hook failed for deployment %s", dep_id)
 
     def _next_port(self, dep_id: int, tried: set[int]) -> int | None:
+        node = self._node_of(self._get(dep_id))
         try:
+            if node != LOCAL_NODE_ID:
+                return self._allocate_port(exclude_dep=dep_id, skip=tried, node_id=node)
             return self._allocate_port(exclude_dep=dep_id, skip=tried)
         except DeployError:
             return None
@@ -391,8 +454,11 @@ class Deployer:
 
     # ---------- lifecycle ----------
     async def deploy(self, req: DeployRequest, user_id: int | None) -> dict:
+        node = self._require_node(req.node)
         prep = self.prepare(req.engine, req.model_ref, req.config)
         system = is_system_engine(prep.engine)
+        if system and node != LOCAL_NODE_ID:
+            raise DeployError("node_unsupported", f"the {req.engine} engine runs only on the local node", 422)
         with self.db.session() as s:
             if s.scalar(select(Deployment).where(Deployment.name == req.name)):
                 raise DeployError("name_in_use", f"a deployment named {req.name} already exists", 409)
@@ -406,13 +472,14 @@ class Deployer:
             self.require_model_name(model_name, None)  # again under the lock: concurrent deploys
             if system:
                 self._require_single_system(req.engine)
-            budget = await self.budget.refresh()
+            budget = self._node_budget(node, await self.budget.refresh())
             fit = check_fit(prep.estimate, budget)
             if not fit.fits:
                 raise InsufficientMemory(fit)
-            port = self._allocate_port()
+            port = self._allocate_port() if node == LOCAL_NODE_ID else \
+                await asyncio.to_thread(self._allocate_port, node_id=node)  # lists the node's containers over SSH
             with self.db.session() as s:
-                dep = Deployment(name=req.name, engine=req.engine, model_ref=req.model_ref,
+                dep = Deployment(name=req.name, engine=req.engine, model_ref=req.model_ref, node=node,
                                  config=prep.cfg.model_dump(mode="json"), state="planned", port=port,
                                  priority=req.priority, alias=req.alias, reserved_bytes=prep.estimate.total,
                                  estimate=prep.estimate.as_dict(), created_by=user_id, system=system or None,
@@ -513,7 +580,7 @@ class Deployer:
                 self._fail_queued(dep_id, f"cannot start: {e.message}")
                 return False
             async with self.mem_lock:
-                budget = await self.budget.refresh()
+                budget = self._node_budget(self._node_of(dep), await self.budget.refresh())
                 # the queued row's reservation is already counted as committed; credit it back
                 fit = check_fit(prep.estimate, budget, extra_free=max(dep.reserved_bytes, 0))
                 if not fit.fits:
@@ -530,7 +597,8 @@ class Deployer:
 
     async def _free_port(self, dep_id: int, current: int | None) -> int:
         """``current`` unless another deployment or an unmanaged container uses it now, else a new port."""
-        used = await asyncio.to_thread(self._used_ports, dep_id)
+        node = self._node_of(self._get(dep_id))
+        used = await asyncio.to_thread(self._used_ports, dep_id, node)
         return current if current and current not in used else self._allocate_port(exclude_dep=dep_id, used=used)
 
     def _publish_waiters(self, exclude: int | None = None) -> None:
@@ -556,16 +624,13 @@ class Deployer:
             try:
                 self._check_not_deleting(*refs)
             except DeployError:
-                dep = self._get(dep_id)
-                if dep is not None and dep.state == "planned":  # fresh deploy: don't leave a row holding the name
-                    with self.db.session() as s:
-                        row = s.get(Deployment, dep_id)
-                        if row is not None:
-                            s.delete(row)
+                self._drop_if_planned(dep_id)
                 raise  # restart/reconfigure: row keeps its stopped/failed state
+            node = self._node_of(self._get(dep_id))
+            docker = self._docker_for(node)
             tried: set[int] = set()
             while True:
-                launch = LaunchContext(dep_id, name, port, prep.estimate.total, mem_total)
+                launch = LaunchContext(dep_id, name, port, prep.estimate.total, mem_total, node)
                 try:
                     spec = prep.engine.container_spec(prep.artifact, prep.cfg, prep.draft, launch, self.settings)
                 except ValueError as e:  # SpecError (a typed reason) or a config the engine cannot express
@@ -575,8 +640,8 @@ class Deployer:
                 if self.settings.install_id:
                     spec.labels = {**spec.labels, "dgxmm.install": self.settings.install_id}
                 try:
-                    await asyncio.to_thread(self.docker.remove_by_name, spec.name)
-                    cid = await asyncio.to_thread(self.docker.run, spec)
+                    await asyncio.to_thread(docker.remove_by_name, spec.name)
+                    cid = await asyncio.to_thread(docker.run, spec)
                     break
                 except SecretDeliveryFailed as e:
                     if e.exit_code is None:
@@ -588,6 +653,9 @@ class Deployer:
                     self._transition(dep_id, "failed", message=str(e), log_tail=tail, last_error=str(e),
                                      exit_code=e.exit_code)
                     raise DeployError("container_exited", str(e), 502)
+                except NodeUnreachable as e:
+                    self._drop_if_planned(dep_id)  # a fresh deploy creates nothing; a restart keeps its state
+                    raise DeployError("node_unreachable", str(e), 503)
                 except Exception as e:
                     tried.add(port)
                     # A HOST process (invisible from this container) holds the port: docker fails at start.
@@ -596,7 +664,7 @@ class Deployer:
                         len(tried) < PORT_ATTEMPTS else None
                     if nxt is None:
                         try:  # docker creates the container before starting it: don't leave it behind
-                            await asyncio.to_thread(self.docker.remove_by_name, spec.name)
+                            await asyncio.to_thread(docker.remove_by_name, spec.name)
                         except Exception:
                             log.warning("could not remove container %s after a failed start", spec.name,
                                         exc_info=True)
@@ -613,6 +681,15 @@ class Deployer:
             self.launching.pop(dep_id, None)
             if not started and self.gate.holders.get(dep_id) == "launch":
                 self.gate.release(dep_id)
+
+    def _drop_if_planned(self, dep_id: int) -> None:
+        """A fresh deploy that cannot launch: don't leave a row holding the name."""
+        dep = self._get(dep_id)
+        if dep is not None and dep.state == "planned":
+            with self.db.session() as s:
+                row = s.get(Deployment, dep_id)
+                if row is not None:
+                    s.delete(row)
 
     def _spawn_monitor(self, dep_id: int) -> None:
         old = self._monitors.get(dep_id)
@@ -638,63 +715,93 @@ class Deployer:
         self._spawn_monitor(dep_id)
 
     async def _monitor(self, dep_id: int) -> None:
-        start = self.clock()
-        consecutive_errors = 0
+        st = MonitorState(start=self.clock())
         while True:
-            await asyncio.sleep(self.settings.monitor_poll_s)
-            try:
-                dep = self._get(dep_id)
-                if dep is None or dep.state not in ("starting", "loading"):
-                    return
-                info = await asyncio.to_thread(self.docker.get, dep.container_id)
-                if info is None:
-                    self._transition(dep_id, "failed", message="container disappeared", last_error="container disappeared")
-                    return
-                if info.status in ("exited", "dead"):
-                    await self._fail_exited(dep, info.exit_code, info.oom_killed)
-                    return
-                if dep.state == "starting" and info.status == "running":
-                    self._transition(dep_id, "loading", message="container running; loading model")
-                mem = await asyncio.to_thread(self.budget.probe.meminfo)
-                if mem.available < self.settings.margin_bytes:
-                    await self._abort(dep, "aborted: available memory fell below the safety margin during startup")
-                    return
-                if self.clock() - start > self.settings.startup_timeout_s:
-                    await self._abort(dep, f"startup timed out after {self.settings.startup_timeout_s}s")
-                    return
-                if info.status == "running" and await self._healthy(dep):
-                    self._transition(dep_id, "ready", message="health check and test completion passed")
-                    return
-                consecutive_errors = 0  # Reset on success
-            except Exception as e:
-                consecutive_errors += 1
-                log.exception("monitor error for deployment %s (consecutive: %d)", dep_id, consecutive_errors)
-                if consecutive_errors >= 5:
-                    try:
-                        self._transition(dep_id, "failed", message="monitor error", last_error=f"monitor error: {e}")
-                    except Exception:
-                        log.exception("failed to transition deployment %s to failed after monitor errors", dep_id)
-                    return
+            await asyncio.sleep(self._monitor_wait(st))
+            if await self._monitor_tick(dep_id, st):
+                return
+
+    def _monitor_wait(self, st: MonitorState) -> float:
+        """The poll interval; while the deployment's remote node is unreachable it doubles each poll, up to
+        UNREACHABLE_BACKOFF_MAX_S."""
+        poll = self.settings.monitor_poll_s
+        if not st.unreachable:
+            return poll
+        return min(UNREACHABLE_BACKOFF_MAX_S, poll * 2 ** min(st.unreachable, 30))
+
+    async def _monitor_tick(self, dep_id: int, st: MonitorState) -> bool:
+        """One monitor poll with its error accounting; True when monitoring is over."""
+        try:
+            if await self._monitor_step(dep_id, st.start):
+                return True
+            st.errors = st.unreachable = 0  # Reset on success
+            return False
+        except NodeUnreachable as e:  # only raised for a remote node: never counts toward the 5-errors rule
+            st.unreachable += 1
+            log.warning("deployment %s: its node is unreachable (poll %d, retrying in %.1fs): %s", dep_id,
+                        st.unreachable, self._monitor_wait(st), e)
+            return False
+        except Exception as e:
+            st.errors += 1
+            log.exception("monitor error for deployment %s (consecutive: %d)", dep_id, st.errors)
+            if st.errors >= 5:
+                try:
+                    self._transition(dep_id, "failed", message="monitor error", last_error=f"monitor error: {e}")
+                except Exception:
+                    log.exception("failed to transition deployment %s to failed after monitor errors", dep_id)
+                return True
+            return False
+
+    async def _monitor_step(self, dep_id: int, start: float) -> bool:
+        """Check a starting/loading deployment once; True when it reached a final state (or is no longer starting)."""
+        dep = self._get(dep_id)
+        if dep is None or dep.state not in ("starting", "loading"):
+            return True
+        node = self._node_of(dep)
+        info = await asyncio.to_thread(self._docker_for(node).get, dep.container_id)
+        if info is None:
+            self._transition(dep_id, "failed", message="container disappeared", last_error="container disappeared")
+            return True
+        if info.status in ("exited", "dead"):
+            await self._fail_exited(dep, info.exit_code, info.oom_killed)
+            return True
+        if dep.state == "starting" and info.status == "running":
+            self._transition(dep_id, "loading", message="container running; loading model")
+        if self._is_remote(node):  # the node's last memory reading (budget refresh)
+            b = self.budget.current(node)
+            available = b.available if b is not None else None
+        else:
+            available = (await asyncio.to_thread(self.budget.probe.meminfo)).available
+        if available is not None and available < self.settings.margin_bytes:
+            await self._abort(dep, "aborted: available memory fell below the safety margin during startup")
+            return True
+        if self.clock() - start > self.settings.startup_timeout_s:
+            await self._abort(dep, f"startup timed out after {self.settings.startup_timeout_s}s")
+            return True
+        if info.status == "running" and await self._healthy(dep):
+            self._transition(dep_id, "ready", message="health check and test completion passed")
+            return True
+        return False
 
     async def _healthy(self, dep: Deployment) -> bool:
         engine = self.engines[dep.engine]
         cfg = engine.validate_config(dep.config)
         try:
-            return await engine.health(self.http, self.base_url(dep.name, dep.port, dep.engine),
+            return await engine.health(self.http, self.base_url(dep.name, dep.port, dep.engine, self._node_of(dep)),
                                        engine.served_name(cfg, dep.model_ref))
         except (httpx.HTTPError, OSError):
             return False
 
-    def _stored_logs(self, container_id: str) -> str:
+    def _stored_logs(self, container_id: str, node: str = LOCAL_NODE_ID) -> str:
         """The container's condensed, redacted log tail (worker thread: regexes over untrusted text)."""
-        return stored_tail(self.docker.logs(container_id, SCAN_LINES))
+        return stored_tail(self._docker_for(node).logs(container_id, SCAN_LINES))
 
     async def _fail_exited(self, dep: Deployment, exit_code: int | None, oom_killed: bool = False) -> None:
         """A container that exited on its own. It counts as out of memory only with evidence: Docker's OOMKilled, or
         the kernel OOM killer's line in its log. Exit 137 alone is a SIGKILL (docker kill, a stop timeout…): it is
         labelled as such and never recorded for calibration."""
         try:
-            logs = await asyncio.to_thread(self._stored_logs, dep.container_id)
+            logs = await asyncio.to_thread(self._stored_logs, dep.container_id, self._node_of(dep))
         except Exception:
             log.exception("failed to capture logs for deployment %s", dep.id)
             logs = ""
@@ -709,7 +816,7 @@ class Deployer:
             hint = ""
         msg = f"container exited with code {exit_code}{hint}"
         try:
-            await asyncio.to_thread(self.docker.stop_and_remove, dep.container_id)
+            await asyncio.to_thread(self._docker_for(self._node_of(dep)).stop_and_remove, dep.container_id)
         except Exception:
             log.exception("failed to cleanup container for deployment %s", dep.id)
         self._transition(dep.id, "failed", message=msg, log_tail=logs, last_error=msg, exit_code=exit_code,
@@ -734,7 +841,7 @@ class Deployer:
                     dep = self._get(dep_id)
                     if dep is None or dep.state not in self.LIVE_STATES or not dep.container_id:
                         continue
-                    info = await asyncio.to_thread(self.docker.get, dep.container_id)
+                    info = await asyncio.to_thread(self._docker_for(self._node_of(dep)).get, dep.container_id)
                     if info is None:
                         self._transition(dep_id, "failed", message="container disappeared",
                                          last_error="container disappeared", container_id=None)
@@ -742,18 +849,20 @@ class Deployer:
                     elif info.status in ("exited", "dead"):
                         await self._fail_exited(dep, info.exit_code, info.oom_killed)
                         failed.append(dep_id)
+            except NodeUnreachable as e:  # state unchanged while its node is offline
+                log.warning("liveness check of deployment %s skipped: %s", dep_id, e)
             except Exception:
                 log.warning("liveness check failed for deployment %s", dep_id, exc_info=True)
         return failed
 
     async def _abort(self, dep: Deployment, reason: str) -> None:
         try:
-            logs = await asyncio.to_thread(self._stored_logs, dep.container_id)
+            logs = await asyncio.to_thread(self._stored_logs, dep.container_id, self._node_of(dep))
         except Exception:
             log.exception("failed to capture logs for deployment %s", dep.id)
             logs = ""
         try:
-            await asyncio.to_thread(self.docker.stop_and_remove, dep.container_id)
+            await asyncio.to_thread(self._docker_for(self._node_of(dep)).stop_and_remove, dep.container_id)
         except Exception:
             log.exception("failed to cleanup container for deployment %s", dep.id)
         self._transition(dep.id, "failed", message=reason, log_tail=logs, last_error=reason, container_id=None)
@@ -796,15 +905,22 @@ class Deployer:
                 self.gate.withdraw(dep_id)
                 return self._transition(dep_id, "stopped", message=f"cancelled while queued ({reason})",
                                         actor=reason, container_id=None)
+            docker = self._docker_for(self._node_of(dep))
             if dep.state in ("planned", "failed"):
-                await asyncio.to_thread(self.docker.stop_and_remove, dep.container_id)
-                await self._remove_leftover(dep.name, dep_id)
+                try:
+                    await asyncio.to_thread(docker.stop_and_remove, dep.container_id)
+                except NodeUnreachable as e:
+                    raise DeployError("node_unreachable", f"could not stop container: {e}", 503)
+                await self._remove_leftover(dep.name, dep_id, self._node_of(dep))
                 return self._transition(dep_id, "stopped", message=f"cleaned up ({reason})", actor=reason,
                                         container_id=None)
             if dep.state != "stopping":
                 self._transition(dep_id, "stopping", message=message or f"stop requested ({reason})", actor=reason)
             try:
-                await asyncio.to_thread(self.docker.stop_and_remove, dep.container_id)
+                await asyncio.to_thread(docker.stop_and_remove, dep.container_id)
+            except NodeUnreachable as e:  # failed, container id kept: a stop once the node is back removes it
+                self._transition(dep_id, "failed", message=f"stop failed: {e}", last_error=f"stop failed: {e}")
+                raise DeployError("node_unreachable", f"could not stop container: {e}", 503)
             except Exception as e:
                 self._transition(dep_id, "failed", message=f"stop failed: {e}", last_error=f"stop failed: {e}")
                 raise DeployError("docker_error", f"could not stop container: {e}", 502)
@@ -819,6 +935,7 @@ class Deployer:
             if dep.state not in ("stopped", "failed"):
                 raise DeployError("not_stopped", f"deployment is {dep.state}; stop it first", 409)
             ref = model_ref or dep.model_ref
+            node = self._require_node(self._node_of(dep))
             prep = self.prepare(dep.engine, ref, config_override if config_override is not None else dep.config,
                                 existing_ref=dep.model_ref)
             if not dep.system:
@@ -826,7 +943,7 @@ class Deployer:
             async with self.mem_lock:
                 if not dep.system:
                     self.require_model_name(dep.alias or prep.engine.served_name(prep.cfg, ref), dep_id)
-                budget = await self.budget.refresh()
+                budget = self._node_budget(node, await self.budget.refresh())
                 fit = check_fit(prep.estimate, budget)
                 if not fit.fits:
                     raise InsufficientMemory(fit)
@@ -845,8 +962,12 @@ class Deployer:
             dep = self._require(dep_id)
             if dep.state not in ("stopped", "failed"):
                 raise DeployError("not_stopped", "stop the deployment before removing it", 409)
-            await asyncio.to_thread(self.docker.stop_and_remove, dep.container_id)
-            await self._remove_leftover(dep.name, dep_id)
+            node = self._node_of(dep)
+            try:
+                await asyncio.to_thread(self._docker_for(node).stop_and_remove, dep.container_id)
+            except NodeUnreachable as e:
+                raise DeployError("node_unreachable", f"could not remove container: {e}", 503)
+            await self._remove_leftover(dep.name, dep_id, node)
             for hook in self.before_removal_hooks:
                 try:
                     hook(dep_id)
@@ -867,10 +988,10 @@ class Deployer:
                     log.exception("removal hook failed for deployment %s", dep_id)
         self.events.publish("deployment_removed", {"id": dep_id})
 
-    async def _remove_leftover(self, name: str, dep_id: int) -> None:
+    async def _remove_leftover(self, name: str, dep_id: int, node: str = LOCAL_NODE_ID) -> None:
         """A container that never started (state "created") has no container_id in the DB: remove it by name, but
         only if its labels say it belongs to this deployment."""
-        fn = getattr(self.docker, "remove_leftover", None)
+        fn = getattr(self._docker_for(node), "remove_leftover", None)
         if fn is not None:
             await asyncio.to_thread(fn, container_name(name), dep_id)
 
@@ -1010,7 +1131,7 @@ class Deployer:
             if not (engine.supports_sleep and engine.sleep_enabled(cfg)):
                 raise DeployError("sleep_unsupported", "this deployment was not started with sleep mode", 409)
             try:
-                await engine.sleep(self.http, self.base_url(dep.name, dep.port))
+                await engine.sleep(self.http, self.base_url(dep.name, dep.port, node=self._node_of(dep)))
             except httpx.HTTPError as e:
                 raise DeployError("engine_error", f"sleep failed: {e}", 502)
             return self._transition(dep_id, "sleeping", message="sleeping (level 1: KV freed, weights offloaded)")
@@ -1079,7 +1200,7 @@ class Deployer:
                 engine = self.engines[dep.engine]
                 async with self.mem_lock:
                     self.require_model_name(self._model_name(dep), dep_id)
-                    budget = await self.budget.refresh()
+                    budget = self._node_budget(self._node_of(dep), await self.budget.refresh())
                     actual = next((u.actual for u in budget.deployments if u.deployment_id == dep_id), 0)
                     need = max(dep.reserved_bytes - actual, 0)
                     if need > budget.free_for_new:
@@ -1087,7 +1208,7 @@ class Deployer:
                                                            budget.free_for_new - need, self._stored_estimate(dep),
                                                            budget))
                     try:
-                        await engine.wake(self.http, self.base_url(dep.name, dep.port))
+                        await engine.wake(self.http, self.base_url(dep.name, dep.port, node=self._node_of(dep)))
                     except httpx.HTTPError as e:
                         raise DeployError("engine_error", f"wake failed: {e}", 502)
                     return self._transition(dep_id, "ready", message="woken up", last_error=None)

@@ -2,8 +2,14 @@
 from __future__ import annotations
 
 import os
+import socket
+import subprocess
 from pathlib import Path
 from typing import Any, Callable
+
+import docker.errors
+import requests
+import urllib3.exceptions
 
 from dgxmm.config import LOCAL_NODE_ID, NodeConfig, Settings
 from dgxmm.docker_ctl import DockerController
@@ -15,6 +21,61 @@ class UnknownNode(KeyError):
 
 class NodeUnreachable(RuntimeError):
     """Raised when a remote node cannot be reached."""
+
+
+# Failures of the way to the node (SSH client, socket, HTTP-over-SSH), as opposed to the node's Docker daemon
+# answering with an error (docker.errors.APIError) or the managed-label guard refusing (PermissionError).
+_TRANSPORT_ERRORS = (ConnectionError, TimeoutError, socket.timeout, EOFError, subprocess.SubprocessError,
+                     requests.exceptions.ConnectionError, requests.exceptions.Timeout, urllib3.exceptions.HTTPError)
+
+
+def is_transport_error(e: BaseException) -> bool:
+    """True if ``e`` means the node could not be reached (not that its Docker daemon refused the request)."""
+    if isinstance(e, NodeUnreachable):
+        return True
+    if isinstance(e, (docker.errors.APIError, PermissionError)):
+        return False  # APIError is an OSError (requests.HTTPError) but the daemon did answer
+    if isinstance(e, _TRANSPORT_ERRORS) or isinstance(e, OSError):
+        return True
+    if isinstance(e, docker.errors.DockerException):  # docker-py wraps transport failures ("... API version: ...")
+        seen: set[int] = set()
+        cur = e.__cause__ or e.__context__
+        while cur is not None and id(cur) not in seen:
+            seen.add(id(cur))
+            if not isinstance(cur, docker.errors.DockerException) and is_transport_error(cur):
+                return True
+            cur = cur.__cause__ or cur.__context__
+    return False
+
+
+class RemoteDocker:
+    """A remote node's DockerController in which every call that fails on the transport (SSH down, timeout, broken
+    pipe) raises NodeUnreachable instead; other errors pass through unchanged. The one place where transport errors
+    are mapped. ``controller`` is the controller or a zero-argument function returning it: then it is only built
+    inside the first method call (a worker thread), since connecting over SSH blocks."""
+
+    def __init__(self, controller: DockerController | Callable[[], DockerController], node_id: str):
+        self._resolve = controller if callable(controller) else (lambda: controller)
+        self.node_id = node_id
+
+    def _mapped(self, fn: Callable[[], Any]) -> Any:
+        try:
+            return fn()
+        except NodeUnreachable:
+            raise
+        except Exception as e:
+            if is_transport_error(e):
+                raise NodeUnreachable(f"node {self.node_id} is unreachable: {e}") from e
+            raise
+
+    def __getattr__(self, name: str):
+        if name.startswith("__") or not callable(getattr(DockerController, name, None)):
+            return self._mapped(lambda: getattr(self._resolve(), name))  # e.g. client, directory
+
+        def call(*args, **kwargs):
+            return self._mapped(lambda: getattr(self._resolve(), name)(*args, **kwargs))
+        call.__name__ = name
+        return call
 
 
 class NodeRegistry:

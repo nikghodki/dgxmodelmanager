@@ -7,9 +7,10 @@ from typing import Any, Literal
 import httpx
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from dgxmm.config import Mount, Settings
+from dgxmm.config import LOCAL_NODE_ID, Mount, Settings
 from dgxmm.engines.argguard import VLLM_EXTRA_FLAGS, validate_extra_args
-from dgxmm.engines.base import (SERVED_NAME_RE, ContainerSpec, EngineMetrics, LaunchContext, container_name,
+from dgxmm.engines.base import (REMOTE_NETWORK, SERVED_NAME_RE, ContainerSpec, EngineMetrics, LaunchContext,
+                                container_name, remote_hf_mount,
                                 default_served_name, managed_labels, openai_health)
 from dgxmm.engines.prom import buckets, counter, gauge, parse_samples
 from dgxmm.inventory.artifact import REPO_RE, ModelArtifact
@@ -178,10 +179,15 @@ class VllmEngine:
         env = {"HF_HUB_OFFLINE": "1", "VLLM_NO_USAGE_STATS": "1", "DO_NOT_TRACK": "1"}
         if cfg.enable_sleep_mode:
             env["VLLM_SERVER_DEV_MODE"] = "1"  # exposes /sleep and /wake_up
-        mounts = [Mount(host=settings.hf_cache.host, target="/root/.cache/huggingface"), *settings.vllm_cache_mounts]
+        if launch.node == LOCAL_NODE_ID:
+            mounts = [Mount(host=settings.hf_cache.host, target="/root/.cache/huggingface"), *settings.vllm_cache_mounts]
+            network, publish_bind = settings.docker_network, settings.publish_bind
+        else:  # remote node: its own HF cache only, read-only; its default bridge, published on its cluster IP
+            hf, publish_bind = remote_hf_mount(settings, launch.node)
+            mounts, network = [hf], REMOTE_NETWORK
         return ContainerSpec(name=container_name(launch.name), image=settings.images.vllm, command=cmd, environment=env,
                              mounts=mounts, labels=managed_labels(launch.deployment_id, self.name),
-                             network=settings.docker_network, port=launch.port, publish_bind=settings.publish_bind)
+                             network=network, port=launch.port, publish_bind=publish_bind)
 
     async def health(self, http: httpx.AsyncClient, base_url: str, served_name: str) -> bool:
         return await openai_health(http, base_url, served_name)

@@ -34,6 +34,16 @@ class FakeContainer:
                                 "Ports": {f"{p}/tcp": [{"HostIp": b, "HostPort": str(p)}] for p, b in self.ports}},
         }
 
+    @property
+    def ports_bind_ip(self) -> str | None:
+        """Host IP the (first) published port is bound to, from containers.run(ports=...)."""
+        return self.ports[0][1] if self.ports else None
+
+    @property
+    def mount_sources_modes(self) -> list[tuple[str, str]]:
+        """(host source, mode) of each bind mount, from containers.run(volumes=...)."""
+        return [(h, m) for h, _t, m in self.mounts]
+
     def reload(self):
         pass
 
@@ -197,6 +207,7 @@ class FakeContainers:
         self.client = client
 
     def list(self, all=False, filters=None, sparse=False):
+        self.client._maybe_raise()
         items = list(self.client._containers.values())
         if filters and "label" in filters:
             k, _, v = filters["label"].partition("=")
@@ -204,6 +215,7 @@ class FakeContainers:
         return items
 
     def get(self, key):
+        self.client._maybe_raise()
         # Support skip_gets to allow initial gets to succeed before failing
         if self.client.skip_gets > 0:
             self.client.skip_gets -= 1
@@ -224,6 +236,7 @@ class FakeContainers:
 
     def run(self, image, command=None, name=None, environment=None, labels=None, network=None, volumes=None,
             ports=None, entrypoint=None, remove=False, **kw):
+        self.client._maybe_raise()
         if (labels or {}).get("dgxmm.helper") == "true":
             call = dict(image=image, command=command, name=name, environment=environment, labels=labels,
                         network=network, volumes=volumes, ports=ports, entrypoint=entrypoint, remove=remove, **kw)
@@ -301,6 +314,14 @@ class FakeDockerClient:
         self.helper_killed = 0
         self.exec_output = ""
         self.exec_fail = False
+        # an exception raised by every containers.get/list/run (e.g. the node's SSH transport is down)
+        self.raise_on_all: Exception | None = None
+        self.raised = 0  # how many times raise_on_all was raised
+
+    def _maybe_raise(self) -> None:
+        if self.raise_on_all is not None:
+            self.raised += 1
+            raise self.raise_on_all
 
     @staticmethod
     def default_image_labels() -> dict:

@@ -7,7 +7,7 @@ from typing import Any, Protocol
 import httpx
 from pydantic import BaseModel
 
-from dgxmm.config import Mount, Settings
+from dgxmm.config import LOCAL_NODE_ID, Mount, Settings
 from dgxmm.inventory.artifact import ModelArtifact
 from dgxmm.memory.estimate import MemoryEstimate
 
@@ -66,6 +66,20 @@ class LaunchContext:
     port: int
     reserved: int
     mem_total: int
+    node: str = LOCAL_NODE_ID  # where the container runs (NodeConfig.id)
+
+
+REMOTE_NETWORK = "bridge"  # a remote node's default Docker network: DGXMM's own networks exist only on the local node
+HF_TARGET = "/root/.cache/huggingface"
+
+
+def remote_hf_mount(settings: Settings, node_id: str) -> tuple[Mount, str]:
+    """(read-only mount of the remote node's HF cache, the node's publish address). Only the node's own HF cache is
+    mounted there: the local node's other host paths (e.g. vllm_cache_mounts) do not exist on it."""
+    node = settings.node(node_id)
+    if not node.hf_cache_host:
+        raise SpecError("node_hf_cache_missing", f"node {node_id} has no hf_cache_host configured")
+    return Mount(host=node.hf_cache_host, target=HF_TARGET, mode="ro"), node.publish_bind or node.cluster_ip
 
 
 class Engine(Protocol):
