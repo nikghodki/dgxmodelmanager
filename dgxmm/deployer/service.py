@@ -504,6 +504,18 @@ class Deployer:
     async def deploy(self, req: DeployRequest, user_id: int | None) -> dict:
         node = self._require_node(req.node)
         prep = self.prepare(req.engine, req.model_ref, req.config)
+        # Check weights presence on remote nodes (Task 6)
+        if self._is_remote(node) and prep.artifact.source == "hf":
+            if self.node_probe is None:
+                raise DeployError("node_probe_unavailable", "node probe is not configured", 500)
+            from dgxmm.nodes.weights_sync import weights_present
+            if not weights_present(self.node_probe, node, prep.artifact):
+                raise DeployError(
+                    "weights_missing",
+                    f"weights for {req.model_ref} are not present on node {node}",
+                    409,
+                    action={"type": "copy_weights", "node": node, "ref": prep.artifact.ref, "revision": prep.artifact.revision}
+                )
         system = is_system_engine(prep.engine)
         if system and node != LOCAL_NODE_ID:
             raise DeployError("node_unsupported", f"the {req.engine} engine runs only on the local node", 422)

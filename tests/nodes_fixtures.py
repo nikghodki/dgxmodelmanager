@@ -302,6 +302,10 @@ def deployer_two_nodes(two_node_registry, tmp_path, fake_hf_repo):
     engines_http = FakeEngines()
     probe = FakeNodesProbe()
 
+    # Create NodeProbe for remote weight checks
+    from dgxmm.nodes.probe import NodeProbe
+    node_probe = NodeProbe(two_node_registry, settings)
+    
     deployer = Deployer(
         settings=settings,
         db=db,
@@ -310,12 +314,17 @@ def deployer_two_nodes(two_node_registry, tmp_path, fake_hf_repo):
         engines=build_engines(settings),
         http=engines_http.client(),
         events=EventBroker(),
-        nodes=two_node_registry
+        nodes=two_node_registry,
+        node_probe=node_probe
     )
     deployer.budget = BudgetService(settings, probe, deployer.usage_rows, nodes=two_node_registry)
     deployer.engines_http = engines_http
     deployer.probe = probe
     deployer.fake = two_node_registry.fake
+    
+    # Set up probe container for weights presence checks (Task 6)
+    two_node_registry.fake("dgx-2").add_unmanaged("dgxmm-node-probe", image="probe:latest", status="running")
+    two_node_registry.fake("dgx-2").exec_code = 0  # weights present by default
 
     def set_free(node_id: str, available: int) -> None:
         if node_id == "local":

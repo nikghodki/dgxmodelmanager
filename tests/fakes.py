@@ -66,7 +66,13 @@ class FakeContainer:
     def exec_run(self, cmd, **kwargs):
         """Execute command in container; returns (exit_code, output)."""
         output = self.client.exec_output if hasattr(self.client, 'exec_output') and self.client.exec_output else ""
-        exit_code = 0 if not (hasattr(self.client, 'exec_fail') and self.client.exec_fail) else 1
+        # Check for exec_code first (if explicitly set), then exec_fail, default to 0
+        if hasattr(self.client, 'exec_code') and self.client.exec_code is not None:
+            exit_code = self.client.exec_code
+        elif hasattr(self.client, 'exec_fail') and self.client.exec_fail:
+            exit_code = 1
+        else:
+            exit_code = 0
         return exit_code, output.encode() if isinstance(output, str) else output
 
 
@@ -314,6 +320,7 @@ class FakeDockerClient:
         self.helper_killed = 0
         self.exec_output = ""
         self.exec_fail = False
+        self.exec_code = None
         # an exception raised by every containers.get/list/run (e.g. the node's SSH transport is down)
         self.raise_on_all: Exception | None = None
         self.raised = 0  # how many times raise_on_all was raised
