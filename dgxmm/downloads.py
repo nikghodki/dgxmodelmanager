@@ -204,8 +204,7 @@ class DownloadService:
             if not re.fullmatch(PATTERN_RE, p) or ".." in p:
                 raise DownloadError("invalid_pattern", f"invalid file pattern {p!r}", 422)
         with self.db.session() as s:
-            if s.scalar(select(Download).where(Download.repo_id == repo_id, Download.state.in_(("queued", "running")))):
-                raise DownloadError("already_downloading", f"{repo_id} is already downloading", 409)
+            self._require_idle(s, repo_id)
         try:
             details = self.hub.details(repo_id)
         except Exception as e:
@@ -270,8 +269,7 @@ class DownloadService:
             raise DownloadError("pins_unavailable", f"the pinned hash list of {repo_id} cannot be read ({e}); "
                                                     "reinstall DGXMM", 500)
         with self.db.session() as s:
-            if s.scalar(select(Download).where(Download.repo_id == repo_id, Download.state.in_(("queued", "running")))):
-                raise DownloadError("already_downloading", f"{repo_id} is already downloading", 409)
+            self._require_idle(s, repo_id)
             row = Download(repo_id=repo_id, revision=m.revision, files=sorted(pins), bytes_total=0, state="queued",
                            created_by=user_id)
             s.add(row)
@@ -291,19 +289,35 @@ class DownloadService:
         self._tasks[dl_id] = asyncio.get_running_loop().create_task(run(dl_id))
         await asyncio.sleep(0)
 
+    @staticmethod
+    def _require_idle(s, repo_id: str) -> None:
+        """409 while a download, or a copy to a node (it reads this repo), of ``repo_id`` is queued or running."""
+        busy = s.scalar(select(Download).where(Download.repo_id == repo_id, Download.state.in_(("queued", "running"))))
+        if busy is not None and busy.kind == "copy":
+            raise DownloadError("already_downloading", f"{repo_id} is being copied to {busy.node}; wait for the copy "
+                                                       "or cancel it", 409)
+        if busy is not None:
+            raise DownloadError("already_downloading", f"{repo_id} is already downloading", 409)
+
     def track(self, dl_id: int, task: asyncio.Task, job) -> None:
         """A job run by another service in a Download row (a weight copy, dgxmm/nodes/weights_sync.py): cancel()
         sees its task and stops it with ``job.kill()``."""
         self._tasks[dl_id] = task
         self._jobs[dl_id] = job
-        task.add_done_callback(lambda _t: (self._tasks.pop(dl_id, None), self._jobs.pop(dl_id, None)))
+        def done(_t):
+            self._tasks.pop(dl_id, None)
+            self._jobs.pop(dl_id, None)
+            self._cancel.discard(dl_id)
+        task.add_done_callback(done)
 
     def recover(self) -> int:
         """At startup: no download task survives a restart, so queued/running rows are stale."""
         with self.db.session() as s:
             rows = list(s.scalars(select(Download).where(Download.state.in_(("queued", "running")))))
             for d in rows:
-                d.state, d.error = "failed", "interrupted by dgxmm restart; start the download again"
+                d.state = "failed"
+                d.error = (f"copy to {d.node} interrupted by dgxmm restart; start the copy again" if d.kind == "copy"
+                           else "interrupted by dgxmm restart; start the download again")
             n = len(rows)
         if n:
             log.info("marked %d interrupted download(s) failed", n)

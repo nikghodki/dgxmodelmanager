@@ -338,7 +338,13 @@ class Deployer:
         that puts it there). Checked through the node's probe container, before mem_lock and in a worker thread
         (never SSH I/O on the event loop or under the lock). A stale node is refused first (as under the lock); a
         check that cannot run is 503, never reported as missing weights."""
-        if not self._is_remote(node_id) or prep.artifact.source != "hf":
+        from dgxmm.nodes.weights_sync import gguf_copy_ref, gguf_in_hf_cache, weights_present
+        art, hf_local = prep.artifact, self.settings.hf_cache.local
+        if not self._is_remote(node_id):
+            return
+        if art.source == "gguf" and not gguf_in_hf_cache(art, hf_local):
+            return  # refused by the engine (remote_container_path: only GGUFs in the HF cache run on a node)
+        if art.source not in ("hf", "gguf"):
             return
         if self._node_stale(node_id):
             raise DeployError("node_stale", f"no recent memory reading from node {node_id}; it may be offline", 503)
@@ -346,20 +352,21 @@ class Deployer:
         if getattr(probe, "exec", None) is None:
             raise DeployError("weights_check_failed", f"cannot check the weights on node {node_id}: no node probe",
                               503)
-        from dgxmm.nodes.weights_sync import weights_present
-        art = prep.artifact
         try:
-            present = await asyncio.to_thread(weights_present, probe, node_id, art)
+            present = await asyncio.to_thread(weights_present, probe, node_id, art, hf_local)
         except Exception as e:
             if is_transport_error(e):
                 raise DeployError("node_unreachable", f"node {node_id} is unreachable: {e}", 503)
             raise DeployError("weights_check_failed", f"could not check the weights of {art.ref} on node {node_id}: "
                                                       f"{e}", 503)
         if not present:
-            raise DeployError("weights_missing", f"{art.ref} (revision {art.revision}) is not in the HF cache of node "
-                                                 f"{node_id}; copy it there first", 409,
-                              action={"type": "copy_weights", "node": node_id, "ref": art.ref,
-                                      "revision": art.revision})
+            ref, revision = (art.ref, art.revision) if art.source == "hf" else (gguf_copy_ref(art, hf_local) or
+                                                                                 (None, None))
+            extra = {"action": {"type": "copy_weights", "node": node_id, "ref": ref, "revision": revision}} \
+                if ref else {}  # a GGUF outside any snapshot: nothing copy_weights could copy
+            what = f"{ref} (revision {revision})" if ref else art.ref
+            raise DeployError("weights_missing", f"{what} is not in the HF cache of node {node_id}; copy it there "
+                                                 "first", 409, **extra)
 
     async def _remote_unmanaged_ports(self, node_id: str) -> set[int]:
         """_unmanaged_ports of a remote node, taken before mem_lock (never SSH I/O while holding it)."""

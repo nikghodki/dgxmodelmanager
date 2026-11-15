@@ -152,7 +152,9 @@ def test_copy_argv_lists_only_the_snapshot_its_blobs_and_refs(fake_hf_repo, sett
     blobs = sorted(f"{TINY}/blobs/{REV[:8]}-{n}" for n in ("config.json", "model.safetensors", "sub_t.json"))
     assert tar == ["tar", "-C", f"{settings.hf_cache.local}/hub", "-cf", "-", "--no-recursion", TINY, "--recursion",
                    *blobs, f"{TINY}/refs", f"{TINY}/snapshots/{REV}"]  # the links last: a cut copy has no dangling one
-    assert ssh == ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-l", "dgxuser", "--", "192.0.2.2",
+    from dgxmm.nodes.registry import ssh_config_path
+    assert ssh == ["ssh", "-F", str(ssh_config_path()), "-o", "StrictHostKeyChecking=yes", "-o", "BatchMode=yes",
+                   "-o", "ConnectTimeout=10", "-l", "dgxuser", "--", "192.0.2.2",
                    "tar", "-C", "/home/dgxuser/.cache/huggingface/hub", "-xf", "-"]
     assert not any(".." in a.split("/") for a in tar + ssh)
 
@@ -438,3 +440,107 @@ def test_api_copy_weights_refusals_are_400(nodes_api, node, body, code):
     r = nodes_api.post(URL.format(node), json=body, headers=h)
     assert r.status_code == 400 and r.json()["detail"]["code"] == code, r.text
     assert nodes_api.spawn.procs == []
+
+
+# ---------- fix round 1 ----------
+
+def _hf_gguf(settings, repo="org/g", rev="abc", name="m-Q4_K_M.gguf"):
+    from tests.conftest import write_gguf
+    p = Path(settings.hf_cache.local) / "hub" / ("models--" + repo.replace("/", "--")) / "snapshots" / rev / name
+    write_gguf(p, pad_bytes=GIB)
+    return p
+
+
+async def test_remote_gguf_absent_on_node_is_refused(deployer_two_nodes):
+    from dgxmm.deployer.service import DeployRequest
+    d = deployer_two_nodes
+    p = _hf_gguf(d.settings)
+    d.inventory.refresh()
+    req = DeployRequest(name="g", engine="llamacpp", model_ref=d.inventory.get(str(p)).ref, node="dgx-2")
+    with pytest.raises(DeployError) as e:
+        await d.deploy(req, user_id=1)
+    assert (e.value.code, e.value.status) == ("weights_missing", 409)
+    assert e.value.extra["action"] == {"type": "copy_weights", "node": "dgx-2", "ref": "org/g", "revision": "abc"}
+    assert d.fake("dgx-2").exec_calls == [["sh", "-c", WEIGHTS_CHECK_SCRIPT, "sh",
+                                           "/hf/hub/models--org--g/snapshots/abc/m-Q4_K_M.gguf"]]
+    assert d.fake("dgx-2").run_calls == [] and d.list_views() == []
+    d.fake("dgx-2").weights_on_node = {"org/g"}  # copied: the deploy goes ahead
+    v = await d.deploy(req, user_id=1)
+    assert d._get(v["id"]).node == "dgx-2" and len(d.fake("dgx-2").run_calls) == 1
+
+
+async def test_transport_error_in_the_presence_check_is_node_unreachable(deployer_two_nodes, qwen_req):
+    import requests
+    d = deployer_two_nodes
+    d.fake("dgx-2").raise_on_all = requests.exceptions.ConnectionError("ssh: connect to host 192.0.2.2: timed out")
+    with pytest.raises(DeployError) as e:
+        await d.deploy(qwen_req.model_copy(update={"node": "dgx-2"}), user_id=1)
+    assert (e.value.code, e.value.status) == ("node_unreachable", 503)
+    assert d.fake("dgx-2").raised == 1  # the presence check, the first remote I/O, already mapped it
+    assert d.fake("dgx-2").exec_calls == [] and d.list_views() == []
+
+
+def test_copy_ssh_pins_the_config_nodes_registry_wrote(two_node_registry):
+    from dgxmm.nodes.registry import ssh_config_path
+    cfg = ssh_config_path()
+    assert cfg == Path(os.environ["HOME"]) / ".ssh" / "config" and cfg.exists()  # written by the registry
+    assert "StrictHostKeyChecking yes" in cfg.read_text() and "known_hosts_dgx-2" in cfg.read_text()
+    _tar, ssh = copy_argv("/hf-local", two_node_registry.config("dgx-2"), TINY, REV)
+    assert ssh[:7] == ["ssh", "-F", str(cfg), "-o", "StrictHostKeyChecking=yes", "-o", "BatchMode=yes"]
+
+
+def test_migration_44_adds_kind_and_node_and_keeps_old_rows_null(tmp_path):
+    import sqlite3
+    from sqlalchemy import create_engine
+    from dgxmm.db import Database
+    from dgxmm.migrations import migrate
+    path = tmp_path / "v43.sqlite3"
+    Database(f"sqlite:///{path}").engine.dispose()
+    conn = sqlite3.connect(str(path), isolation_level=None)
+    conn.execute("DELETE FROM schema_version WHERE version = 44")
+    conn.execute("ALTER TABLE downloads DROP COLUMN kind")
+    conn.execute("ALTER TABLE downloads DROP COLUMN node")
+    conn.execute("INSERT INTO downloads (repo_id, revision, files, state, bytes_done, bytes_total, created_at) "
+                 "VALUES ('a/b', 'main', '[]', 'done', 0, 0, '2026-01-01 00:00:00')")
+    conn.close()
+    engine = create_engine(f"sqlite:///{path}")
+    assert migrate(engine) == [44]
+    engine.dispose()
+    conn = sqlite3.connect(str(path))
+    cols = {r[1] for r in conn.execute('PRAGMA table_info("downloads")')}
+    assert {"kind", "node"} <= cols
+    assert conn.execute("SELECT kind, node FROM downloads").fetchall() == [(None, None)]
+    conn.close()
+
+
+async def test_finished_copy_leaves_no_cancel_flag(sync):
+    s = sync(tar={"hang": True}, ssh={"hang": True})
+    job = await s.copy_weights("dgx-2", "Qwen/Qwen3-Tiny", REV)
+    sync.downloads.cancel(job.id)
+    await finished(sync.downloads, job.id)
+    await asyncio.gather(job.task, return_exceptions=True)
+    await asyncio.sleep(0)  # the done callbacks
+    assert job.id not in sync.downloads._cancel and job.id not in sync.downloads._tasks
+    assert job.id not in s.jobs
+
+
+async def test_copy_in_flight_blocks_hub_download_with_a_copy_message(sync):
+    from dgxmm.downloads import DownloadError
+    s = sync(tar={"hang": True}, ssh={"hang": True})
+    job = await s.copy_weights("dgx-2", "Qwen/Qwen3-Tiny", REV)
+    with pytest.raises(DownloadError) as e:
+        sync.downloads.start("Qwen/Qwen3-Tiny")
+    assert e.value.status == 409 and "being copied to dgx-2" in e.value.message
+    sync.downloads.cancel(job.id)
+    await finished(sync.downloads, job.id)
+
+
+def test_recover_names_interrupted_copies_as_copies(sync):
+    from dgxmm.db import Download
+    with sync.db.session() as s:
+        s.add(Download(repo_id="a/b", revision="main", files=[], state="running", kind="copy", node="dgx-2"))
+        s.add(Download(repo_id="c/d", revision="main", files=[], state="queued"))
+    assert sync.downloads.recover() == 2
+    errors = {v["repo_id"]: v["error"] for v in sync.downloads.list()}
+    assert "copy" in errors["a/b"] and "dgx-2" in errors["a/b"] and "download" not in errors["a/b"]
+    assert errors["c/d"] == "interrupted by dgxmm restart; start the download again"

@@ -15,6 +15,12 @@ from dgxmm.config import LOCAL_NODE_ID, NodeConfig, Settings
 from dgxmm.docker_ctl import DockerController
 
 
+def ssh_config_path() -> Path:
+    """The ssh client config NodeRegistry writes ($HOME/.ssh/config: per-node user, key, pinned known_hosts,
+    StrictHostKeyChecking). Passed explicitly (ssh -F) by the weight copy: OpenSSH resolves ~ from passwd, not $HOME."""
+    return Path(os.environ.get("HOME", str(Path.home()))) / ".ssh" / "config"
+
+
 class UnknownNode(KeyError):
     """Raised when a node ID is not found in the registry."""
 
@@ -100,11 +106,9 @@ class NodeRegistry:
     
     def _write_ssh_config(self, remote_nodes: list[NodeConfig]) -> None:
         """Write SSH config with pinned known_hosts for remote nodes."""
-        home = Path(os.environ.get("HOME", str(Path.home())))
-        ssh_dir = home / ".ssh"
+        config_path = ssh_config_path()
+        ssh_dir = config_path.parent
         ssh_dir.mkdir(mode=0o700, exist_ok=True)
-        
-        config_path = ssh_dir / "config"
         config_lines = []
         
         for node in remote_nodes:

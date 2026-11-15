@@ -20,7 +20,7 @@ import os
 import posixpath
 import re
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Callable
 
 from sqlalchemy import select
@@ -28,6 +28,7 @@ from sqlalchemy import select
 from dgxmm.config import LOCAL_NODE_ID, NodeConfig
 from dgxmm.db import Download
 from dgxmm.inventory.artifact import REPO_RE, ModelArtifact
+from dgxmm.nodes.registry import ssh_config_path
 
 log = logging.getLogger(__name__)
 
@@ -70,8 +71,45 @@ def validate_revision(revision: str) -> None:
         raise ValueError(f"invalid revision {revision!r}")
 
 
-def weights_paths(artifact: ModelArtifact) -> list[str]:
-    """The probe-side paths of every file of an HF snapshot (config.json first)."""
+def _hf_relative(local_path: str, hf_local: str) -> PurePosixPath | None:
+    """``local_path`` relative to this node's HF cache (None: outside it); ValueError for a ``..`` component."""
+    try:
+        rel = PurePosixPath(Path(local_path).relative_to(Path(hf_local)).as_posix())
+    except ValueError:
+        return None
+    if ".." in rel.parts or not rel.parts:
+        raise ValueError(f"invalid model path {local_path!r}")
+    return rel
+
+
+def gguf_in_hf_cache(artifact: ModelArtifact, hf_local: str) -> bool:
+    return artifact.source == "gguf" and _hf_relative(artifact.local_path, hf_local) is not None
+
+
+def gguf_copy_ref(artifact: ModelArtifact, hf_local: str) -> tuple[str, str] | None:
+    """(repo id, revision) of a GGUF inside an HF snapshot (hub/models--org--name/snapshots/<rev>/...), the
+    snapshot copy_weights copies; None if the file is not in a snapshot."""
+    rel = _hf_relative(artifact.local_path, hf_local)
+    if rel is None or len(rel.parts) < 5 or rel.parts[0] != "hub" or rel.parts[2] != "snapshots":
+        return None
+    repo_dir, revision = rel.parts[1], rel.parts[3]
+    try:
+        validate_repo_dir(repo_dir)
+        validate_revision(revision)
+    except ValueError:
+        return None
+    org, _sep, name = repo_dir[len("models--"):].partition("--")
+    return f"{org}/{name}", revision
+
+
+def weights_paths(artifact: ModelArtifact, hf_local: str | None = None) -> list[str]:
+    """The probe-side paths to test: every file of an HF snapshot (config.json first), or the one GGUF file
+    (``hf_local``: this node's HF cache, the GGUF must be inside it)."""
+    if artifact.source == "gguf":
+        rel = _hf_relative(artifact.local_path, hf_local) if hf_local else None
+        if rel is None:
+            raise ValueError(f"{artifact.local_path} is outside the HF cache; it cannot be on a remote node")
+        return [f"{PROBE_HF}/{rel}"]
     repo_dir = repo_dir_for(artifact.ref)
     validate_revision(artifact.revision or "")
     snap = f"{PROBE_HF}/hub/{repo_dir}/snapshots/{artifact.revision}"
@@ -82,13 +120,13 @@ def weights_paths(artifact: ModelArtifact) -> list[str]:
     return [f"{snap}/{f}" for f in files]
 
 
-def weights_present(probe, node_id: str, artifact: ModelArtifact) -> bool:
-    """True if every file of ``artifact``'s snapshot is in node ``node_id``'s HF cache. Blocking (SSH): call it from
-    a worker thread. Errors of the exec itself (node unreachable, no probe container) propagate: they are not an
-    answer."""
-    if artifact.source != "hf":
-        raise ValueError("only Hugging Face snapshots are checked on a node")
-    out = probe.exec(node_id, ["sh", "-c", WEIGHTS_CHECK_SCRIPT, "sh", *weights_paths(artifact)])
+def weights_present(probe, node_id: str, artifact: ModelArtifact, hf_local: str | None = None) -> bool:
+    """True if every file of ``artifact`` (an HF snapshot, or a GGUF inside this node's HF cache ``hf_local``) is in
+    node ``node_id``'s HF cache. Blocking (SSH): call it from a worker thread. Errors of the exec itself (node
+    unreachable, no probe container) propagate: they are not an answer."""
+    if artifact.source not in ("hf", "gguf"):
+        raise ValueError(f"cannot check a {artifact.source} artifact on a node")
+    out = probe.exec(node_id, ["sh", "-c", WEIGHTS_CHECK_SCRIPT, "sh", *weights_paths(artifact, hf_local)])
     return out.strip() == PRESENT
 
 
@@ -142,7 +180,9 @@ def copy_argv(local_hf: str, node: NodeConfig, repo_dir: str, revision: str) -> 
     remote_hub = posixpath.join(host, "hub")
     if not re.fullmatch(r"^/[A-Za-z0-9._/-]+$", remote_hub):
         raise ValueError(f"node {node.id}: hf_cache_host {host!r} has characters a remote shell would interpret")
-    ssh = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-l", user, "--", node.cluster_ip,
+    # the config NodeRegistry wrote (key, pinned known_hosts per node), explicit: never ~ from passwd
+    ssh = ["ssh", "-F", str(ssh_config_path()), "-o", "StrictHostKeyChecking=yes", "-o", "BatchMode=yes",
+           "-o", "ConnectTimeout=10", "-l", user, "--", node.cluster_ip,
            "tar", "-C", remote_hub, "-xf", "-"]
     return tar, ssh
 
@@ -229,6 +269,7 @@ class WeightsSync:
         self._publish(job.id)
         job.task = asyncio.get_running_loop().create_task(self._run(job, tar_argv, ssh_argv))
         self.jobs[job.id] = job
+        job.task.add_done_callback(lambda _t: self.jobs.pop(job.id, None))  # also a task cancelled before it ran
         self.downloads.track(job.id, job.task, job)  # Downloads cancel -> job.kill()
         return job
 
@@ -272,8 +313,6 @@ class WeightsSync:
             await self._kill(procs)
             self._update(job.id, state="failed", error=f"copy failed: {e}")
             log.warning("copy of %s to %s failed", job.ref, job.node, exc_info=True)
-        finally:
-            self.jobs.pop(job.id, None)
 
     async def _wait(self, tar, ssh) -> str | None:
         """Wait for both; when one exits non-zero the other is killed. The error text (None: both exited 0) has the
