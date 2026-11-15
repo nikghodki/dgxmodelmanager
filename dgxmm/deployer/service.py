@@ -55,6 +55,12 @@ REMOTE_LIVENESS_TIMEOUT_S = 5.0  # longest a liveness check waits on a remote no
 CLUSTER_ENGINES = ("vllm", "llamacpp")  # engines that can run one deployment across several nodes
 
 
+def cluster_ready(node, engine: str) -> bool:
+    """A node (NodeConfig) can hold a rank of an ``engine`` cluster: cluster_ip set, plus nccl for vLLM (tensor
+    parallel over NCCL); llama.cpp ranks use the ggml RPC backend and need no NCCL config (ruling R14)."""
+    return node.cluster_ip is not None and (engine != "vllm" or node.nccl is not None)
+
+
 class Placement(BaseModel):
     """Deployment placement: single-node or multi-node cluster."""
     kind: Literal["single", "cluster"]
@@ -650,16 +656,18 @@ class Deployer:
                 raise DeployError("cluster_needs_two_nodes", 
                                   "cluster deployment requires at least 2 distinct nodes", 400)
             
-            # All nodes must be configured with cluster_ip and nccl
+            # All nodes must be configured with cluster_ip; nccl only for vLLM (llama.cpp ranks talk ggml RPC,
+            # ruling R14)
             for node_id in placement.nodes:
                 node_cfg = next((n for n in self.settings.nodes if n.id == node_id), None)
                 if node_cfg is None:
                     raise DeployError("cluster_node_not_ready",
                                       f"node {node_id} is not configured", 400)
-                if node_cfg.cluster_ip is None or node_cfg.nccl is None:
+                if not cluster_ready(node_cfg, engine):
+                    missing = "cluster_ip or nccl config" if engine == "vllm" else "cluster_ip"
                     raise DeployError("cluster_node_not_ready",
                                       f"node {node_id} is not ready for cluster deployments "
-                                      "(missing cluster_ip or nccl config)", 400)
+                                      f"(missing {missing})", 400)
 
     def placement_options(self, req: DeployRequest, prep: Prepared | None = None) -> list:
         """Where ``req`` could run (planner.placement.PlacementOption list: each node, plus the cluster) and which

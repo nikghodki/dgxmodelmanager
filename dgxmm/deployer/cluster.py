@@ -186,11 +186,18 @@ def _fresh_ranks(engine: str, nodes: list[str], need: dict[str, int], port: int,
     return ranks
 
 
+def weight_nodes(engine: str, placement: Placement) -> list[str]:
+    """Nodes that must hold the model: every node for vLLM (each rank loads its shard); the head only for llama.cpp
+    (only llama-server reads the GGUF, the workers receive their tensors over RPC; ruling R13)."""
+    return [placement.head] if engine == "llamacpp" else list(placement.nodes)
+
+
 async def _checks(d, prep: Prepared, placement: Placement) -> dict[str, set[int]]:
-    """Before mem_lock: every node configured, the weights on every node (worker threads), unmanaged ports."""
+    """Before mem_lock: every node configured, the weights where they are read (``weight_nodes``; worker threads),
+    unmanaged ports."""
     for n in placement.nodes:
         d._require_node(n)
-    for n in placement.nodes:
+    for n in weight_nodes(prep.engine.name, placement):
         await d._require_weights(n, prep)
     return await _unmanaged(d, placement.nodes)
 

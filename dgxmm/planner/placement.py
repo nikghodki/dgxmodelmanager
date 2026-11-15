@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from typing import Callable
 
 from dgxmm.config import LOCAL_NODE_ID, Settings
-from dgxmm.deployer.service import CLUSTER_ENGINES, Placement
+from dgxmm.deployer.service import CLUSTER_ENGINES, Placement, cluster_ready
 from dgxmm.memory.budget import Budget
 from dgxmm.memory.estimate import MemoryEstimate, per_rank_bytes
 
@@ -49,11 +49,11 @@ class PlacementOption:
 
 
 def cluster_candidate(settings: Settings, engine: str) -> Placement | None:
-    """One cluster over every cluster-ready node (cluster_ip and nccl set), the local node as head; None unless the
+    """One cluster over every cluster-ready node (deployer.service.cluster_ready), the local node as head; None unless the
     engine supports clusters, the local node is cluster-ready and at least one other node is."""
     if engine not in CLUSTER_ENGINES:
         return None
-    ready = [n.id for n in settings.all_nodes() if n.cluster_ip is not None and n.nccl is not None]
+    ready = [n.id for n in settings.all_nodes() if cluster_ready(n, engine)]
     if LOCAL_NODE_ID not in ready or len(ready) < 2:
         return None
     return Placement(kind="cluster", nodes=[LOCAL_NODE_ID] + [n for n in ready if n != LOCAL_NODE_ID])

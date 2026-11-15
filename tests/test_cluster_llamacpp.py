@@ -304,13 +304,69 @@ async def test_restart_keeps_rpc_port(deployer_two_nodes, ready_llama_cluster):
     assert [len(d.fake(n).containers.list()) for n in ("local", "dgx-2")] == [1, 1]
 
 
-async def test_gguf_must_be_on_every_node(deployer_two_nodes, llama_cluster_req):
+async def test_gguf_on_the_head_only_is_admitted(deployer_two_nodes, llama_cluster_req):
+    """Ruling R13: only the head reads the GGUF; the worker (dgx-2) is not even checked."""
     d = deployer_two_nodes
     d.fake("dgx-2").weights_on_node.discard("org/g")
+    v = await d.deploy(llama_cluster_req, user_id=1)
+    assert d.fake("dgx-2").exec_calls == []  # no presence check on the worker
+    assert d.fake("dgx-2").run_calls[-1]["command"][0] == "ggml-rpc-server"
+    d.engines_http.healthy.add(v["port"])
+    assert await d.wait_ready(v["id"], 5) == "ready"
+    await d.aclose()
+
+
+async def test_gguf_missing_on_a_remote_head_is_refused(deployer_two_nodes, llama_cluster_req):
+    """Ruling R13: the head (here dgx-2) must hold the GGUF; weights_missing names the head and copies to it."""
+    d = deployer_two_nodes
+    d.fake("dgx-2").weights_on_node.discard("org/g")
+    req = llama_cluster_req.model_copy(update={"placement": Placement(kind="cluster", nodes=["dgx-2", "local"])})
     with pytest.raises(DeployError) as e:
-        await d.deploy(llama_cluster_req, user_id=1)
+        await d.deploy(req, user_id=1)
     assert (e.value.code, e.value.status) == ("weights_missing", 409)
+    assert e.value.extra["action"] == {"type": "copy_weights", "node": "dgx-2", "ref": "org/g", "revision": "abc"}
     assert d.fake("dgx-2").run_calls == [] == d.fake("local").run_calls and d.list_views() == []
+    d.fake("dgx-2").weights_on_node.add("org/g")  # copied to the head: admitted
+    v = await d.deploy(req, user_id=1)
+    assert d._get(v["id"]).node == "dgx-2"
+    assert d.fake("dgx-2").run_calls[-1]["command"][0] == "llama-server"
+    await d.aclose()
+
+
+def _no_nccl_deployer(d):
+    for n in d.settings.nodes:
+        n.nccl = None
+    return d
+
+
+def test_llamacpp_cluster_needs_cluster_ip_but_not_nccl(deployer_two_nodes):
+    """Ruling R14: nccl is a vLLM requirement; llama.cpp clusters need cluster_ip on every node."""
+    d = _no_nccl_deployer(deployer_two_nodes)
+    p = Placement(kind="cluster", nodes=["local", "dgx-2"])
+    d.validate_placement(p, "llamacpp")
+    with pytest.raises(DeployError) as e:
+        d.validate_placement(p, "vllm")
+    assert e.value.code == "cluster_node_not_ready" and "nccl" in e.value.message
+    d.settings.node("dgx-2").cluster_ip = None
+    with pytest.raises(DeployError) as e:
+        d.validate_placement(p, "llamacpp")
+    assert e.value.code == "cluster_node_not_ready" and "cluster_ip" in e.value.message
+
+
+def test_cluster_candidate_without_nccl_only_for_llamacpp(two_node_settings):
+    from dgxmm.planner.placement import cluster_candidate
+    for n in two_node_settings.nodes:
+        n.nccl = None
+    assert cluster_candidate(two_node_settings, "vllm") is None
+    assert cluster_candidate(two_node_settings, "llamacpp").nodes == ["local", "dgx-2"]
+
+
+async def test_llamacpp_cluster_deploys_without_nccl(deployer_two_nodes, llama_cluster_req):
+    d = _no_nccl_deployer(deployer_two_nodes)
+    v = await d.deploy(llama_cluster_req, user_id=1)
+    assert [len(d.fake(n).containers.list()) for n in ("local", "dgx-2")] == [1, 1]
+    assert d._get(v["id"]).placement["kind"] == "cluster"
+    await d.aclose()
 
 
 async def test_llamacpp_cluster_sleep_and_mode_refused(deployer_two_nodes, ready_llama_cluster):
