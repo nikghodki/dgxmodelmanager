@@ -237,10 +237,7 @@ async def test_cluster_sleep_stops_every_rank_and_frees_both_nodes(deployer_two_
     await d.budget.refresh()
     assert all(d.budget.current(n).committed == 0 for n in NODES)
     assert not any(path in ("/sleep", "/wake_up") for _, _, path in d.engines_http.calls)
-    with pytest.raises(DeployError) as e:  # a stopped cluster: Start brings it back (wake is for sleeping ones)
-        await d.wake(ready_cluster_dep.id)
-    assert e.value.code == "not_sleeping"
-    await d.restart(ready_cluster_dep.id)
+    await d.restart(ready_cluster_dep.id)  # Start brings it back
     assert await d.wait_ready(ready_cluster_dep.id, 5) == "ready"
 
 
@@ -413,3 +410,174 @@ async def test_reconfigure_remote_single_checks_its_own_node(deployer_two_nodes,
     with pytest.raises(InsufficientMemory):
         await d.reconfigure(ready_remote_dep.id, dict(SMALL_VLLM, max_model_len=8192))
     assert d.state(ready_remote_dep.id) == "ready"
+
+
+
+# ---------- fix round 1 ----------
+def _free_for(d, node: str, free: int) -> None:
+    """Make ``node``'s free_for_new about ``free`` (available minus margin and OS reserve while memory is in use)."""
+    d.set_free(node, free + d.settings.margin_bytes + d.settings.os_reserve_bytes)
+
+
+def _plan_ids(plans) -> set[int]:
+    return {a["deployment_id"] for p in plans for a in p["actions"]}
+
+
+async def test_preview_cluster_short_on_dgx2_plans_free_dgx2_only(deployer_two_nodes, qwen_req, deepseek_cluster_req):
+    d = deployer_two_nodes
+    local = await _ready(d, qwen_req, name="ql", alias="ql")
+    remote = await _ready(d, qwen_req, name="qr", alias="qr", node="dgx-2")
+    _free_for(d, "dgx-2", 1 * GIB)
+    req = deepseek_cluster_req
+    pv = await d.preview(req.engine, req.model_ref, req.config, placement=req.placement)
+    assert pv["fit"]["fits"] is False and pv["node"] == "dgx-2"
+    stops = [p for p in pv["plans"] if p["id"].startswith("stop:")]
+    assert stops and _plan_ids(pv["plans"]) == {remote.id} and local.id not in _plan_ids(pv["plans"])
+    assert pv["notes"] == []  # the decision model's memory is on the local node: no help on dgx-2
+
+
+async def test_preview_single_on_dgx2_plans_free_dgx2_only(deployer_two_nodes, qwen_req):
+    from dgxmm.deployer.service import Placement
+    d = deployer_two_nodes
+    local = await _ready(d, qwen_req, name="ql", alias="ql")
+    remote = await _ready(d, qwen_req, name="qr", alias="qr", node="dgx-2")
+    _free_for(d, "dgx-2", 0)
+    pv = await d.preview("vllm", "Qwen/Qwen3-Tiny", dict(SMALL_VLLM),
+                         placement=Placement(kind="single", nodes=["dgx-2"]))
+    assert pv["fit"]["fits"] is False and pv["node"] == "dgx-2"
+    assert _plan_ids(pv["plans"]) == {remote.id} and local.id not in _plan_ids(pv["plans"])
+    plain = await d.preview("vllm", "Qwen/Qwen3-Tiny", dict(SMALL_VLLM))  # the local node: fits, no node key
+    assert plain["fit"]["fits"] is True and "node" not in plain
+
+
+async def test_preview_replacing_uses_its_placement(deployer_two_nodes, ready_cluster_dep, qwen_req):
+    d = deployer_two_nodes
+    remote = await _ready(d, qwen_req, name="qr", alias="qr", node="dgx-2")
+    _free_for(d, "dgx-2", 0)
+    row = d.row(ready_cluster_dep.id)
+    pv = await d.preview(row.engine, row.model_ref, dict(SMALL_VLLM, max_model_len=8192), replacing=row.id)
+    assert pv["node"] == "dgx-2" and _plan_ids(pv["plans"]) <= {remote.id}
+
+
+class _LaggingProbe:
+    """Freed memory of a container stopped on a remote node shows up in that node's sample only ``lag`` samples
+    later (the remote probe interval)."""
+
+    def __init__(self, d, lag: int):
+        self.d, self.lag, self.pending = d, lag, []  # (node, bytes, samples left)
+        orig = d.probe.sample
+
+        def sample(arg):
+            if isinstance(arg, str):
+                keep = []
+                for node, n, left in self.pending:
+                    if node != arg:
+                        keep.append((node, n, left))
+                    elif left <= 1:
+                        d.probe.remote_available[node] = d.probe.remote_available.get(
+                            node, d.probe.default_available) + n
+                    else:
+                        keep.append((node, n, left - 1))
+                self.pending = keep
+            return orig(arg)
+        d.probe.sample = sample
+        stop = d.stop
+
+        async def stopping(dep_id, *a, **kw):
+            row = d.row(dep_id)
+            before = row.state if row else None
+            out = await stop(dep_id, *a, **kw)
+            if before == "ready" and row.node == "dgx-2" and not cluster.is_cluster(row):
+                self.pending.append(("dgx-2", row.reserved_bytes, self.lag))
+            return out
+        d.stop = stopping
+
+
+async def _ondemand_singles(ctl, qwen_req, names_nodes):
+    d, out = ctl.deployer, {}
+    for name, node in names_nodes:
+        out[name] = await _ready(d, qwen_req, name=name, alias=name, node=node, mode="on_demand")
+        ctl._observe(d.view(out[name].id))
+    return out
+
+
+async def test_ondemand_make_room_for_cluster_short_on_dgx2_evicts_exactly_there(ondemand_two_nodes, qwen_req,
+                                                                                 ondemand_cluster):
+    ctl, d = ondemand_two_nodes, ondemand_two_nodes.deployer
+    await d.stop(ondemand_cluster.id)
+    singles = await _ondemand_singles(ctl, qwen_req, [("r1", "dgx-2"), ("r2", "dgx-2"), ("l1", "local")])
+    ctl.clock_.t += d.settings.ondemand_idle_timeout_s + 1  # all idle
+    share = d.row(ondemand_cluster.id).ranks[1]["reserved"]
+    victim = d.row(singles["r1"].id).reserved_bytes
+    assert share > victim // 2
+    _free_for(d, "dgx-2", share - victim // 2)  # one dgx-2 victim is enough
+    _LaggingProbe(d, lag=3)
+    d.engines_http.all_healthy = True
+    resp = await ctl.request(ondemand_cluster.name)
+    assert resp.status == 200 and d.state(ondemand_cluster.id) == "ready"
+    states = {n: d.state(v.id) for n, v in singles.items()}
+    assert sorted(states[n] for n in ("r1", "r2")) == ["ready", "stopped"] and states["l1"] == "ready"
+
+
+async def test_ondemand_cluster_never_fitting_on_second_node_refused_before_evicting(ondemand_two_nodes, qwen_req,
+                                                                                    ondemand_cluster):
+    from dgxmm.db import Deployment
+    from dgxmm.ondemand.controller import OnDemandUnavailable
+    ctl, d = ondemand_two_nodes, ondemand_two_nodes.deployer
+    await d.stop(ondemand_cluster.id)
+    singles = await _ondemand_singles(ctl, qwen_req, [("l1", "local")])
+    ctl.clock_.t += d.settings.ondemand_idle_timeout_s + 1
+    await d.budget.refresh()
+    usable = d.budget.current("dgx-2").usable
+    with d.db.session() as s:  # an always-on deployment holding nearly all of dgx-2
+        s.add(Deployment(name="big", engine="vllm", model_ref="Qwen/Qwen3-Tiny", config=dict(SMALL_VLLM),
+                         state="ready", port=8190, reserved_bytes=usable - GIB, estimate={}, node="dgx-2",
+                         mode="always_on", placement={"kind": "single", "nodes": ["dgx-2"]}))
+    _free_for(d, "local", 0)  # the cluster is short on local first (where l1 could be evicted)
+    with pytest.raises(OnDemandUnavailable) as e:
+        await ctl.request(ondemand_cluster.name)
+    assert e.value.code == "does_not_fit" and "on node dgx-2" in e.value.message
+    assert d.state(singles["l1"].id) == "ready" and d.state(ondemand_cluster.id) == "stopped"
+
+
+async def test_undo_of_a_cluster_sleep_action_restarts_it(deployer_two_nodes, ready_cluster_dep):
+    d = deployer_two_nodes
+    d.engines_http.all_healthy = True
+    applied = await d.apply_actions([{"type": "sleep", "deployment_id": ready_cluster_dep.id}], user_id=1)
+    assert applied == [("stop", ready_cluster_dep.id)] and d.state(ready_cluster_dep.id) == "stopped"
+    assert await d.undo_actions(applied) == []
+    assert await d.wait_ready(ready_cluster_dep.id, 5) == "ready"
+
+
+async def test_wake_restarts_a_cluster_its_sleep_stopped(deployer_two_nodes, ready_cluster_dep):
+    d = deployer_two_nodes
+    d.engines_http.all_healthy = True
+    await d.sleep(ready_cluster_dep.id)
+    await d.wake(ready_cluster_dep.id)
+    assert await d.wait_ready(ready_cluster_dep.id, 5) == "ready"
+    assert all(len(_containers(d, n)) == 1 for n in NODES)
+    await d.stop(ready_cluster_dep.id)  # stopped by the user: wake does not start it
+    with pytest.raises(DeployError) as e:
+        await d.wake(ready_cluster_dep.id)
+    assert e.value.code == "not_sleeping" and d.state(ready_cluster_dep.id) == "stopped"
+
+
+async def test_switch_to_remote_single_fitted_against_dgx2(deployer_two_nodes, ready_single_dep, qwen_req):
+    d = deployer_two_nodes
+    d.engines_http.all_healthy = True
+    req = qwen_req.model_copy(update={"name": "q2", "alias": None, "node": "dgx-2"})
+    _free_for(d, "dgx-2", 0)  # local is roomy, dgx-2 is not: stopping the local one frees nothing there
+    with pytest.raises(InsufficientMemory):
+        await d.switch(ready_single_dep.id, req, [], user_id=1)
+    assert d.state(ready_single_dep.id) == "ready" and d.row_by_name("q2") is None
+    d.set_free("dgx-2", 100 * GIB)
+    _free_for(d, "local", 0)  # local is full, dgx-2 roomy: fits
+    v = await d.switch(ready_single_dep.id, req, [], user_id=1)
+    assert v["state"] == "ready" and d.row(v["id"]).node == "dgx-2"
+
+
+async def test_single_rows_placement_matches_node(deployer_two_nodes, ready_remote_dep):
+    """A request copied with a new node (model_copy keeps the old placement) still gets a consistent row."""
+    row = deployer_two_nodes.row(ready_remote_dep.id)
+    assert row.node == "dgx-2" and row.placement == {"kind": "single", "nodes": ["dgx-2"]}
+    assert deployer_two_nodes.nodes_for(deployer_two_nodes.view(row.id)) == ["dgx-2"]

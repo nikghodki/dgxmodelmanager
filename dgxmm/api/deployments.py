@@ -11,7 +11,7 @@ from dgxmm.audit import audit
 from dgxmm.auth.deps import Principal, current_principal, get_ctx, require_admin
 from dgxmm.context import AppContext
 from dgxmm.deployer.service import (IDLE_TIMEOUT_MAX_S, IDLE_TIMEOUT_MIN_S, DeployError, DeploymentMode,
-                                    DeployRequest, InsufficientMemory)
+                                    DeployRequest, InsufficientMemory, Placement)
 from dgxmm.litellm import LiteLLMError
 from dgxmm.memory.redact import redact_log
 from dgxmm.planner.plans import PlanAction
@@ -25,6 +25,7 @@ class PreviewIn(BaseModel):
     config: dict = {}
     replacing: int | None = None
     priority: int | None = Field(None, ge=0, le=100)  # the request's priority (plan safety); None = replaced's / 0
+    placement: Placement | None = None  # where it would run (None: where `replacing` runs, else the local node)
 
 
 class DeployIn(DeployRequest):
@@ -47,7 +48,8 @@ async def preview(body: PreviewIn, p: Principal = Depends(require_admin), ctx: A
     callers, are admin-only): it may ask the decision model and writes `decisions` rows."""
     try:
         return await ctx.deployer.preview(body.engine, body.model_ref, body.config, replacing=body.replacing,
-                                          priority=body.priority, consult=plan_consult(ctx, p))
+                                          priority=body.priority, consult=plan_consult(ctx, p),
+                                          placement=body.placement)
     except DeployError as e:
         raise deploy_error(e)
 
@@ -81,7 +83,7 @@ async def create(body: DeployIn, p: Principal = Depends(require_admin), ctx: App
         await ctx.deployer.undo_actions(applied)
         try:
             pv = await ctx.deployer.preview(req.engine, req.model_ref, req.config, priority=req.priority,
-                                            consult=plan_consult(ctx, p))
+                                            consult=plan_consult(ctx, p), placement=req.placement)
         except DeployError:
             pv = {}
         raise api_error(409, e.code, e.message, fit=e.fit.as_dict(), plans=pv.get("plans", []),
@@ -333,7 +335,7 @@ async def switch(dep_id: int, body: SwitchIn, p: Principal = Depends(require_adm
     except InsufficientMemory as e:
         try:
             pv = await ctx.deployer.preview(body.request.engine, body.request.model_ref, body.request.config,
-                                            replacing=dep_id)
+                                            replacing=dep_id, placement=body.request.placement)
         except DeployError:
             pv = {}
         raise api_error(409, e.code, e.message, fit=e.fit.as_dict(), plans=pv.get("plans", []),

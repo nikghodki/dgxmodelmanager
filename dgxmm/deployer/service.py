@@ -566,19 +566,37 @@ class Deployer:
                        - est.get("runtime", 0), 0)
         return actual if dep.state == "sleeping" else max(cluster.reserved_on(dep, node), actual)
 
+    def _placement_of(self, dep: Deployment) -> Placement:
+        """A row's placement: a cluster's, or the single node its ``node`` column names."""
+        if cluster.is_cluster(dep):
+            return Placement(**cluster.placement_of(dep))
+        return Placement(kind="single", nodes=[self._node_of(dep)])
+
     async def preview(self, engine: str, model_ref: str, raw_cfg: dict, replacing: int | None = None,
-                      priority: int | None = None, consult=None) -> dict:
+                      priority: int | None = None, consult=None, placement: Placement | None = None) -> dict:
         """`priority`: the request's priority (plan safety: never evict a higher-priority deployment). None = the
         replaced deployment's own priority (switch / reconfigure), else 0. `consult()`: may the decision model be
-        asked to rank the plans (the caller's rate limit; None = yes)."""
+        asked to rank the plans (the caller's rate limit; None = yes). `placement`: where the request runs (None:
+        where `replacing` runs, else the local node). The fit is checked per node of the placement (a cluster: each
+        rank's share); the result is the first node that is short (else the head), and the plans free memory on that
+        node only. ``node`` names it unless it is the local node of a single placement."""
         prep = self.prepare(engine, model_ref, raw_cfg)
-        budget = await self.budget.refresh()
-        fit = check_fit(prep.estimate, budget, extra_free=self._replacing_credit(replacing))
+        if placement is None:
+            old = self._get(replacing) if replacing is not None else None
+            placement = self._placement_of(old) if old is not None else Placement(kind="single",
+                                                                                   nodes=[LOCAL_NODE_ID])
+        budgets = await self._placement_budgets(placement)
+        need = cluster.need_per_node(prep, placement, budgets)
+        fit, node = cluster.fit_per_node(prep, placement, budgets, need,
+                                         lambda n: self._replacing_credit(replacing, n, budgets[n]))
+        budget = budgets[node]
         out = {"estimate": prep.estimate.as_dict(), "fit": fit.as_dict(), "budget": budget.as_dict(),
                "served_name": prep.engine.served_name(prep.cfg, model_ref),
                "config": prep.cfg.model_dump(mode="json")}
+        if placement.kind == "cluster" or node != LOCAL_NODE_ID:
+            out["node"] = node
         if engine == "vllm":
-            out["gpu_memory_utilization"] = vllm_gpu_util(prep.estimate.total, budget.total)
+            out["gpu_memory_utilization"] = vllm_gpu_util(need[node], budget.total)
         if hasattr(prep.engine, "pool_tokens"):
             out["kv_pool_tokens"] = prep.engine.pool_tokens(prep.cfg)
         if priority is None:
@@ -587,9 +605,13 @@ class Deployer:
         if fit.fits:
             out["plans"] = []
             return out
-        out["notes"] = self.system_memory_notes(engine, replacing)
+        # the decision model runs on the local node: freeing it helps only there
+        out["notes"] = self.system_memory_notes(engine, replacing) if node == LOCAL_NODE_ID else []
         facts = await self.plan_facts(replacing)
-        plans = self.plans_for(prep, fit, replacing, facts=facts)
+
+        def need_of(p: Prepared) -> int:  # what a variant of the request needs on the short node
+            return cluster.need_per_node(p, placement, budgets)[node]
+        plans = self.plans_for(prep, fit, replacing, facts=facts, node=node, need_of=need_of)
         out["plans"] = await self.recommend_plans(plans, prep, fit, raw_cfg, replacing, priority,
                                                   facts=facts, consult=consult) if plans else plans
         return out
@@ -728,7 +750,9 @@ class Deployer:
                                  idle_timeout_s=None if system else req.idle_timeout_s,
                                  # the decision model has its own key (dgxmm/decider/secret.py)
                                  engine_api_key=None if system else new_engine_key(),
-                                 placement=req.placement.model_dump(),
+                                 # always the node it runs on (a model_copy(update={"node": ...}) of a request
+                                 # keeps its old placement: pydantic does not re-run model_post_init)
+                                 placement=Placement(kind="single", nodes=[node]).model_dump(),
                                  ranks=[])
                 s.add(dep)
                 s.flush()
@@ -1528,19 +1552,23 @@ class Deployer:
         return out
 
     def plans_for(self, prep: Prepared, fit: FitResult, replacing: int | None = None,
-                  facts: dict | None = None) -> list[dict]:
+                  facts: dict | None = None, node: str = LOCAL_NODE_ID,
+                  need_of: Callable[[Prepared], int] | None = None) -> list[dict]:
+        """Ways to make ``prep`` fit on ``node`` (``fit``: its fit there): smaller variants (``need_of``: what one
+        needs on that node; default its whole estimate) and stopping / sleeping deployments that hold memory there."""
         cfg = prep.cfg.model_dump(mode="json")
         name = prep.engine.name
+        need = need_of or (lambda p: p.estimate.total)
 
         def est_with(patch: dict) -> int | None:
             try:
-                return self.prepare(name, prep.artifact.ref, {**cfg, **patch}).estimate.total
+                return need(self.prepare(name, prep.artifact.ref, {**cfg, **patch}))
             except DeployError:
                 return None
 
         def est_ref(ref: str) -> int | None:
             try:
-                return self.prepare(name, ref, cfg).estimate.total
+                return need(self.prepare(name, ref, cfg))
             except DeployError:
                 return None
 
@@ -1550,7 +1578,7 @@ class Deployer:
                     and base_model_name(a.ref) == base and a.weights_bytes < prep.artifact.weights_bytes]
         plans = build_plans(fit=fit, cfg=cfg, context_key=prep.engine.context_key, seqs_key=prep.engine.seqs_key,
                             kv_patches=prep.engine.kv_patch_options(prep.cfg), estimate_with=est_with,
-                            active=self.active_deps(exclude=replacing, facts=facts), variants=variants,
+                            active=self.active_deps(exclude=replacing, facts=facts, node=node), variants=variants,
                             estimate_ref=est_ref)
         return [p.as_dict() for p in plans]
 
@@ -1585,6 +1613,8 @@ class Deployer:
         is still taken then, the wake-up continues in the background (up to ``wake_queue_timeout_s``) and the view
         is returned with ``startup_queue`` set (the API answers 202), like a queued deploy."""
         dep = self._require(dep_id)
+        if dep.state == "stopped" and cluster.is_cluster(dep) and cluster.stopped_by_sleep(self, dep_id):
+            return await self.restart(dep_id, user_id)  # its "sleep" stopped every rank: wake = start them again
         if dep.state != "sleeping":
             raise DeployError("not_sleeping", f"deployment is {dep.state}", 409)
         old = self._waking.get(dep_id)
@@ -1667,10 +1697,12 @@ class Deployer:
                 a = raw if isinstance(raw, PlanAction) else PlanAction.model_validate(raw)
                 self._refuse_system(a.deployment_id, "slept" if a.type == "sleep" else "stopped")
                 if a.type == "sleep":
-                    await self.sleep(a.deployment_id, user_id)
+                    out = await self.sleep(a.deployment_id, user_id)
+                    # a cluster's "sleep" stops it: undo must start it again, not wake it
+                    applied.append(("stop" if out.get("state") == "stopped" else "sleep", a.deployment_id))
                 else:
                     await self.stop(a.deployment_id, user_id, reason="plan")
-                applied.append((a.type, a.deployment_id))
+                    applied.append(("stop", a.deployment_id))
         except Exception:
             await self.undo_actions(applied)
             raise
@@ -1822,6 +1854,14 @@ class Deployer:
         row = self._get(dep["id"]) if isinstance(dep, dict) else dep
         return cluster.reserved_on(row, node) if row is not None else 0
 
+    def nodes_for(self, dep: "Deployment | dict") -> list[str]:
+        """The nodes a deployment (row or view) holds memory on, from its row (as reserved_on / frees_on read it):
+        a cluster's placement, else its ``node`` column. [] for a removed one."""
+        row = self._get(dep["id"]) if isinstance(dep, dict) else dep
+        if row is None:
+            return []
+        return cluster.nodes_of(row) if cluster.is_cluster(row) else [self._node_of(row)]
+
     def frees_on(self, v: dict, node: str) -> int:
         """What stopping the deployment of view ``v`` returns to ``node``'s budget (cluster.frees_on)."""
         row = self._get(v["id"])
@@ -1944,8 +1984,7 @@ class Deployer:
         was_active = dep.state in ("ready", "sleeping", "unknown", "starting", "loading")
         prep = self.prepare(dep.engine, model_ref or old_ref, new_config, existing_ref=old_ref)
         if not actions:  # per node of its placement, crediting what stopping it frees there
-            placement = Placement(**cluster.placement_of(dep)) if cluster.is_cluster(dep) else \
-                Placement(kind="single", nodes=[self._node_of(dep)])
+            placement = self._placement_of(dep)
             budgets = await self._placement_budgets(placement)
             fit, node = cluster.fit_per_node(prep, placement, budgets, cluster.need_per_node(prep, placement, budgets),
                                              lambda n: self._replacing_credit(dep_id, n, budgets[n]))

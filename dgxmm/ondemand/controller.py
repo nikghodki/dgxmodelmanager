@@ -43,6 +43,7 @@ from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 
 from dgxmm.audit import audit
+from dgxmm.config import LOCAL_NODE_ID
 from dgxmm.deployer.service import DeployError, InsufficientMemory
 from dgxmm.memory.budget import COMMITTED_STATES
 
@@ -175,7 +176,8 @@ class OnDemandController:
         self._changed_fut: asyncio.Future | None = None
         self._gen = 0  # bumped by every _notify(): did anything change since an attempt decided "no room"?
         self._no_room_gen: dict[int, int] = {}
-        self._reserved: dict[int, int] = {}  # head dep_id -> bytes it stopped victims for (skip-ahead keeps off)
+        # head dep_id -> (node, bytes) it stopped victims for there (skip-ahead keeps off that node's memory)
+        self._reserved: dict[int, tuple[str | None, int]] = {}
         self._last_stop: float | None = None  # clock() of the last on-demand stop (its memory may still lag)
 
     def attach(self, deployer: Any) -> None:
@@ -386,13 +388,16 @@ class OnDemandController:
                 except InsufficientMemory as exc:
                     need, free = exc.fit.required, exc.fit.free_for_new
                     node = self._short_node(exc, v)  # where the memory is missing (a cluster: that node)
-                    total = need + (v.get("actual_bytes") or 0 if kind == "wake" else 0)  # a wake keeps its own
-                    most = self._capacity(exc.fit, node)
-                    if most is not None and total > most and not tried and not self._settling():
+                    # before any eviction: every node of its placement must be able to hold it at all (a cluster
+                    # that can never fit on its second node must not evict on the first)
+                    big = self._too_big(v, exc, kind, node) if not tried and not self._settling() else None
+                    if big is not None:
+                        n, total, most = big
                         self._reserved.pop(dep_id, None)
-                        raise OnDemandUnavailable("does_not_fit", f"{_model(v)} needs {total / GIB:.1f} GiB but at "
-                                                                  f"most {most / GIB:.1f} GiB can be freed for "
-                                                                  "on-demand models")
+                        where = f" on node {n}" if len(self._nodes_for(v) or ()) > 1 else ""
+                        raise OnDemandUnavailable("does_not_fit", f"{_model(v)} needs {total / GIB:.1f} GiB{where} "
+                                                                  f"but at most {most / GIB:.1f} GiB can be freed "
+                                                                  "for on-demand models")
                     victims = self._victims(dep_id, need - free, tried, node) if make_room else []
                     if not victims:
                         if make_room:
@@ -407,8 +412,8 @@ class OnDemandController:
                                                     reason="make_room", for_deployment=v["name"]):
                             stopped += frees
                     if stopped:
-                        self._reserved[dep_id] = need  # until it starts or gives up: later entries keep off
-                        await self._settle(free + stopped, need)
+                        self._reserved[dep_id] = (node, need)  # until it starts or gives up: later entries keep off
+                        await self._settle(free + stopped, need, node)
                     continue  # the deployer's fit check decides again
                 except DeployError as exc:
                     if exc.code in ("not_stopped", "not_sleeping"):
@@ -426,11 +431,38 @@ class OnDemandController:
                     pass
                 return "started"
 
-    @staticmethod
-    def _short_node(exc, v: dict) -> str | None:
+    def _nodes_for(self, v: dict) -> list[str] | None:
+        """The nodes ``v`` holds memory on, from the deployer's row (the source reserved_on / frees_on read); None
+        for a deployer that cannot tell (then everything is judged on the local budget, as before)."""
+        fn = getattr(self.ctx.deployer, "nodes_for", None)
+        return fn(v) if fn is not None else None
+
+    def _short_node(self, exc, v: dict) -> str | None:
         """The node a start found short of memory: the one a cluster's fit check names, else where it runs."""
         node = (getattr(exc, "extra", None) or {}).get("node")
-        return node or ((v.get("placement") or {}).get("nodes") or [None])[0]
+        return node or (self._nodes_for(v) or [None])[0]
+
+    def _too_big(self, v: dict, exc, kind: str, node: str | None) -> tuple[str | None, int, int] | None:
+        """(node, need, most) for the first node of ``v``'s placement that could never hold it even with every
+        on-demand deployment there stopped (``_capacity``); None if each could. The short node needs what the fit
+        check said (+ a wake's own memory); the others their stored reservation."""
+        checks = [(node, exc.fit.required + (v.get("actual_bytes") or 0 if kind == "wake" else 0), exc.fit)]
+        share = getattr(self.ctx.deployer, "reserved_on", None)
+        for n in self._nodes_for(v) or ():
+            if n != node and share is not None:
+                checks.append((n, share(v, n), None))
+        for n, total, fit in checks:
+            most = self._capacity(fit, n)
+            if most is not None and total > most:
+                return n, total, most
+        return None
+
+    def _node_budget(self, node: str | None):
+        """``node``'s current budget (the local one for None / the local node)."""
+        budget = getattr(self.ctx, "budget", None)
+        if budget is None or not hasattr(budget, "current"):
+            return None
+        return budget.current(node) if node not in (None, LOCAL_NODE_ID) else budget.current()
 
     def _frees_on(self, v: dict, node: str | None) -> int:
         """What stopping ``v`` returns on ``node`` (a cluster: its share there; nothing for a deployment on another
@@ -444,8 +476,7 @@ class OnDemandController:
         the host returns it). None when no budget is known (then nothing is refused as too big)."""
         b = getattr(fit, "budget", None)
         if b is None:
-            budget = getattr(self.ctx, "budget", None)
-            b = budget.current() if budget is not None and hasattr(budget, "current") else None
+            b = self._node_budget(node)
         usable = getattr(b, "usable", None)
         if usable is None:
             return None
@@ -461,31 +492,60 @@ class OnDemandController:
         return self._last_stop is not None and self.clock() - self._last_stop < self._settle_window()
 
     async def _fits_beside_reservations(self, v: dict) -> bool:
-        """A skip-ahead start must leave the memory the head stopped victims for: free now minus the head's
-        reservation must hold this deployment (its fit check then decides as usual)."""
-        others = sum(n for d, n in self._reserved.items() if d != v["id"])
+        """A skip-ahead start must leave the memory the head stopped victims for: on every node where the head holds
+        a reservation and this deployment needs memory, free now minus the reservation must hold this deployment's
+        share there (its fit check then decides as usual)."""
+        others: dict[str | None, int] = {}
+        for d, (n, b) in self._reserved.items():
+            if d != v["id"]:
+                others[n or LOCAL_NODE_ID] = others.get(n or LOCAL_NODE_ID, 0) + b
         if not others:
             return True
         budget = getattr(self.ctx, "budget", None)
         if budget is None:
             return False
-        b = await budget.refresh()
-        own = (v.get("reserved_bytes") or 0) - ((v.get("actual_bytes") or 0) if v["state"] == "sleeping" else 0)
-        return b.free_for_new - others >= own
+        local = await budget.refresh()
+        nodes, share = self._nodes_for(v), getattr(self.ctx.deployer, "reserved_on", None)
+        if nodes is None or share is None:  # a deployer that cannot tell: the local budget, the whole reservation
+            own = (v.get("reserved_bytes") or 0) - ((v.get("actual_bytes") or 0) if v["state"] == "sleeping" else 0)
+            return local.free_for_new - sum(others.values()) >= own
+        for n in nodes:
+            held = others.get(n, 0)
+            if not held:
+                continue
+            b = local if n == LOCAL_NODE_ID else budget.current(n)
+            if b is None:
+                return False
+            own = share(v, n) - ((v.get("actual_bytes") or 0) if v["state"] == "sleeping" and n == LOCAL_NODE_ID
+                                 else 0)
+            if b.free_for_new - held < own:
+                return False
+        return True
 
-    async def _settle(self, expect_free: int, need: int) -> None:
-        """After stopping victims: give the host a moment to show their memory as free (container teardown lags the
-        budget), so that no further victim is stopped for memory that is about to come back."""
+    async def _settle(self, expect_free: int, need: int, node: str | None = None) -> None:
+        """After stopping victims: give ``node`` (default the local node) a moment to show their memory as free
+        (container teardown lags the budget), so that no further victim is stopped for memory that is about to come
+        back. A remote node's memory comes from its probe, sampled every remote_probe_interval_s: the wait lasts at
+        least three intervals there (the probe's staleness bound), polling every settle_poll_s."""
         budget = getattr(self.ctx, "budget", None)
         if budget is None:
             return
-        for _ in range(SETTLE_POLLS):
+        remote = node not in (None, LOCAL_NODE_ID)
+        window = self._settle_window()
+        if remote:
+            window = max(window, 3 * float(getattr(self.ctx.settings, "remote_probe_interval_s", 5.0)))
+        deadline = asyncio.get_running_loop().time() + window
+        while True:
             try:
                 b = await budget.refresh()
+                if remote:
+                    b = budget.current(node)
             except Exception:
                 log.warning("budget refresh failed while waiting for freed memory", exc_info=True)
                 return
-            if b.free_for_new >= min(expect_free, need):
+            if b is not None and b.free_for_new >= min(expect_free, need):
+                return
+            if asyncio.get_running_loop().time() + self.settle_poll_s > deadline:
                 return
             await asyncio.sleep(self.settle_poll_s)
 

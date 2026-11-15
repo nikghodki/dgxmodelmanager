@@ -170,6 +170,17 @@ def sleep_label(dep, engine) -> str | None:
     return "sleep" if supports_sleep(dep, engine) else SLEEP_AS_STOP_LABEL
 
 
+def stopped_by_sleep(d, dep_id: int) -> bool:
+    """The cluster's latest stop was its "sleep" (``sleep_as_stop``, event actor "sleep"), not a user, a schedule, the
+    watchdog or a failure: a wake starts it again."""
+    from sqlalchemy import select
+    with d.db.session() as s:
+        actor = s.scalar(select(DeploymentEvent.actor).where(
+            DeploymentEvent.deployment_id == dep_id, DeploymentEvent.to_state == "stopping")
+            .order_by(DeploymentEvent.id.desc()).limit(1))
+    return actor == "sleep"
+
+
 async def sleep_as_stop(d, dep: Deployment) -> dict:
     """Deployer.sleep of a cluster that cannot sleep (under its lock, ``dep`` ready): every rank is stopped."""
     return await stop(d, dep, "sleep", f"{SLEEP_AS_STOP_LABEL}: stopping every rank")

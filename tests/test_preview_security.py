@@ -48,7 +48,7 @@ def test_preview_ranking_uses_the_decider_plan_bucket(api_stack, monkeypatch):
     per_user = RATE_LIMITS["decider_plan"][0]
     seen = []
 
-    async def fake_preview(engine, model_ref, cfg, replacing=None, priority=None, consult=None):
+    async def fake_preview(engine, model_ref, cfg, replacing=None, priority=None, consult=None, placement=None):
         seen.append(consult())
         return {"plans": []}
 
@@ -58,3 +58,22 @@ def test_preview_ranking_uses_the_decider_plan_bucket(api_stack, monkeypatch):
                            json={"engine": "vllm", "model_ref": "Qwen/Qwen3-Tiny", "config": SMALL})
         assert r.status_code == 200  # never 429: the ranking falls back to rules
     assert seen == [True] * per_user + [False, False]
+
+
+
+def test_preview_passes_the_requests_placement(api_stack, monkeypatch):
+    """/preview judges the request where it would run (Task 14: per-node plans); no placement: None (the deployer
+    then uses the replaced deployment's, else the local node)."""
+    from tests.test_api_deployments import SMALL, admin
+    h = admin(api_stack)
+    seen = []
+
+    async def fake_preview(engine, model_ref, cfg, replacing=None, priority=None, consult=None, placement=None):
+        seen.append(placement.model_dump() if placement is not None else None)
+        return {"plans": []}
+    monkeypatch.setattr(api_stack.ctx.deployer, "preview", fake_preview)
+    body = {"engine": "vllm", "model_ref": "Qwen/Qwen3-Tiny", "config": SMALL}
+    assert api_stack.post("/dgxmm/api/deployments/preview", headers=h, json=body).status_code == 200
+    assert api_stack.post("/dgxmm/api/deployments/preview", headers=h,
+                          json={**body, "placement": {"kind": "single", "nodes": ["local"]}}).status_code == 200
+    assert seen == [None, {"kind": "single", "nodes": ["local"]}]
