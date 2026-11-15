@@ -30,7 +30,16 @@ def settings_factory(tmp_path):
 
 
 @pytest.fixture
-def two_node_settings(settings_factory):
+def isolated_home(tmp_path, monkeypatch):
+    """NodeRegistry writes $HOME/.ssh/config for remote nodes: never the real one in tests."""
+    home = tmp_path / "home"
+    home.mkdir(exist_ok=True)
+    monkeypatch.setenv("HOME", str(home))
+    return home
+
+
+@pytest.fixture
+def two_node_settings(settings_factory, isolated_home):
     """Settings with two nodes: local (dgx-1) and remote (dgx-2)."""
     return settings_factory(
         nodes=[
@@ -132,7 +141,7 @@ def budget_service_two_nodes(two_node_registry):
 
 
 @pytest.fixture
-def three_node_settings(settings_factory):
+def three_node_settings(settings_factory, isolated_home):
     """Settings with three nodes: local (dgx-1), dgx-2, dgx-3."""
     return settings_factory(
         nodes=[

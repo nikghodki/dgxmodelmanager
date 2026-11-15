@@ -68,9 +68,13 @@ def compute_budget(mem: HostMemory, usages: list[DeploymentUsage], settings: Set
 
 
 class BudgetService:
-    def __init__(self, settings: Settings, probe, usage_provider: Callable[[], list[UsageRow]], nodes=None):
+    def __init__(self, settings: Settings, probe, usage_provider: Callable[[], list[UsageRow]], nodes=None,
+                 node_probe=None):
+        """``node_probe`` (NodeProbe): remote nodes' memory comes from its last sample (taken by the remote probe
+        loop in a worker thread), so a refresh never waits on a remote node. Without it, ``probe.sample(node_id)``."""
         self.settings, self.probe, self.usage_provider = settings, probe, usage_provider
         self.nodes = nodes
+        self.node_probe = node_probe
         self._current: dict[str, Budget] = {}
         self.last_sample: HostSample | None = None
 
@@ -118,7 +122,8 @@ class BudgetService:
         if self.nodes:
             for node_id in self.nodes.ids():
                 if node_id != "local" and self.nodes.is_remote(node_id):
-                    mem = self.probe.sample(node_id)
+                    mem = self.node_probe.last(node_id) if self.node_probe is not None \
+                        else self.probe.sample(node_id)
                     if mem:
                         node_rows = by_node.get(node_id, [])
                         usages = []

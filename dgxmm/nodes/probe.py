@@ -75,6 +75,10 @@ class NodeProbe:
             # Return last sample if exec fails (do not update timestamp)
             return self._samples.get(node_id)
 
+    def last(self, node_id: str) -> HostMemory | None:
+        """The last successful sample of a node (no I/O: the remote probe loop takes the samples)."""
+        return self._samples.get(node_id)
+
     def stale(self, node_id: str) -> bool:
         """Check if a node's sample is stale (>3x remote_probe_interval_s)."""
         if node_id == "local" or not self.registry.is_remote(node_id):

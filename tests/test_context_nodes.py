@@ -170,3 +170,60 @@ def test_remote_probe_loop_does_not_block_event_loop(two_node_registry):
     # We expect all 5 iterations to complete despite the 50ms block in probe
     assert len(progress) == 5
     assert progress == [0, 1, 2, 3, 4]
+
+
+# ---------- Task 5 follow-up: production wiring of the remote probe ----------
+def test_single_node_context_builds_no_node_probe(settings_factory, isolated_home):
+    from dgxmm.context import build_context
+    from tests.fakes import FakeDockerClient
+    fake = FakeDockerClient()
+    ctx = build_context(settings_factory(), client_factory=lambda n: fake)
+    assert ctx.node_probe is None and ctx.deployer.node_probe is None
+    assert ctx.budget.nodes is None and ctx.budget.node_probe is None
+    assert not (isolated_home / ".ssh").exists()
+
+
+async def test_two_node_context_admits_remote_deploy_once_probe_is_fresh(two_node_settings, fake_hf_repo,
+                                                                         isolated_home):
+    import asyncio
+    from dgxmm.config import GIB
+    from dgxmm.context import build_context, remote_probe_loop
+    from dgxmm.deployer.service import DeployError, DeployRequest
+    from dgxmm.nodes.probe import NodeProbe
+    from tests.conftest import QWEN_TINY
+    from tests.fakes import FakeDockerClient, FakeEngines, FakeProbe
+
+    fakes = {"local": FakeDockerClient(), "dgx-2": FakeDockerClient()}
+    ctx = build_context(two_node_settings, client_factory=lambda n: fakes[n.id])
+    assert isinstance(ctx.node_probe, NodeProbe)
+    assert ctx.budget.node_probe is ctx.node_probe and ctx.deployer.node_probe is ctx.node_probe
+    assert ctx.budget.nodes is ctx.nodes
+    assert (isolated_home / ".ssh" / "config").exists()  # the test HOME, not the real one
+
+    fake_hf_repo("Qwen/Qwen3-Tiny", config=QWEN_TINY, files={"model.safetensors": 2 * GIB})
+    ctx.inventory.refresh()
+    ctx.budget.probe = FakeProbe()  # the local host's /proc is not there in tests
+    ctx.deployer.http = FakeEngines().client()
+    req = DeployRequest(name="q2", engine="vllm", model_ref="Qwen/Qwen3-Tiny", node="dgx-2",
+                        config={"max_model_len": 4096, "max_num_seqs": 2, "max_num_batched_tokens": 2048})
+    try:
+        with pytest.raises(DeployError) as e:  # no sample of dgx-2 yet
+            await ctx.deployer.deploy(req, user_id=1)
+        assert (e.value.code, e.value.status) == ("node_stale", 503)
+
+        fakes["dgx-2"].exec_output = "MemTotal: 127000000 kB\nMemAvailable: 100000000 kB\n"
+        loop = asyncio.create_task(remote_probe_loop(ctx))  # the production sampler
+        for _ in range(100):
+            if ctx.node_probe.last("dgx-2") is not None:
+                break
+            await asyncio.sleep(0.01)
+        loop.cancel()
+        assert not ctx.node_probe.stale("dgx-2")
+        v = await ctx.deployer.deploy(req, user_id=1)
+        assert v["state"] in ("starting", "loading")
+        assert ctx.budget.current("dgx-2").total == 127000000 * 1024
+        assert [c.name for c in fakes["dgx-2"].containers.list() if c.name != "dgxmm-node-probe"] == ["dgxmm-q2"]
+        assert fakes["local"].run_calls == []
+    finally:
+        await ctx.deployer.aclose()
+        await ctx.http.aclose()

@@ -31,6 +31,9 @@ class FakeDeployer:
     def base_url(self, name, port, engine=None):
         return f"http://dgxmm-{name}:{port}"
 
+    def base_url_for(self, v):
+        return self.base_url(v["name"], v["port"], v.get("engine"))
+
 
 class Server:
     def __init__(self, choice="gpu_oom", probs=None, status=200, delay=0.0):

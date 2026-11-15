@@ -87,7 +87,7 @@ async def benchmark(dep_id: int, body: BenchIn, p: Principal = Depends(require_a
     async def _go():
         try:
             await ctx.benchmarks.run(deployment_id=dep_id, engine=v["engine"], model_ref=v["model_ref"], config=v["config"],
-                                     base_url=ctx.deployer.base_url(v["name"], v["port"]), served_name=v["served_name"],
+                                     base_url=ctx.deployer.base_url_for(v), served_name=v["served_name"],
                                      levels=tuple(body.levels), input_len=body.input_len, output_len=body.output_len,
                                      duration_s=body.duration_s, max_requests=body.max_requests)
         except BenchmarkBusy:

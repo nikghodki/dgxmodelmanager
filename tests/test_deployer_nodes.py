@@ -327,3 +327,145 @@ def test_llamacpp_remote_refuses_gguf_outside_hf_cache(two_node_settings):
     with pytest.raises(SpecError) as err:
         e.container_spec(art, e.validate_config({}), None, LaunchContext(3, "q", 8110, 10 * GIB, 120 * GIB, "dgx-2"), s)
     assert err.value.code == "not_on_node"
+
+
+# ---------- follow-up: base_url callers use the deployment's node ----------
+async def _ready_local(d, qwen_req):
+    v = await d.deploy(qwen_req.model_copy(update={"name": "loc", "alias": "loc"}), user_id=1)
+    d.engines_http.healthy.add(v["port"])
+    assert await d.wait_ready(v["id"], 5) == "ready"
+    return d.view(v["id"])
+
+
+async def test_base_url_for_rows_and_views(deployer_two_nodes, ready_remote_dep, qwen_req):
+    d = deployer_two_nodes
+    loc = await _ready_local(d, qwen_req)
+    assert d.base_url_for(d.view(ready_remote_dep.id)) == f"http://192.0.2.2:{ready_remote_dep.port}"
+    assert d.base_url_for(d._get(ready_remote_dep.id)) == f"http://192.0.2.2:{ready_remote_dep.port}"
+    assert d.base_url_for(loc) == d.base_url(loc["name"], loc["port"]) == f"http://engines.test:{loc['port']}"
+
+
+async def test_views_endpoints_remote_and_local_unchanged(deployer_two_nodes, ready_remote_dep, qwen_req):
+    d = deployer_two_nodes
+    loc = await _ready_local(d, qwen_req)
+    r = d.view(ready_remote_dep.id)
+    assert r["endpoint"] == r["host_endpoint"] == f"http://192.0.2.2:{ready_remote_dep.port}/v1"
+    assert loc["endpoint"] == f"http://dgxmm-loc:{loc['port']}/v1"
+    assert loc["host_endpoint"] == f"http://{d.settings.publish_bind}:{loc['port']}/v1"
+    assert list(r) == list(loc)  # same keys, same order
+
+
+async def test_litellm_api_base_uses_node(deployer_two_nodes, ready_remote_dep, qwen_req):
+    from dgxmm.litellm import LiteLLMSync
+    d = deployer_two_nodes
+    loc = await _ready_local(d, qwen_req)
+    want = LiteLLMSync(None, d, d.db, d.events).desired()
+    bases = {k[0]: val[0] for k, val in want.items()}
+    assert bases[str(ready_remote_dep.id)] == f"http://192.0.2.2:{ready_remote_dep.port}/v1"
+    assert bases[str(loc["id"])] == f"http://engines.test:{loc['port']}/v1"
+
+
+async def test_metrics_scrape_url_uses_node(deployer_two_nodes, ready_remote_dep, qwen_req):
+    import httpx
+    from dgxmm.metrics.scraper import MetricsScraper
+    d = deployer_two_nodes
+    loc = await _ready_local(d, qwen_req)
+    urls = []
+
+    def handler(request):
+        urls.append(str(request.url))
+        return httpx.Response(200, text="")
+
+    class Store:
+        def add(self, dep_id, now, m):
+            return {}
+
+        def add_host(self, *a):
+            pass
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        await MetricsScraper(d.settings, d, http, Store(), d.events, d.budget).scrape_once()
+    assert sorted(urls) == sorted([f"http://192.0.2.2:{ready_remote_dep.port}/metrics",
+                                   f"http://engines.test:{loc['port']}/metrics"])
+
+
+async def test_ondemand_gateway_proxy_target_uses_node(deployer_two_nodes, ready_remote_dep, qwen_req):
+    from types import SimpleNamespace
+    from dgxmm.ondemand.gateway import Gateway, _Exchange
+    d = deployer_two_nodes
+    loc = await _ready_local(d, qwen_req)
+    gw = Gateway(SimpleNamespace(deployer=d, settings=d.settings))
+    targets = []
+    gw.lease = lambda dep_id, base: targets.append(base) or object()
+    gw.unlease = lambda client: None
+    for v in (d.view(ready_remote_dep.id), loc):
+        ex = object.__new__(_Exchange)
+        ex.gw, ex.v = gw, v
+
+        async def _no_exchange(client, v):
+            return None
+        ex._exchange = _no_exchange
+        await ex._forward()
+    assert targets == [f"http://192.0.2.2:{ready_remote_dep.port}", f"http://engines.test:{loc['port']}"]
+
+
+def test_decider_base_url_uses_base_url_for():
+    from dgxmm.decider.service import Decider
+    calls = []
+
+    class Dep:
+        def base_url_for(self, v):
+            calls.append(v["id"])
+            return "http://192.0.2.2:8150"
+    d = object.__new__(Decider)
+    d.deployment = lambda: {"id": 5, "name": "decider", "state": "ready", "port": 8150, "engine": "decision"}
+    d._deployer = lambda: Dep()
+    assert d._base_url() == "http://192.0.2.2:8150" and calls == [5]
+
+
+# ---------- follow-up: liveness never stalls the budget loop on a down node ----------
+async def test_liveness_skips_stale_remote_node(deployer_two_nodes, ready_remote_dep):
+    d = deployer_two_nodes
+    fake = d.fake("dgx-2")
+    fake.raise_on_all = NodeUnreachable("would block")
+    d.mark_stale("dgx-2")
+    assert await d.check_liveness() == []
+    assert fake.raised == 0  # never asked
+    assert d.state(ready_remote_dep.id) == "ready"
+
+
+async def test_blocked_remote_docker_does_not_stall_budget_loop(deployer_two_nodes, ready_remote_dep):
+    import asyncio
+    import threading
+    import time
+    d = deployer_two_nodes
+    d.remote_liveness_timeout_s = 0.05
+    release = threading.Event()
+    blocked = []
+
+    def blocking_get(key):
+        blocked.append(key)
+        release.wait(5)  # dgx-2's Docker over SSH hangs
+        raise TimeoutError("ssh: timed out")
+    d.fake("dgx-2").containers.get = blocking_get
+
+    interval = 0.1
+    refreshed: list[float] = []
+
+    async def budget_loop():  # what context.budget_loop does: refresh, then listeners (liveness)
+        while True:
+            await d.budget.refresh()
+            refreshed.append(time.monotonic())
+            await d.check_liveness()
+            await asyncio.sleep(interval)
+
+    task = asyncio.create_task(budget_loop())
+    try:
+        await asyncio.sleep(0.6)
+    finally:
+        task.cancel()
+        release.set()
+    gaps = [b - a for a, b in zip(refreshed, refreshed[1:])]
+    assert len(refreshed) >= 4 and max(gaps) < 2 * interval  # every refresh within one interval (+ bounded wait)
+    assert len(blocked) == 1  # one hung lookup in flight; later passes skip the node instead of piling up threads
+    assert d.state(ready_remote_dep.id) == "ready"

@@ -643,7 +643,7 @@ class _Exchange(Response):
                 raise
             await self._fail(404, error_body(e.message, "not_found", "invalid_request_error"))  # removed meanwhile
             return
-        base = self.gw.ctx.deployer.base_url(v["name"], v["port"], v.get("engine"))
+        base = self.gw.ctx.deployer.base_url_for(v)
         client = self.gw.lease(v["id"], base)
         try:
             await self._exchange(client, v)

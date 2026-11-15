@@ -27,6 +27,7 @@ class AppContext:
     deployer: Any = None
     docker: Any = None
     nodes: Any = None  # NodeRegistry; multi-node support
+    node_probe: Any = None  # NodeProbe (remote nodes' memory and staleness); None without remote nodes
     engines: dict = field(default_factory=dict)
     probe: Any = None
     http: Any = None
@@ -111,7 +112,10 @@ async def remote_probe_loop(ctx: AppContext) -> None:
     """Sample remote nodes every remote_probe_interval_s."""
     from dgxmm.nodes.probe import NodeProbe
     # Only run if we have a NodeProbe and remote nodes
-    if not isinstance(ctx.probe, NodeProbe) or not ctx.nodes:
+    probe = getattr(ctx, "node_probe", None)
+    if probe is None and isinstance(getattr(ctx, "probe", None), NodeProbe):
+        probe = ctx.probe
+    if not isinstance(probe, NodeProbe) or not ctx.nodes:
         return
     
     remote_nodes = [n for n in ctx.nodes.ids() if n != "local" and ctx.nodes.is_remote(n)]
@@ -121,8 +125,8 @@ async def remote_probe_loop(ctx: AppContext) -> None:
     while True:
         for node_id in remote_nodes:
             try:
-                await asyncio.to_thread(ctx.probe.ensure, node_id)
-                await asyncio.to_thread(ctx.probe.sample, node_id)
+                await asyncio.to_thread(probe.ensure, node_id)
+                await asyncio.to_thread(probe.sample, node_id)
             except Exception:
                 log.exception("remote probe failed for %s", node_id)
         await asyncio.sleep(ctx.settings.remote_probe_interval_s)
@@ -135,7 +139,8 @@ def liveness_listener(deployer):
     return _check
 
 
-def build_context(settings: Settings) -> AppContext:
+def build_context(settings: Settings, client_factory=None) -> AppContext:
+    """``client_factory``: Docker client per NodeConfig (tests); None = the real local socket / SSH clients."""
     import httpx
 
     from dgxmm.auth.bootstrap import bootstrap_admin
@@ -146,6 +151,7 @@ def build_context(settings: Settings) -> AppContext:
     from dgxmm.inventory.service import InventoryService
     from dgxmm.memory.budget import BudgetService
     from dgxmm.memory.hostmem import HostProbe, NvmlGpu
+    from dgxmm.nodes.probe import NodeProbe
     from dgxmm.nodes.registry import NodeRegistry
 
     Path(settings.data_dir).mkdir(parents=True, exist_ok=True)
@@ -153,16 +159,21 @@ def build_context(settings: Settings) -> AppContext:
     events = EventBroker()
     http = httpx.AsyncClient(timeout=httpx.Timeout(30, connect=5))
     inventory = InventoryService(settings)
-    nodes = NodeRegistry(settings)
+    nodes = NodeRegistry(settings, client_factory=client_factory)
     docker = nodes.docker("local")
     engines = build_engines(settings)
     probe = HostProbe(settings, NvmlGpu(), containers=docker.lookup)
+    # remote nodes: one NodeProbe, sampled by remote_probe_loop, read by the budget (memory) and deployer (staleness)
+    node_probe = NodeProbe(nodes, settings) if any(nodes.is_remote(n) for n in nodes.ids()) else None
     deployer = Deployer(settings=settings, db=db, docker=docker, inventory=inventory, engines=engines, http=http,
-                        events=events, nodes=nodes)
-    budget = BudgetService(settings, probe, deployer.usage_rows)
+                        events=events, nodes=nodes, node_probe=node_probe)
+    if node_probe is None:
+        budget = BudgetService(settings, probe, deployer.usage_rows)
+    else:
+        budget = BudgetService(settings, probe, deployer.usage_rows, nodes=nodes, node_probe=node_probe)
     deployer.budget = budget
     ctx = AppContext(settings=settings, db=db, events=events, inventory=inventory, budget=budget, deployer=deployer,
-                     docker=docker, nodes=nodes, engines=engines, probe=probe, http=http)
+                     docker=docker, nodes=nodes, engines=engines, probe=probe, http=http, node_probe=node_probe)
 
     async def _bootstrap():
         bootstrap_admin(db)

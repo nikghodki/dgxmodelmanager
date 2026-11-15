@@ -215,7 +215,7 @@ class Decider:
         view = self.deployment()
         if not view or view["state"] != "ready" or not view.get("port"):
             return None
-        return self._deployer().base_url(view["name"], view["port"], view.get("engine"))
+        return self._deployer().base_url_for(view)
 
     def client(self) -> SystemOneClient | None:
         rev = self.revision

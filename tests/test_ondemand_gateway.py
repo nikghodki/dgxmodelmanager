@@ -67,6 +67,9 @@ class FakeDeployer:
     def base_url(self, name: str, port: int, engine: str | None = None) -> str:
         return f"http://engine-{name}:{port}"
 
+    def base_url_for(self, v: dict) -> str:
+        return self.base_url(v["name"], v["port"], v.get("engine"))
+
 
 class FakeSlot:
     def __init__(self):
@@ -681,6 +684,9 @@ class GatewayDeployer(ControllerDeployer):
 
     def base_url(self, name: str, port: int, engine: str | None = None) -> str:
         return f"http://engine-{name}:{port}"
+
+    def base_url_for(self, v: dict) -> str:
+        return self.base_url(v["name"], v["port"], v.get("engine"))
 
 
 @pytest.fixture

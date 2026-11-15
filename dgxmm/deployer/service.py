@@ -47,6 +47,7 @@ _PORT_CONFLICT = re.compile(r"address already in use|port is already allocated",
 PORT_ATTEMPTS = 4
 NODE_ID_PATTERN = r"^[a-z0-9][a-z0-9-]{0,31}$"  # NodeConfig.id ("local" is the local node)
 UNREACHABLE_BACKOFF_MAX_S = 60.0  # longest wait between monitor polls while a remote node is unreachable
+REMOTE_LIVENESS_TIMEOUT_S = 5.0  # longest a liveness check waits on a remote node's Docker (the budget loop runs it)
 
 
 class DeployRequest(BaseModel):
@@ -104,13 +105,18 @@ StateHook = Callable[[int, str, str], Awaitable[None]]
 STARTUP_STATES = ("starting", "loading")  # states that hold a start-up slot (deployer/gate.py)
 PENDING_MODE_APPLIES = frozenset({"ready", "failed", "stopped"})  # a pending mode switch takes effect here
 GIB_F = float(1024**3)
+_SKIPPED = object()  # a remote liveness lookup that was not done (node stale, busy or too slow)
 
 
 class Deployer:
     def __init__(self, *, settings: Settings, db: Database, docker, inventory, engines: dict, http: httpx.AsyncClient,
-                 events: EventBroker, budget=None, nodes=None, clock: Callable[[], float] = time.monotonic):
+                 events: EventBroker, budget=None, nodes=None, clock: Callable[[], float] = time.monotonic,
+                 node_probe=None):
         self.settings, self.db, self.docker, self.inventory = settings, db, docker, inventory
         self.engines, self.http, self.events, self.budget, self.nodes, self.clock = engines, http, events, budget, nodes, clock
+        self.node_probe = node_probe  # NodeProbe: staleness of remote nodes (None: the budget probe's, if it has one)
+        self.remote_liveness_timeout_s = REMOTE_LIVENESS_TIMEOUT_S
+        self._liveness_inflight: dict[str, asyncio.Future] = {}  # node -> a remote lookup that outlived its wait
         self.mem_lock = asyncio.Lock()
         self._locks: dict[int, asyncio.Lock] = {}
         self._monitors: dict[int, asyncio.Task] = {}
@@ -192,7 +198,25 @@ class Deployer:
         host = (self.settings.engine_base_host if self._publishes(engine) else None) or container_name(name)
         return f"http://{host}:{port}"
 
+    def base_url_for(self, dep: "Deployment | dict") -> str:
+        """base_url of a deployment (row or view): on the node it runs on. The one helper for callers outside the
+        deployer (LiteLLM, metrics, on-demand gateway, decider)."""
+        if isinstance(dep, dict):
+            name, port, engine, dep_id = dep["name"], dep["port"], dep.get("engine"), dep.get("id")
+            node = self._node_of(self._get(dep_id)) if self._has_remote() and dep_id is not None else LOCAL_NODE_ID
+        else:
+            name, port, engine, node = dep.name, dep.port, dep.engine, self._node_of(dep)
+        return self.base_url(name, port, engine, node)
+
     # ---------- nodes ----------
+    def _has_remote(self) -> bool:
+        return self.nodes is not None and any(self.nodes.is_remote(n) for n in self.nodes.ids())
+
+    def _node_stale(self, node_id: str) -> bool:
+        probe = self.node_probe if self.node_probe is not None else getattr(self.budget, "probe", None)
+        stale = getattr(probe, "stale", None)
+        return stale is not None and bool(stale(node_id))
+
     @staticmethod
     def _node_of(dep: Deployment | None) -> str:
         """The node a deployment runs on (NULL and rows from before migration 41: the local node)."""
@@ -230,9 +254,8 @@ class Deployer:
         without a fresh memory reading refuses new starts (503 node_stale)."""
         if not self._is_remote(node_id):
             return local
-        stale = getattr(getattr(self.budget, "probe", None), "stale", None)
         b = self.budget.current(node_id)
-        if b is None or (stale is not None and stale(node_id)):
+        if b is None or self._node_stale(node_id):
             raise DeployError("node_stale", f"no recent memory reading from node {node_id}; it may be offline", 503)
         return b
 
@@ -828,10 +851,14 @@ class Deployer:
 
     async def check_liveness(self) -> list[int]:
         """Re-check running deployments: a crashed / OOM-killed / vanished engine container goes to
-        failed via the same path as during startup (state hooks then deregister it from LiteLLM)."""
+        failed via the same path as during startup (state hooks then deregister it from LiteLLM).
+        Runs in the budget loop, so a down remote node must never stall it: deployments on a stale node are skipped,
+        and a remote lookup waits at most ``remote_liveness_timeout_s`` (state unchanged; while that lookup is still
+        running in its worker thread, the node is skipped)."""
         with self.db.session() as s:
             ids = [d.id for d in s.scalars(select(Deployment)) if d.state in self.LIVE_STATES and d.container_id]
         failed: list[int] = []
+        skip_nodes: set[str] = set()
         for dep_id in ids:
             lock = self._lock(dep_id)
             if lock.locked():  # sleep/wake/stop in progress; never stall the budget loop behind it
@@ -841,7 +868,16 @@ class Deployer:
                     dep = self._get(dep_id)
                     if dep is None or dep.state not in self.LIVE_STATES or not dep.container_id:
                         continue
-                    info = await asyncio.to_thread(self._docker_for(self._node_of(dep)).get, dep.container_id)
+                    node = self._node_of(dep)
+                    if self._is_remote(node):
+                        if node in skip_nodes:
+                            continue
+                        info = await self._remote_lookup(node, dep.container_id)
+                        if info is _SKIPPED:
+                            skip_nodes.add(node)
+                            continue
+                    else:
+                        info = await asyncio.to_thread(self.docker.get, dep.container_id)
                     if info is None:
                         self._transition(dep_id, "failed", message="container disappeared",
                                          last_error="container disappeared", container_id=None)
@@ -850,10 +886,29 @@ class Deployer:
                         await self._fail_exited(dep, info.exit_code, info.oom_killed)
                         failed.append(dep_id)
             except NodeUnreachable as e:  # state unchanged while its node is offline
+                skip_nodes.add(self._node_of(self._get(dep_id)))
                 log.warning("liveness check of deployment %s skipped: %s", dep_id, e)
             except Exception:
                 log.warning("liveness check failed for deployment %s", dep_id, exc_info=True)
         return failed
+
+    async def _remote_lookup(self, node: str, container_id: str):
+        """A remote container's info, or _SKIPPED when the node is stale, still busy with an earlier lookup, or does
+        not answer within remote_liveness_timeout_s (the worker thread then finishes on its own)."""
+        if self._node_stale(node):
+            return _SKIPPED
+        pending = self._liveness_inflight.get(node)
+        if pending is not None and not pending.done():
+            return _SKIPPED
+        fut = asyncio.ensure_future(asyncio.to_thread(self._docker_for(node).get, container_id))
+        self._liveness_inflight[node] = fut
+        fut.add_done_callback(lambda f: f.cancelled() or f.exception())  # never "exception was never retrieved"
+        try:
+            return await asyncio.wait_for(asyncio.shield(fut), self.remote_liveness_timeout_s)
+        except asyncio.TimeoutError:
+            log.warning("liveness check on node %s timed out after %.1fs; skipped", node,
+                        self.remote_liveness_timeout_s)
+            return _SKIPPED
 
     async def _abort(self, dep: Deployment, reason: str) -> None:
         try:
@@ -1038,13 +1093,21 @@ class Deployer:
             "startup_queue": self.gate.info(d.id),  # why it waits for a start-up slot (state queued / waking)
             "model_name": d.alias or served,  # what clients pass as "model" to the single LiteLLM endpoint
             "litellm_error": self.litellm_error(d.id, d.state) if self.litellm_error is not None else None,
-            "endpoint": f"http://{container_name(d.name)}:{d.port}/v1" if d.port else None,
-            "host_endpoint": f"http://{self.settings.publish_bind}:{d.port}/v1"
-                             if d.port and self.settings.publish_bind and self._publishes(d.engine) else None,
+            **self._endpoints(d),
             "sleep_capable": bool(engine and engine.supports_sleep and d.config.get("enable_sleep_mode")),
             "created_at": d.created_at.isoformat() if d.created_at else None,
             "updated_at": d.updated_at.isoformat() if d.updated_at else None,
         }
+
+    def _endpoints(self, d: Deployment) -> dict:
+        node = self._node_of(d)
+        if self._is_remote(node):  # no docker DNS across hosts: both are the node's published address
+            url = f"http://{self.nodes.config(node).publish_bind or self.nodes.config(node).cluster_ip}:{d.port}/v1" \
+                if d.port else None
+            return {"endpoint": url, "host_endpoint": url}
+        return {"endpoint": f"http://{container_name(d.name)}:{d.port}/v1" if d.port else None,
+                "host_endpoint": f"http://{self.settings.publish_bind}:{d.port}/v1"
+                                 if d.port and self.settings.publish_bind and self._publishes(d.engine) else None}
 
     def view(self, dep_id: int, with_events: bool = False) -> dict:
         with self.db.session() as s:

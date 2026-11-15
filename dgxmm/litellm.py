@@ -619,7 +619,7 @@ class LiteLLMSync:
                 want[(str(v["id"]), name)] = (api_base, v["served_name"], key, ondemand_params(settings),
                                                 ondemand_info())
             else:
-                api_base = self.deployer.base_url(v["name"], v["port"]) + "/v1"
+                api_base = self.deployer.base_url_for(v) + "/v1"
                 want[(str(v["id"]), name)] = (api_base, v["served_name"], "none", None, None)
         self.conflicts = conflicts
         self.ondemand = ondemand
