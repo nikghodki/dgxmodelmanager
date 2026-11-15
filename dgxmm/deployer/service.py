@@ -719,6 +719,9 @@ class Deployer:
         node = self._require_node(req.node)
         prep = self.prepare(req.engine, req.model_ref, req.config)
         system = is_system_engine(prep.engine)
+        if not self._sleep_allowed_on(node) and getattr(prep.cfg, "enable_sleep_mode", False):
+            # stored as it runs: no sleep mode, so no dev routes (VllmEngine.container_spec drops them too)
+            prep = dataclasses.replace(prep, cfg=prep.cfg.model_copy(update={"enable_sleep_mode": False}))
         
         # Validate placement
         self.validate_placement(req.placement, req.engine, system)
@@ -1878,7 +1881,16 @@ class Deployer:
         if cluster.is_cluster(dep):
             return cluster.supports_sleep(dep, engine)
         cfg = (dep.get("config") if isinstance(dep, dict) else dep.config) or {}
-        return bool(engine and engine.supports_sleep and cfg.get("enable_sleep_mode"))
+        if isinstance(dep, dict):  # a view: its node, else its row's
+            node = dep["node"] if dep.get("node") else self._node_of(self._get(dep.get("id")))
+        else:
+            node = self._node_of(dep)
+        return bool(engine and engine.supports_sleep and cfg.get("enable_sleep_mode") and self._sleep_allowed_on(node))
+
+    def _sleep_allowed_on(self, node_id: str) -> bool:
+        """Sleep mode (vLLM's unauthenticated dev routes) on a single deployment on ``node_id``: always locally,
+        on a remote node only with remote_dev_endpoints (final review I7)."""
+        return not self._is_remote(node_id) or self.settings.remote_dev_endpoints
 
     def reserved_on(self, dep: "Deployment | dict", node: str) -> int:
         """A deployment's (row or view) reservation on ``node``: a cluster's share there (cluster.reserved_on)."""

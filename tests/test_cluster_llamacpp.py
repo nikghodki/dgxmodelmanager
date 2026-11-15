@@ -9,7 +9,8 @@ from dgxmm.deployer.service import DeployError, DeployRequest, Placement
 from tests.nodes_fixtures import CLUSTER
 
 SMALL_LLAMA = {"ctx_size": 4096, "parallel": 2}
-CACHE_TARGET = "/root/.cache/llama.cpp"
+MIB = 1 << 20
+HEAD_HF = "/models/hf"  # the head's HF cache mount (not under /root: the ranks run as DGXMM's uid, final review I8)
 
 
 def _flag(cmd, flag):
@@ -80,34 +81,55 @@ def test_llamacpp_cluster_specs_bind_rpc_to_cluster_ip(llama_engine, cluster_lau
 
 def test_tensor_split_from_budgets(llama_engine, cluster_launch_free_60_40):
     head, _ = llama_engine.cluster_specs(**cluster_launch_free_60_40)
-    assert head.spec.command[head.spec.command.index("--tensor-split") + 1] == "60,40"
+    worker, own = map(int, head.spec.command[head.spec.command.index("--tensor-split") + 1].split(","))
+    # MiB, not whole percent (T13a): the head loads no more than its share of the reservation
+    assert worker + own > 1000 and abs(worker / (worker + own) - 0.6) < 0.001
+
+
+def test_tensor_split_is_in_mib_not_rounded_percent():
+    """T13a: whole percentages put up to ~1 GiB more on one rank than its reservation; llama.cpp normalises any
+    proportions, so DGXMM gives the byte shares in MiB."""
+    from dgxmm.engines.llamacpp import tensor_split
+    assert tensor_split([60 * GIB + 700 * MIB, 40 * GIB]) == "62140,40960"
+    assert tensor_split([0, 0]) == "1,1"
+    assert tensor_split([3 * MIB // 2, 0]) == "1,0"
 
 
 # ---------- engine: rank specs (rulings) ----------
 
 def test_worker_rpc_server_binds_cluster_ip_never_all_interfaces(llama_engine, cluster_launch):
-    """RPC has no authentication: the worker listens on its cluster IP only, with the local cache (-c)."""
+    """RPC has no authentication: the worker listens on its cluster IP only. No local tensor cache (-c): it grew
+    without bound in the node's HF cache, root-owned and outside the disk accounting (final review I8)."""
     _, worker = llama_engine.cluster_specs(**cluster_launch)
     assert (worker.node, worker.rank) == ("dgx-2", 1)
-    assert worker.spec.command == ["ggml-rpc-server", "--host", "192.0.2.2", "-p", "50052", "-c"]
+    assert worker.spec.command == ["ggml-rpc-server", "--host", "192.0.2.2", "-p", "50052"]
     assert "0.0.0.0" not in worker.spec.command
     s = worker.spec
     assert s.network_mode == "host" and s.port is None and s.publish_bind is None
     assert s.devices == ["/dev/infiniband"] and s.cap_add == ["IPC_LOCK"] and s.ulimits == {"memlock": (-1, -1)}
     assert s.image == cluster_launch["settings"].images.llamacpp_rpc and s.gpus
-    assert s.environment == {"LLAMA_CACHE": CACHE_TARGET}  # no engine key on a worker: it serves no API
+    assert s.environment == {}  # no engine key on a worker: it serves no API
     assert s.name == "dgxmm-lc-r1" and s.labels["dgxmm.rank"] == "1" and s.labels["dgxmm.engine"] == "llamacpp"
     assert s.labels["dgxmm.managed"] == "true" and s.labels["dgxmm.deployment_id"] == "7"
 
 
-def test_rpc_cache_mount_is_the_only_writable_mount(llama_engine, cluster_launch):
-    """The worker's -c cache lives under its node's HF cache dir, mounted read-write for that directory only; the
-    model (HF cache) stays read-only; the worker does not mount the model at all."""
+def test_no_writable_mount_and_ranks_run_as_dgxmm_uid(llama_engine, cluster_launch):
+    """The worker mounts nothing (no tensor cache); the head mounts the HF cache read-only, outside /root. Every
+    rank runs as DGXMM's own uid:gid (never root), which owns the HF cache (it may be mode 700)."""
+    import os
     head, worker = llama_engine.cluster_specs(**cluster_launch)
-    assert [(m.host, m.target, m.mode) for m in worker.spec.mounts] == [
-        ("/home/dgxuser/.cache/huggingface/llama.cpp-rpc-cache", CACHE_TARGET, "rw")]
+    assert worker.spec.mounts == []
     assert [(m.host, m.target, m.mode) for m in head.spec.mounts] == [
-        (cluster_launch["settings"].hf_cache.host, "/root/.cache/huggingface", "ro")]
+        (cluster_launch["settings"].hf_cache.host, HEAD_HF, "ro")]
+    assert head.spec.user == worker.spec.user == f"{os.getuid()}:{os.getgid()}"
+
+
+def test_rpc_image_runs_as_non_root():
+    """Run without --user (e.g. by hand), the image is not root either."""
+    df = (Path(__file__).resolve().parent.parent / "deploy" / "llamacpp-rpc" / "Dockerfile").read_text()
+    users = [line.split()[1] for line in df.splitlines() if line.startswith("USER ")]
+    assert users and users[-1].split(":")[0] not in ("0", "root")
+    assert " -c`" not in df and "ggml-rpc-server --host <its cluster ip> -p <port>`" in df
 
 
 def test_head_serves_api_on_cluster_ip_with_single_node_flags(llama_engine, cluster_launch):
@@ -115,7 +137,7 @@ def test_head_serves_api_on_cluster_ip_with_single_node_flags(llama_engine, clus
     s, c = head.spec, head.spec.command
     assert (head.node, head.rank) == ("local", 0) and c[0] == "llama-server"
     assert _flag(c, "--host") == "192.0.2.1" and _flag(c, "--port") == "8123" and "0.0.0.0" not in c
-    assert _flag(c, "-m") == "/root/.cache/huggingface/hub/models--org--g/snapshots/abc/m-Q4_K_M.gguf"
+    assert _flag(c, "-m") == HEAD_HF + "/hub/models--org--g/snapshots/abc/m-Q4_K_M.gguf"
     for flag, value in (("-c", "4096"), ("-np", "2"), ("-ngl", "999"), ("-ctk", "f16"), ("-ctv", "f16"),
                         ("-fa", "auto"), ("-b", "2048"), ("-ub", "512"), ("-a", "m-q4_k_m"), ("-lm", "none")):
         assert _flag(c, flag) == value, flag
@@ -143,9 +165,10 @@ def test_remote_head_and_local_worker(llama_engine, two_node_registry):
     assert _flag(head.spec.command, "--host") == "192.0.2.2"
     assert _flag(head.spec.command, "--rpc") == "192.0.2.1:50052"
     assert worker.spec.command[:3] == ["ggml-rpc-server", "--host", "192.0.2.1"]
-    assert [(m.host, m.mode) for m in head.spec.mounts] == [("/home/dgxuser/.cache/huggingface", "ro")]
-    assert [(m.host, m.mode) for m in worker.spec.mounts] == [
-        (kw["settings"].hf_cache.host + "/llama.cpp-rpc-cache", "rw")]
+    assert [(m.host, m.target, m.mode) for m in head.spec.mounts] == [
+        ("/home/dgxuser/.cache/huggingface", HEAD_HF, "ro")]
+    assert _flag(head.spec.command, "-m").startswith(HEAD_HF + "/hub/")
+    assert worker.spec.mounts == []
 
 
 def test_remote_head_refuses_gguf_outside_hf_cache(llama_engine, two_node_registry):
@@ -203,7 +226,7 @@ def test_three_nodes_rpc_list_and_split_order(llama_engine, settings_factory, is
     assert [(r.node, r.rank) for r in specs] == [("local", 0), ("dgx-2", 1), ("dgx-3", 2)]
     head = specs[0].spec.command
     assert _flag(head, "--rpc") == "192.0.2.2:29501,192.0.2.3:29501"
-    assert _flag(head, "--tensor-split") == "50,30,20"  # the workers in --rpc order, then the head's own GPU
+    assert _flag(head, "--tensor-split") == "51200,30720,20480"  # MiB: the workers in --rpc order, then the head
     assert [r.spec.command[:5] for r in specs[1:]] == [["ggml-rpc-server", "--host", f"192.0.2.{i}", "-p", "29501"]
                                                        for i in (2, 3)]
 
@@ -227,7 +250,7 @@ def test_single_node_spec_and_image_unchanged(llama_engine, cluster_launch):
     assert "--rpc" not in spec.command and "-lm" not in spec.command and spec.network_mode is None
     assert Images().llamacpp == ("ghcr.io/ggml-org/llama.cpp@sha256:"
                                  "e4cfff28678327b0ae7eda129e700e56a0fa55aa23db2f016256ea155c15c2b5")
-    assert Images().llamacpp_rpc == "dgxmm-llamacpp-rpc:61dbf49"
+    assert Images().llamacpp_rpc == "dgxmm-llamacpp-rpc:61dbf49-u1"
 
 
 # ---------- deployer: the Task 12 lifecycle with llama.cpp ranks ----------
@@ -265,7 +288,7 @@ async def test_llamacpp_cluster_deploys_and_serves_from_head(deployer_two_nodes,
     assert lo <= rpc <= hi and "master_port" not in row.ranks[0]
     worker = d.fake("dgx-2").run_calls[-1]
     head = d.fake("local").run_calls[-1]
-    assert worker["command"] == ["ggml-rpc-server", "--host", "192.0.2.2", "-p", str(rpc), "-c"]
+    assert worker["command"] == ["ggml-rpc-server", "--host", "192.0.2.2", "-p", str(rpc)]
     assert head["command"][0] == "llama-server" and _flag(head["command"], "--rpc") == f"192.0.2.2:{rpc}"
     assert "--tensor-split" in head["command"]
     assert worker["image"] == head["image"] == d.settings.images.llamacpp_rpc

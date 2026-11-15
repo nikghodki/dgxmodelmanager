@@ -192,6 +192,8 @@ class VllmEngine:
     def container_spec(self, artifact: ModelArtifact, cfg: VllmConfig, draft: ModelArtifact | None,
                        launch: LaunchContext, settings: Settings) -> ContainerSpec:
         util = vllm_gpu_util(launch.reserved, launch.mem_total)
+        if launch.node != LOCAL_NODE_ID and not settings.remote_dev_endpoints:
+            cfg = cfg.model_copy(update={"enable_sleep_mode": False})  # no dev routes on a remote node (I7)
         cmd = self._serve_args(artifact, cfg, draft, util, "0.0.0.0", launch.port)
         env = self._env(cfg, launch.api_key)
         if launch.node == LOCAL_NODE_ID:

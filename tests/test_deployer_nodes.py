@@ -208,6 +208,7 @@ async def test_remote_monitor_loop_backs_off_and_keeps_state(deployer_two_nodes,
 
 async def test_sleep_and_wake_on_remote_use_remote_url_and_node_budget(deployer_two_nodes, qwen_req):
     d = deployer_two_nodes
+    d.settings.remote_dev_endpoints = True  # sleep mode on a remote node is opt-in (final review I7)
     req = qwen_req.model_copy(update={"node": "dgx-2", "config": {**qwen_req.config, "enable_sleep_mode": True}})
     v = await d.deploy(req, user_id=1)
     d.engines_http.healthy.add(v["port"])
@@ -223,6 +224,7 @@ async def test_sleep_and_wake_on_remote_use_remote_url_and_node_budget(deployer_
 
 async def test_wake_refused_when_remote_node_is_full(deployer_two_nodes, qwen_req):
     d = deployer_two_nodes
+    d.settings.remote_dev_endpoints = True  # sleep mode on a remote node is opt-in (final review I7)
     req = qwen_req.model_copy(update={"node": "dgx-2", "config": {**qwen_req.config, "enable_sleep_mode": True}})
     v = await d.deploy(req, user_id=1)
     d.engines_http.healthy.add(v["port"])

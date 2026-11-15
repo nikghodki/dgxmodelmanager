@@ -140,7 +140,7 @@ class Images(BaseModel):
     # built with GGML_RPC=ON (CUDA, sm_121) from deploy/llamacpp-rpc and loaded on every node (docker save | ssh
     # <node> docker load). A locally built image has no registry digest to pin, so this is its local tag; the
     # Dockerfile pins both bases by digest and the source by commit.
-    llamacpp_rpc: str = "dgxmm-llamacpp-rpc:61dbf49"
+    llamacpp_rpc: str = "dgxmm-llamacpp-rpc:61dbf49-u1"
     probe: str = "busybox@sha256:a7dbc319b1438115a207e11930dc4bb3e643dcb3ec0bdd694bb36cd8fad289ec"
     # built locally from deploy/decider (never pulled). Bump the tag when the image's contract with the app changes
     # (2: non-root, read-only rootfs, key delivered as a file): an older image is then "missing" and gets rebuilt.
@@ -257,6 +257,11 @@ class Settings(BaseModel):
     trusted_proxies: str = "127.0.0.1,::1"  # IPs/CIDRs that may set X-Forwarded-For
     nodes: list[NodeConfig] = []
     remote_probe_interval_s: float = Field(5.0, gt=0)
+    # Sleep mode for single-node vLLM deployments on a remote node. Off: such a deployment never gets
+    # --enable-sleep-mode nor VLLM_SERVER_DEV_MODE, whose dev routes (/sleep, /collective_rpc, /update_weights...)
+    # vLLM serves without the engine key; a remote engine publishes on the cluster IP, which every container of the
+    # DGXMM host can reach (local engines publish on 127.0.0.1). Clusters never get sleep mode.
+    remote_dev_endpoints: bool = False
     # SSH key for Docker-over-SSH on remote nodes (mode 600). None -> <data_dir>/secrets/node_ssh_key.
     node_ssh_key_file: str | None = None
 

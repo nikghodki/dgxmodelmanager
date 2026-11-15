@@ -2,6 +2,7 @@
 built from deploy/llamacpp-rpc with the RPC backend)."""
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any, Literal
 
@@ -24,8 +25,17 @@ LLAMA_METRICS = {
     "counters": {"prompt_tokens": ("llamacpp:prompt_tokens",), "generation_tokens": ("llamacpp:tokens_predicted",)},
     "histograms": {},
 }
-RPC_CACHE_DIR = "llama.cpp-rpc-cache"  # a worker's ggml-rpc-server tensor cache (-c), under its node's HF cache dir
-RPC_CACHE_TARGET = "/root/.cache/llama.cpp"  # LLAMA_CACHE in the worker; the cache itself is <LLAMA_CACHE>/rpc
+# Where a cluster head sees the HF cache: not under /root, since the ranks run as DGXMM's uid (rank_user()).
+RPC_HF_TARGET = "/models/hf"
+MIB = 1 << 20
+
+
+def rank_user() -> str | None:
+    """The uid:gid every llama.cpp cluster rank runs as: DGXMM's own (compose `user:`, DGXMM_UID:DGXMM_GID), which
+    owns the HF caches (mode 700 is common) on every node. None when DGXMM itself runs as root: the image's USER (an
+    unprivileged uid) then, never root."""
+    uid, gid = os.getuid(), os.getgid()
+    return None if uid == 0 else f"{uid}:{gid}"
 
 
 class LlamaCppConfig(BaseModel):
@@ -69,15 +79,12 @@ def container_path(local_path: str, settings: Settings) -> tuple[Mount, str]:
 
 
 def tensor_split(shares: list[int]) -> str:
-    """--tensor-split proportions as whole percentages summing to 100 (largest remainder), from byte shares."""
-    total = sum(shares)
-    if total <= 0:
-        shares, total = [1] * len(shares), len(shares)
-    exact = [100 * s / total for s in shares]
-    out = [int(x) for x in exact]
-    for i in sorted(range(len(exact)), key=lambda i: exact[i] - out[i], reverse=True)[:100 - sum(out)]:
-        out[i] += 1
-    return ",".join(str(p) for p in out)
+    """--tensor-split proportions from byte shares, in MiB (llama.cpp normalises them): whole percentages would put
+    up to 1 % of the model (about 1 GB for a large one) on a rank beyond its reservation. A non-zero share below
+    1 MiB counts as 1; all zero: equal parts."""
+    if sum(shares) <= 0:
+        return ",".join("1" for _ in shares)
+    return ",".join(str(max(s // MIB, 1) if s > 0 else 0) for s in shares)
 
 
 def remote_container_path(local_path: str, settings: Settings, node_id: str) -> tuple[Mount, str, str]:
@@ -146,14 +153,16 @@ class LlamaCppEngine:
                       nodes, rpc_port: int, settings: Settings) -> list[RankSpec]:
         """One container per node of ``placement`` (rank = position, the head first) for a llama.cpp deployment over
         the ggml RPC backend. Workers run ``ggml-rpc-server`` bound to their node's cluster IP (RPC has no
-        authentication: never 0.0.0.0) on ``rpc_port``, with its tensor cache (-c) in <node HF cache dir>/
-        llama.cpp-rpc-cache, the only writable mount; they do not mount the model. The head runs ``llama-server`` on
-        the model (read-only, as a single-node deployment) with the single-node flags, serves the API on its
+        authentication: never 0.0.0.0) on ``rpc_port``, without a local tensor cache (no -c: it grew without bound,
+        outside the disk accounting; each load sends the worker's share over the link again) and without any
+        mount. The head runs ``llama-server`` on the model (the HF cache read-only at RPC_HF_TARGET) with the
+        single-node flags, serves the API on its
         cluster IP (engine key in LLAMA_API_KEY) and splits the layers over ``--rpc`` (the workers, in rank order)
         and its own GPU with ``--tensor-split``: llama.cpp puts the RPC devices first, so the proportions list the
         workers, then the head. The proportions are each rank's share of the shardable part of its reservation
         (``launch.rank_memory``, memory.estimate.per_rank_bytes: the reservation less the per-rank overheads). Every
-        rank runs on the host network with the RDMA devices (the RPC transport auto-negotiates RDMA)."""
+        rank runs on the host network with the RDMA devices (the RPC transport auto-negotiates RDMA), as DGXMM's
+        uid (rank_user(): never root)."""
         if draft is not None:
             raise SpecError("invalid_container_spec", "llama.cpp has no draft models")
         cfg_nodes = {n: nodes.config(n) for n in placement.nodes}
@@ -164,25 +173,25 @@ class LlamaCppEngine:
         head = cfg_nodes[head_id]
         labels = managed_labels(launch.deployment_id, self.name)
         rdma = dict(network="host", network_mode="host", publish_bind=None, devices=["/dev/infiniband"],
-                    cap_add=["IPC_LOCK"], ulimits={"memlock": (-1, -1)}, ipc_host=False)
+                    cap_add=["IPC_LOCK"], ulimits={"memlock": (-1, -1)}, ipc_host=False, user=rank_user())
         out: list[RankSpec] = []
         for rank, node_id in enumerate(placement.nodes):
             if rank == 0:
                 continue
             node = cfg_nodes[node_id]
-            if not node.hf_cache_host:
-                raise SpecError("node_hf_cache_missing", f"node {node_id} has no hf_cache_host configured")
-            cache = Mount(host=f"{node.hf_cache_host.rstrip('/')}/{RPC_CACHE_DIR}", target=RPC_CACHE_TARGET,
-                          mode="rw")
             spec = ContainerSpec(name=f"{container_name(launch.name)}-r{rank}", image=settings.images.llamacpp_rpc,
-                                 command=["ggml-rpc-server", "--host", node.cluster_ip, "-p", str(rpc_port), "-c"],
-                                 environment={"LLAMA_CACHE": RPC_CACHE_TARGET}, mounts=[cache],
+                                 command=["ggml-rpc-server", "--host", node.cluster_ip, "-p", str(rpc_port)],
+                                 environment={}, mounts=[],
                                  labels={**labels, RANK_LABEL: str(rank)}, port=None, **rdma)
             out.append(RankSpec(node_id, rank, spec))
         if head_id == LOCAL_NODE_ID:
             mount, path = container_path(artifact.local_path, settings)
         else:
             mount, path, _ = remote_container_path(artifact.local_path, settings, head_id)
+        if path.startswith(mount.target + "/"):  # the HF cache: outside /root (not traversable by a non-root uid)
+            new_target = RPC_HF_TARGET if mount.target.startswith("/root/") else mount.target
+            path = new_target + path[len(mount.target):]
+            mount = Mount(host=mount.host, target=new_target, mode=mount.mode)
         split = tensor_split(self._shares(artifact, cfg, launch, [*workers, head_id], settings))
         # -lm none: no mmap; on the unified-memory GB10 the mapped file would stay in the page cache next to the
         # copies on the GPUs. The cluster flags come last (llama.cpp keeps the last value), after extra_args.
