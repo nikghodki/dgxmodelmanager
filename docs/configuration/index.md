@@ -47,6 +47,7 @@ the container.
 |---|---|---|---|
 | `images.vllm` | string | `vllm/vllm-openai@sha256:22d3b121…352c8` | vLLM image (public multi-arch image, pinned by digest). |
 | `images.llamacpp` | string | `ghcr.io/ggml-org/llama.cpp@sha256:e4cfff28…c2b5` | llama.cpp server image (build b11669, multi-arch, pinned by digest). |
+| `images.llamacpp_rpc` | string | `dgxmm-llamacpp-rpc:61dbf49` | llama.cpp image for cluster deployments (`ggml-rpc-server` workers, `llama-server --rpc` head): built locally from `deploy/llamacpp-rpc` (commit 61dbf49, `GGML_RPC=ON`, CUDA sm_121) and loaded on every node of the cluster (`docker save … \| ssh <node> docker load`). A local build has no registry digest, so it is referenced by tag; the Dockerfile pins its bases by digest and the source by commit. |
 | `docker_network` | string | `dgxmm` | Docker network that engine containers join. **Must equal `DGXMM_NETWORK` in `.env`.** |
 | `port_range` | `[low, high]` | `[8100, 8199]` | Host ports handed to engine containers (1024–65535, ascending). Ports used by other containers are skipped. |
 | `cluster_port_range` | `[low, high]` | `[29500, 29599]` | Master ports (`vllm --master-port`) of cluster deployments, allocated per head node. A cluster's API and master ports are held on every node of its placement. |

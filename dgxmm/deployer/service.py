@@ -675,9 +675,6 @@ class Deployer:
 
     async def deploy(self, req: DeployRequest, user_id: int | None) -> dict:
         if req.placement.kind == "cluster":
-            if req.engine != "vllm":  # llama.cpp clusters: not yet
-                raise DeployError("cluster_not_implemented",
-                                  "cluster deployments will be available in a future release", 501)
             return await cluster.deploy(self, req, user_id)
 
         node = self._require_node(req.node)

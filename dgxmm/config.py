@@ -136,6 +136,11 @@ class Images(BaseModel):
     # llama.cpp build b11669 (server-cuda-b11669; multi-arch manifest list, arm64 + amd64). To update: see
     # config.example.yaml (images.llamacpp)
     llamacpp: str = "ghcr.io/ggml-org/llama.cpp@sha256:e4cfff28678327b0ae7eda129e700e56a0fa55aa23db2f016256ea155c15c2b5"
+    # llama.cpp cluster deployments (ggml-rpc-server workers, llama-server head with --rpc): llama.cpp commit 61dbf49
+    # built with GGML_RPC=ON (CUDA, sm_121) from deploy/llamacpp-rpc and loaded on every node (docker save | ssh
+    # <node> docker load). A locally built image has no registry digest to pin, so this is its local tag; the
+    # Dockerfile pins both bases by digest and the source by commit.
+    llamacpp_rpc: str = "dgxmm-llamacpp-rpc:61dbf49"
     probe: str = "busybox@sha256:a7dbc319b1438115a207e11930dc4bb3e643dcb3ec0bdd694bb36cd8fad289ec"
     # built locally from deploy/decider (never pulled). Bump the tag when the image's contract with the app changes
     # (2: non-root, read-only rootfs, key delivered as a file): an older image is then "missing" and gets rebuilt.

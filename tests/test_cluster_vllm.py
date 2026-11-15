@@ -241,13 +241,6 @@ async def test_cluster_refuses_sleep_switch_mode_reconfigure(deployer_two_nodes,
     assert d.state(dep_id) == "ready"
 
 
-async def test_llamacpp_cluster_still_not_implemented(deployer_two_nodes):
-    req = DeployRequest(name="lc", engine="llamacpp", model_ref="Qwen/Qwen3-Tiny", placement=CLUSTER)
-    with pytest.raises(DeployError) as e:
-        await deployer_two_nodes.deploy(req, None)
-    assert e.value.code == "cluster_not_implemented"
-
-
 # ---------- reconcile / LiteLLM / watchdog ----------
 
 async def test_reconcile_adopts_cluster_ranks(deployer_two_nodes, starting_cluster_dep):

@@ -1,14 +1,18 @@
-"""vLLM cluster deployments: one model across several nodes with tensor parallelism (one rank container per node,
-NCCL over RDMA). Rank lifecycle helpers used by ``Deployer`` (dgxmm/deployer/service.py), which dispatches here on
-``placement.kind == "cluster"``; the single-node paths never come here.
+"""Cluster deployments: one model across several nodes, one rank container per node: vLLM with tensor parallelism
+(NCCL over RDMA), llama.cpp with the ggml RPC backend (ggml-rpc-server workers, the llama-server head splitting the
+layers over them with --rpc / --tensor-split; RDMA auto-negotiated). Rank lifecycle helpers used by ``Deployer``
+(dgxmm/deployer/service.py), which dispatches here on ``placement.kind == "cluster"``; the single-node paths never
+come here.
 
 - The row: ``node`` / ``port`` / ``container_id`` are the head's (rank 0: it serves the API on its cluster IP);
-  ``ranks`` holds one entry per node {"node", "rank", "container_id", "port", "reserved"} (+ "master_port" on rank
-  0); ``reserved_bytes`` is the sum of the ranks' reservations.
+  ``ranks`` holds one entry per node {"node", "rank", "container_id", "port", "reserved"} (+ the cluster port:
+  vLLM's "master_port" on rank 0, llama.cpp's "rpc_port" on every worker); ``reserved_bytes`` is the sum of the
+  ranks' reservations.
 - Memory: each rank's reservation (memory.estimate.per_rank_bytes) is fitted and counted on its own node:
   ``usage_rows`` yields one row per (deployment, node).
-- Ports: host-network ranks publish nothing, so the head's API port and the master port are counted on every node of
-  the placement (``held_ports``), and a later deploy on any of them cannot take them.
+- Ports: host-network ranks publish nothing, so the head's API port and the cluster port (vLLM master port, llama.cpp
+  RPC port; one value from settings.cluster_port_range) are counted on every node of the placement (``held_ports``),
+  and a later deploy on any of them cannot take them.
 - Start: workers first, then the head; health on the head only. Stop: the head first, then the workers.
 - Failure: any rank exiting or vanishing fails the whole deployment: it goes "stopping", every rank is removed (head
   first), and only once every rank container is confirmed gone does it become "failed" (or "stopped"); until then the
@@ -63,13 +67,17 @@ def rank_name(name: str, rank: int) -> str:
     return f"{container_name(name)}-r{rank}"
 
 
-def master_port(dep) -> int | None:
-    return next((r.get("master_port") for r in (dep.ranks or []) if r.get("rank") == 0), None)
+CLUSTER_PORT_KEYS = ("master_port", "rpc_port")  # vLLM: rank 0's master port; llama.cpp: each worker's RPC port
+
+
+def cluster_port(dep) -> int | None:
+    """The deployment's cluster port: vLLM's master port (rank 0) or llama.cpp's RPC port (the workers')."""
+    return next((r[k] for r in ranks_of(dep) for k in CLUSTER_PORT_KEYS if r.get(k)), None)
 
 
 def held_ports(dep) -> set[int]:
-    """Ports a cluster holds on every node of its placement: the head's API port and the master port."""
-    return {p for p in (dep.port, master_port(dep)) if p}
+    """Ports a cluster holds on every node of its placement: the head's API port and the cluster port(s)."""
+    return {p for p in (dep.port, *(r.get(k) for r in (dep.ranks or []) for k in CLUSTER_PORT_KEYS)) if p}
 
 
 def head_url(d, dep) -> str:
@@ -148,7 +156,8 @@ async def _fit(d, prep: Prepared, placement: Placement, credit: dict[str, int] |
 
 def _ports(d, dep_id: int | None, nodes: list[str], unmanaged: dict[str, set[int]], cur_port: int | None,
            cur_master: int | None) -> tuple[int, int]:
-    """Under mem_lock: (API port, master port), each the current one if still free on every node of the placement."""
+    """Under mem_lock: (API port, cluster port), each the current one if still free on every node of the
+    placement."""
     used: set[int] = set()
     for n in nodes:
         used |= d._db_ports(dep_id, n) | unmanaged.get(n, set())
@@ -161,15 +170,18 @@ def _ports(d, dep_id: int | None, nodes: list[str], unmanaged: dict[str, set[int
     for p in range(lo, hi + 1):
         if p not in taken:
             return port, p
-    raise DeployError("no_ports", "cluster master port pool exhausted", 503)
+    raise DeployError("no_ports", "cluster port pool exhausted", 503)
 
 
-def _fresh_ranks(nodes: list[str], need: dict[str, int], port: int, mport: int) -> list[dict]:
+def _fresh_ranks(engine: str, nodes: list[str], need: dict[str, int], port: int, cport: int) -> list[dict]:
     ranks = []
     for i, n in enumerate(nodes):
         r = {"node": n, "rank": i, "container_id": None, "port": port if i == 0 else None, "reserved": need[n]}
-        if i == 0:
-            r["master_port"] = mport
+        if engine == "llamacpp":
+            if i > 0:  # each worker's ggml-rpc-server listens on it (on its cluster IP)
+                r["rpc_port"] = cport
+        elif i == 0:
+            r["master_port"] = cport
         ranks.append(r)
     return ranks
 
@@ -208,7 +220,8 @@ async def deploy(d, req, user_id: int | None) -> dict:
                              priority=req.priority, alias=req.alias, reserved_bytes=sum(need.values()),
                              estimate=prep.estimate.as_dict(), created_by=user_id, system=None, mode="always_on",
                              idle_timeout_s=req.idle_timeout_s, engine_api_key=new_engine_key(),
-                             placement=placement.model_dump(), ranks=_fresh_ranks(placement.nodes, need, port, mport))
+                             placement=placement.model_dump(),
+                             ranks=_fresh_ranks(req.engine, placement.nodes, need, port, mport))
             s.add(dep)
             s.flush()
             dep_id = dep.id
@@ -226,15 +239,15 @@ async def restart(d, dep: Deployment, ref: str, raw_cfg: dict) -> bool:
     name = dep.alias or prep.engine.served_name(prep.cfg, ref)
     await d.require_not_foreign(name)
     unmanaged = await _checks(d, prep, placement)
-    # the recorded ranks of the previous run must be gone before any new rank starts (same names, same master port)
+    # the recorded ranks of the previous run must be gone before any new rank starts (same names, same cluster port)
     if not await remove_ranks(d, dep.id):
         raise DeployError("docker_error", "rank containers of the previous run could not all be removed; try again",
                           502)
     async with d.mem_lock:
         d.require_model_name(name, dep.id)
         _, need, mem_total = await _fit(d, prep, placement)
-        port, mport = _ports(d, dep.id, placement.nodes, unmanaged, dep.port, master_port(dep))
-        _save_ranks(d, dep.id, _fresh_ranks(placement.nodes, need, port, mport), model_ref=ref,
+        port, mport = _ports(d, dep.id, placement.nodes, unmanaged, dep.port, cluster_port(dep))
+        _save_ranks(d, dep.id, _fresh_ranks(dep.engine, placement.nodes, need, port, mport), model_ref=ref,
                     config=prep.cfg.model_dump(mode="json"), port=port, reserved_bytes=sum(need.values()),
                     estimate=prep.estimate.as_dict())
         launched = d._claim_or_queue(dep.id, dep.name, prep)
@@ -259,8 +272,8 @@ async def launch_queued(d, dep: Deployment, prep: Prepared) -> bool:
         except InsufficientMemory as e:
             d._fail_queued(dep.id, f"not enough memory at launch time: {e.message}")
             return False
-        port, mport = _ports(d, dep.id, placement.nodes, unmanaged, dep.port, master_port(dep))
-        _save_ranks(d, dep.id, _fresh_ranks(placement.nodes, need, port, mport), port=port,
+        port, mport = _ports(d, dep.id, placement.nodes, unmanaged, dep.port, cluster_port(dep))
+        _save_ranks(d, dep.id, _fresh_ranks(dep.engine, placement.nodes, need, port, mport), port=port,
                     reserved_bytes=sum(need.values()), estimate=prep.estimate.as_dict())
     await launch(d, dep.id, prep, mem_total)  # after mem_lock; the row stays queued (committed) until it starts
     return True
@@ -287,7 +300,7 @@ async def launch(d, dep_id: int, prep: Prepared, mem_total: dict[str, int]) -> N
                             rank_memory={r["node"]: (int(r["reserved"]), mem_total[r["node"]]) for r in ranks})
         try:
             specs = prep.engine.cluster_specs(prep.artifact, prep.cfg, prep.draft, ctx, placement, d.nodes,
-                                              master_port(dep), d.settings)
+                                              cluster_port(dep), d.settings)
         except ValueError as e:
             code = e.code if isinstance(e, SpecError) else "invalid_container_spec"
             d._transition(dep_id, "failed", message=str(e), last_error=str(e))

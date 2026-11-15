@@ -1,4 +1,5 @@
-"""llama.cpp llama-server engine (ghcr.io/ggml-org/llama.cpp:server-cuda)."""
+"""llama.cpp llama-server engine (ghcr.io/ggml-org/llama.cpp:server-cuda; cluster deployments: images.llamacpp_rpc,
+built from deploy/llamacpp-rpc with the RPC backend)."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -9,9 +10,9 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from dgxmm.config import LOCAL_NODE_ID, Mount, Settings
 from dgxmm.engines.argguard import LLAMACPP_EXTRA_FLAGS, validate_extra_args
-from dgxmm.engines.base import (REMOTE_NETWORK, SERVED_NAME_RE, ContainerSpec, EngineMetrics, LaunchContext,
-                                SpecError, container_name, default_served_name, managed_labels, openai_health,
-                                remote_hf_mount)
+from dgxmm.engines.base import (RANK_LABEL, REMOTE_NETWORK, SERVED_NAME_RE, ContainerSpec, EngineMetrics,
+                                LaunchContext, RankSpec, SpecError, container_name, default_served_name,
+                                managed_labels, openai_health, remote_hf_mount)
 from dgxmm.engines.vllm import metrics_from
 from dgxmm.inventory.artifact import ModelArtifact
 from dgxmm.memory.estimate import LlamaCppSizing, MemoryEstimate, estimate_llamacpp
@@ -23,6 +24,8 @@ LLAMA_METRICS = {
     "counters": {"prompt_tokens": ("llamacpp:prompt_tokens",), "generation_tokens": ("llamacpp:tokens_predicted",)},
     "histograms": {},
 }
+RPC_CACHE_DIR = "llama.cpp-rpc-cache"  # a worker's ggml-rpc-server tensor cache (-c), under its node's HF cache dir
+RPC_CACHE_TARGET = "/root/.cache/llama.cpp"  # LLAMA_CACHE in the worker; the cache itself is <LLAMA_CACHE>/rpc
 
 
 class LlamaCppConfig(BaseModel):
@@ -63,6 +66,18 @@ def container_path(local_path: str, settings: Settings) -> tuple[Mount, str]:
         if root in p.parents:
             return Mount(host=m.host, target=f"/models/{i}", mode="ro"), f"/models/{i}/{p.relative_to(root)}"
     raise ValueError(f"{local_path} is not under an allowed GGUF root")
+
+
+def tensor_split(shares: list[int]) -> str:
+    """--tensor-split proportions as whole percentages summing to 100 (largest remainder), from byte shares."""
+    total = sum(shares)
+    if total <= 0:
+        shares, total = [1] * len(shares), len(shares)
+    exact = [100 * s / total for s in shares]
+    out = [int(x) for x in exact]
+    for i in sorted(range(len(exact)), key=lambda i: exact[i] - out[i], reverse=True)[:100 - sum(out)]:
+        out[i] += 1
+    return ",".join(str(p) for p in out)
 
 
 def remote_container_path(local_path: str, settings: Settings, node_id: str) -> tuple[Mount, str, str]:
@@ -126,6 +141,75 @@ class LlamaCppEngine:
         return ContainerSpec(name=container_name(launch.name), image=settings.images.llamacpp, command=cmd,
                              environment=env, mounts=[mount], labels=managed_labels(launch.deployment_id, self.name),
                              network=network, port=launch.port, publish_bind=publish_bind, ipc_host=False)
+
+    def cluster_specs(self, artifact: ModelArtifact, cfg: LlamaCppConfig, draft, launch: LaunchContext, placement,
+                      nodes, rpc_port: int, settings: Settings) -> list[RankSpec]:
+        """One container per node of ``placement`` (rank = position, the head first) for a llama.cpp deployment over
+        the ggml RPC backend. Workers run ``ggml-rpc-server`` bound to their node's cluster IP (RPC has no
+        authentication: never 0.0.0.0) on ``rpc_port``, with its tensor cache (-c) in <node HF cache dir>/
+        llama.cpp-rpc-cache, the only writable mount; they do not mount the model. The head runs ``llama-server`` on
+        the model (read-only, as a single-node deployment) with the single-node flags, serves the API on its
+        cluster IP (engine key in LLAMA_API_KEY) and splits the layers over ``--rpc`` (the workers, in rank order)
+        and its own GPU with ``--tensor-split``: llama.cpp puts the RPC devices first, so the proportions list the
+        workers, then the head. The proportions are each rank's share of the shardable part of its reservation
+        (``launch.rank_memory``, memory.estimate.per_rank_bytes: the reservation less the per-rank overheads). Every
+        rank runs on the host network with the RDMA devices (the RPC transport auto-negotiates RDMA)."""
+        if draft is not None:
+            raise SpecError("invalid_container_spec", "llama.cpp has no draft models")
+        cfg_nodes = {n: nodes.config(n) for n in placement.nodes}
+        for node_id, node in cfg_nodes.items():
+            if not node.cluster_ip:
+                raise SpecError("cluster_node_not_ready", f"node {node_id} has no cluster_ip configured")
+        head_id, workers = placement.nodes[0], list(placement.nodes[1:])
+        head = cfg_nodes[head_id]
+        labels = managed_labels(launch.deployment_id, self.name)
+        rdma = dict(network="host", network_mode="host", publish_bind=None, devices=["/dev/infiniband"],
+                    cap_add=["IPC_LOCK"], ulimits={"memlock": (-1, -1)}, ipc_host=False)
+        out: list[RankSpec] = []
+        for rank, node_id in enumerate(placement.nodes):
+            if rank == 0:
+                continue
+            node = cfg_nodes[node_id]
+            if not node.hf_cache_host:
+                raise SpecError("node_hf_cache_missing", f"node {node_id} has no hf_cache_host configured")
+            cache = Mount(host=f"{node.hf_cache_host.rstrip('/')}/{RPC_CACHE_DIR}", target=RPC_CACHE_TARGET,
+                          mode="rw")
+            spec = ContainerSpec(name=f"{container_name(launch.name)}-r{rank}", image=settings.images.llamacpp_rpc,
+                                 command=["ggml-rpc-server", "--host", node.cluster_ip, "-p", str(rpc_port), "-c"],
+                                 environment={"LLAMA_CACHE": RPC_CACHE_TARGET}, mounts=[cache],
+                                 labels={**labels, RANK_LABEL: str(rank)}, port=None, **rdma)
+            out.append(RankSpec(node_id, rank, spec))
+        if head_id == LOCAL_NODE_ID:
+            mount, path = container_path(artifact.local_path, settings)
+        else:
+            mount, path, _ = remote_container_path(artifact.local_path, settings, head_id)
+        split = tensor_split(self._shares(artifact, cfg, launch, [*workers, head_id], settings))
+        # -lm none: no mmap; on the unified-memory GB10 the mapped file would stay in the page cache next to the
+        # copies on the GPUs. The cluster flags come last (llama.cpp keeps the last value), after extra_args.
+        cmd = ["llama-server", "-m", path, "-c", str(cfg.ctx_size), "-np", str(cfg.parallel),
+               "-ngl", str(cfg.n_gpu_layers), "-ctk", cfg.cache_type_k, "-ctv", cfg.cache_type_v,
+               "-fa", cfg.flash_attn, "-b", str(cfg.n_batch), "-ub", str(cfg.n_ubatch), "--metrics", "--slots",
+               "-a", self.served_name(cfg, artifact.ref), "-lm", "none", *cfg.extra_args,
+               "--host", head.cluster_ip, "--port", str(launch.port),
+               "--rpc", ",".join(f"{cfg_nodes[w].cluster_ip}:{rpc_port}" for w in workers), "--tensor-split", split]
+        env = {"LLAMA_API_KEY": launch.api_key} if launch.api_key else {}
+        spec = ContainerSpec(name=f"{container_name(launch.name)}-r0", image=settings.images.llamacpp_rpc,
+                             command=cmd, environment=env, mounts=[mount], labels={**labels, RANK_LABEL: "0"},
+                             port=launch.port, **rdma)
+        return [RankSpec(head_id, 0, spec), *out]
+
+    def _shares(self, artifact: ModelArtifact, cfg: LlamaCppConfig, launch: LaunchContext, order: list[str],
+                settings: Settings) -> list[int]:
+        """Each node's (in ``order``) share of the layers: its reservation less the overheads every rank needs in
+        full (activations / compute buffers, runtime; memory.estimate.per_rank_bytes)."""
+        reserved = [int((launch.rank_memory or {}).get(n, (launch.reserved, 0))[0]) for n in order]
+        try:
+            est = self.estimate(artifact, cfg, None, settings)
+            fixed = est.activations + est.runtime
+        except ValueError:
+            fixed = 0
+        shares = [max(r - fixed, 0) for r in reserved]
+        return shares if sum(shares) > 0 else reserved
 
     async def health(self, http: httpx.AsyncClient, base_url: str, served_name: str,
                      api_key: str | None = None) -> bool:

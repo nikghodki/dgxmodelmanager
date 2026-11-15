@@ -79,13 +79,14 @@ def test_cluster_only_for_vllm_and_llamacpp(deployer_two_nodes, qwen_req):
     assert e.value.code == "cluster_unsupported_engine"
 
 
-async def test_cluster_deploy_not_implemented(deployer_two_nodes, qwen_req):
-    """llama.cpp cluster deploys raise not-implemented until Task 13 (vLLM clusters: tests/test_cluster_vllm.py)."""
+async def test_llamacpp_cluster_deploy_goes_to_the_cluster_path(deployer_two_nodes, qwen_req):
+    """llama.cpp cluster deploys are no longer refused as not implemented (Task 13: tests/test_cluster_llamacpp.py);
+    this one fails later, on the unknown model."""
     req = DeployRequest(name="test", engine="llamacpp", model_ref="Qwen/Qwen-7B",
                         placement=Placement(kind="cluster", nodes=["local", "dgx-2"]))
     with pytest.raises(DeployError) as e:
         await deployer_two_nodes.deploy(req, None)
-    assert e.value.code == "cluster_not_implemented"
+    assert e.value.code != "cluster_not_implemented"
 
 
 def test_migration_43_backfills_single_placement(tmp_path):

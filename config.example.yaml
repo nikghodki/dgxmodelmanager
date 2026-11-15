@@ -29,6 +29,9 @@ images:
   # of the moving tag or of a server-cuda-b<build> tag:
   #   docker buildx imagetools inspect ghcr.io/ggml-org/llama.cpp:server-cuda
   llamacpp: ghcr.io/ggml-org/llama.cpp@sha256:e4cfff28678327b0ae7eda129e700e56a0fa55aa23db2f016256ea155c15c2b5
+  # llama.cpp image for cluster (multi-node, RPC) GGUF deployments: built locally from deploy/llamacpp-rpc (llama.cpp
+  # commit 61dbf49, GGML_RPC=ON) and loaded on every node; a local build has no registry digest, hence the tag
+  # llamacpp_rpc: dgxmm-llamacpp-rpc:61dbf49
 docker_network: dgxmm         # docker network engines join; must equal DGXMM_NETWORK in .env
 port_range: [8100, 8199]      # host ports handed to engine containers (1024-65535, ascending)
 cluster_port_range: [29500, 29599]  # vLLM --master-port of cluster deployments, per head node
