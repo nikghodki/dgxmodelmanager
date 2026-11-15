@@ -58,6 +58,8 @@ class FakeContainer:
         self.exit_code = None
 
     def remove(self, force=False):
+        if self.client.fail_remove:
+            raise docker.errors.APIError("removal of container failed")
         self.client._containers.pop(self.id, None)
 
     def logs(self, tail=200, **_):
@@ -344,6 +346,7 @@ class FakeDockerClient:
         # an exception raised by every containers.get/list/run (e.g. the node's SSH transport is down)
         self.raise_on_all: Exception | None = None
         self.raised = 0  # how many times raise_on_all was raised
+        self.fail_remove = False  # every container remove() fails (docker answers with an error)
 
     def exec(self, cmd) -> tuple[int, bytes]:
         """An exec in a container of this node: (exit code, output)."""
@@ -376,11 +379,21 @@ class FakeDockerClient:
         self._containers[cid] = c
         return c
 
-    def add_managed(self, deployment_id, name, engine="vllm", command=None, ports=(), status="running", labels=None):
-        """A container DGXMM started for ``deployment_id`` (managed labels), e.g. found by reconcile."""
+    def add_managed(self, deployment_id, name=None, engine="vllm", command=None, ports=(), status="running", labels=None,
+                    rank=None):
+        """A container DGXMM started for ``deployment_id`` (managed labels), e.g. found by reconcile. ``rank``: a
+        cluster rank container (label dgxmm.rank)."""
         from dgxmm.engines.base import managed_labels
-        return self.add_unmanaged(name, command=command, labels={**managed_labels(deployment_id, engine),
+        extra = {"dgxmm.rank": str(rank)} if rank is not None else {}
+        if name is None:
+            name = f"dgxmm-dep{deployment_id}" + (f"-r{rank}" if rank is not None else "")
+        return self.add_unmanaged(name, command=command, labels={**managed_labels(deployment_id, engine), **extra,
                                                                  **(labels or {})}, ports=ports, status=status)
+
+    def exit_container(self, cid, code=0):
+        """The container exits on its own with ``code``."""
+        c = self._containers[cid]
+        c.status, c.exit_code = "exited", code
 
     def add_network(self, name, internal=True):
         self.networks.items[name] = FakeNetwork(name, internal)

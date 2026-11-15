@@ -158,6 +158,8 @@ class Settings(BaseModel):
     docker_network: str = "dgxmm"  # must match DGXMM_NETWORK in .env
     engine_base_host: str | None = None  # None → reach engines by container name
     port_range: tuple[int, int] = (8100, 8199)
+    # torch.distributed master ports of cluster deployments (vLLM --master-port), allocated per head node
+    cluster_port_range: tuple[int, int] = (29500, 29599)
     publish_bind: str = "127.0.0.1"
     safety_margin_gib: float = 8.0
     os_reserve_gib: float = 4.0
@@ -324,6 +326,9 @@ class Settings(BaseModel):
         lo, hi = self.port_range
         if not (1024 <= lo <= hi <= 65535):
             raise ValueError("port_range must be ascending and within 1024-65535")
+        clo, chi = self.cluster_port_range
+        if not (1024 <= clo <= chi <= 65535):
+            raise ValueError("cluster_port_range must be ascending and within 1024-65535")
         if self.safety_margin_gib < 0 or self.os_reserve_gib < 0:
             raise ValueError("safety_margin_gib and os_reserve_gib must be >= 0")
         if self.secure_cookies not in ("auto", "always", "never"):

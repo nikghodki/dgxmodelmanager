@@ -8,7 +8,10 @@ from typing import Callable
 from dgxmm.config import Settings
 from dgxmm.memory.hostmem import HostMemory, HostSample
 
-COMMITTED_STATES = frozenset({"queued", "starting", "loading", "ready", "unknown"})  # queued: reservation held
+# releasing: a usage row (never a deployment state) of a cluster rank whose container is not yet confirmed gone while
+# its deployment is stopping (dgxmm/deployer/cluster.py): its reservation stays committed until then
+RELEASING = "releasing"
+COMMITTED_STATES = frozenset({"queued", "starting", "loading", "ready", "unknown", RELEASING})  # queued: reservation held
 MEASURED_STATES = COMMITTED_STATES | {"sleeping", "stopping"}
 CREDITED_STATES = frozenset({"ready"})  # reservation fully allocated: unattributed gap is ours
 

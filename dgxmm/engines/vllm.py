@@ -9,8 +9,8 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from dgxmm.config import LOCAL_NODE_ID, Mount, Settings
 from dgxmm.engines.argguard import VLLM_EXTRA_FLAGS, validate_extra_args
-from dgxmm.engines.base import (REMOTE_NETWORK, SERVED_NAME_RE, ContainerSpec, EngineMetrics, LaunchContext,
-                                auth_headers, container_name, remote_hf_mount,
+from dgxmm.engines.base import (RANK_LABEL, REMOTE_NETWORK, SERVED_NAME_RE, ContainerSpec, EngineMetrics,
+                                LaunchContext, RankSpec, SpecError, auth_headers, container_name, remote_hf_mount,
                                 default_served_name, managed_labels, openai_health)
 from dgxmm.engines.prom import buckets, counter, gauge, parse_samples
 from dgxmm.inventory.artifact import REPO_RE, ModelArtifact
@@ -141,14 +141,16 @@ class VllmEngine:
         return estimate_vllm(artifact.arch, artifact.weights_bytes, self.sizing(cfg), settings,
                              draft_spec=draft.arch if draft else None, draft_bytes=draft.weights_bytes if draft else 0)
 
-    def container_spec(self, artifact: ModelArtifact, cfg: VllmConfig, draft: ModelArtifact | None,
-                       launch: LaunchContext, settings: Settings) -> ContainerSpec:
-        util = vllm_gpu_util(launch.reserved, launch.mem_total)
+    def _serve_args(self, artifact: ModelArtifact, cfg: VllmConfig, draft: ModelArtifact | None, util: float,
+                    host: str | None, port: int | None) -> list[str]:
+        """The `vllm serve` arguments; ``host`` None: no --host/--port (a headless cluster worker serves no API)."""
         cmd = ["--model", artifact.ref]
         if artifact.revision:
             cmd += ["--revision", artifact.revision]
-        cmd += ["--served-model-name", self.served_name(cfg, artifact.ref), "--host", "0.0.0.0", "--port", str(launch.port),
-                "--max-model-len", str(cfg.max_model_len), "--max-num-seqs", str(cfg.max_num_seqs),
+        cmd += ["--served-model-name", self.served_name(cfg, artifact.ref)]
+        if host is not None:
+            cmd += ["--host", host, "--port", str(port)]
+        cmd += ["--max-model-len", str(cfg.max_model_len), "--max-num-seqs", str(cfg.max_num_seqs),
                 "--max-num-batched-tokens", str(cfg.max_num_batched_tokens),
                 "--gpu-memory-utilization", f"{util:.2f}", "--kv-cache-dtype", cfg.kv_cache_dtype,
                 "--enable-prefix-caching" if cfg.enable_prefix_caching else "--no-enable-prefix-caching",
@@ -176,11 +178,22 @@ class VllmEngine:
         if cfg.safetensors_load_strategy:
             cmd += ["--safetensors-load-strategy", cfg.safetensors_load_strategy]
         cmd += cfg.extra_args
+        return cmd
+
+    @staticmethod
+    def _env(cfg: VllmConfig, api_key: str | None) -> dict[str, str]:
         env = {"HF_HUB_OFFLINE": "1", "VLLM_NO_USAGE_STATS": "1", "DO_NOT_TRACK": "1"}
         if cfg.enable_sleep_mode:
             env["VLLM_SERVER_DEV_MODE"] = "1"  # exposes /sleep and /wake_up
-        if launch.api_key:  # the environment, never argv (--api-key would show in ps and docker inspect's Cmd)
-            env["VLLM_API_KEY"] = launch.api_key
+        if api_key:  # the environment, never argv (--api-key would show in ps and docker inspect's Cmd)
+            env["VLLM_API_KEY"] = api_key
+        return env
+
+    def container_spec(self, artifact: ModelArtifact, cfg: VllmConfig, draft: ModelArtifact | None,
+                       launch: LaunchContext, settings: Settings) -> ContainerSpec:
+        util = vllm_gpu_util(launch.reserved, launch.mem_total)
+        cmd = self._serve_args(artifact, cfg, draft, util, "0.0.0.0", launch.port)
+        env = self._env(cfg, launch.api_key)
         if launch.node == LOCAL_NODE_ID:
             mounts = [Mount(host=settings.hf_cache.host, target="/root/.cache/huggingface"), *settings.vllm_cache_mounts]
             network, publish_bind = settings.docker_network, settings.publish_bind
@@ -190,6 +203,46 @@ class VllmEngine:
         return ContainerSpec(name=container_name(launch.name), image=settings.images.vllm, command=cmd, environment=env,
                              mounts=mounts, labels=managed_labels(launch.deployment_id, self.name),
                              network=network, port=launch.port, publish_bind=publish_bind)
+
+    def cluster_specs(self, artifact: ModelArtifact, cfg: VllmConfig, draft: ModelArtifact | None,
+                      launch: LaunchContext, placement, nodes, master_port: int, settings: Settings) -> list[RankSpec]:
+        """One container per node of ``placement`` (rank = position, the head first), for multi-node tensor
+        parallelism over NCCL (mp backend): tp = nnodes = number of nodes, one GPU per node. Every rank runs on the
+        host network with the RDMA devices; the head (rank 0) serves the API on its cluster IP, the others are
+        headless. ``launch``: the head's port and the engine key (head only); ``launch.rank_memory`` each rank's
+        reservation and its node's memory total (its --gpu-memory-utilization)."""
+        head = nodes.config(placement.head)
+        n = len(placement.nodes)
+        out: list[RankSpec] = []
+        for rank, node_id in enumerate(placement.nodes):
+            node = nodes.config(node_id)
+            if not node.cluster_ip or node.nccl is None or not head.cluster_ip:
+                raise SpecError("cluster_node_not_ready", f"node {node_id} has no cluster_ip or nccl configured")
+            reserved, total = (launch.rank_memory or {}).get(node_id, (launch.reserved, launch.mem_total))
+            is_head = rank == 0
+            cmd = self._serve_args(artifact, cfg, draft, vllm_gpu_util(reserved, total),
+                                   head.cluster_ip if is_head else None, launch.port if is_head else None)
+            # last on the command line: argparse keeps the last value, so nothing in extra_args can override them
+            cmd += ["--tensor-parallel-size", str(n), "--nnodes", str(n), "--node-rank", str(rank),
+                    "--master-addr", head.cluster_ip, "--master-port", str(master_port)]
+            if not is_head:
+                cmd.append("--headless")
+            env = self._env(cfg, launch.api_key if is_head else None)
+            env.update({"NCCL_IB_HCA": node.nccl.ib_hca, "NCCL_SOCKET_IFNAME": node.nccl.socket_ifname,
+                        "GLOO_SOCKET_IFNAME": node.nccl.socket_ifname, "VLLM_HOST_IP": node.cluster_ip})
+            if node_id == LOCAL_NODE_ID:
+                mounts = [Mount(host=settings.hf_cache.host, target="/root/.cache/huggingface"),
+                          *settings.vllm_cache_mounts]
+            else:
+                mounts = [remote_hf_mount(settings, node_id)[0]]
+            spec = ContainerSpec(name=f"{container_name(launch.name)}-r{rank}", image=settings.images.vllm,
+                                 command=cmd, environment=env, mounts=mounts,
+                                 labels={**managed_labels(launch.deployment_id, self.name), RANK_LABEL: str(rank)},
+                                 network="host", port=launch.port, publish_bind=None, network_mode="host",
+                                 devices=["/dev/infiniband"], cap_add=["IPC_LOCK"], ulimits={"memlock": (-1, -1)},
+                                 shm_size="16g")
+            out.append(RankSpec(node_id, rank, spec))
+        return out
 
     async def health(self, http: httpx.AsyncClient, base_url: str, served_name: str,
                      api_key: str | None = None) -> bool:

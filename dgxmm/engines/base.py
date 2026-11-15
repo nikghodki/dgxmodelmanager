@@ -76,6 +76,20 @@ class LaunchContext:
     # the engine's bearer key (Deployment.engine_api_key), handed over in the environment; None = no key (a
     # deployment from before engine keys, or a system deployment). Not part of repr().
     api_key: str | None = field(default=None, repr=False)
+    # cluster deployments: node -> (that rank's reservation, that node's memory total), for its
+    # --gpu-memory-utilization; None = reserved / mem_total above
+    rank_memory: dict[str, tuple[int, int]] | None = None
+
+
+@dataclass
+class RankSpec:
+    """One rank of a cluster deployment: the container to run on ``node``."""
+    node: str
+    rank: int
+    spec: ContainerSpec
+
+
+RANK_LABEL = "dgxmm.rank"  # rank of a cluster deployment's container (0 = head)
 
 
 REMOTE_NETWORK = "bridge"  # a remote node's default Docker network: DGXMM's own networks exist only on the local node

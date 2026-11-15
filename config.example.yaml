@@ -31,6 +31,7 @@ images:
   llamacpp: ghcr.io/ggml-org/llama.cpp@sha256:e4cfff28678327b0ae7eda129e700e56a0fa55aa23db2f016256ea155c15c2b5
 docker_network: dgxmm         # docker network engines join; must equal DGXMM_NETWORK in .env
 port_range: [8100, 8199]      # host ports handed to engine containers (1024-65535, ascending)
+cluster_port_range: [29500, 29599]  # vLLM --master-port of cluster deployments, per head node
 publish_bind: 127.0.0.1       # host interface engine ports are published on (keep loopback;
                               # clients should go through LiteLLM or the DGXMM network)
 # engine_base_host: null      # null = DGXMM reaches engines by container name on docker_network;

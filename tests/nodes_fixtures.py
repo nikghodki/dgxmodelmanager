@@ -49,7 +49,7 @@ def two_node_settings(settings_factory, isolated_home):
                 "docker_url": "unix:///var/run/docker.sock",
                 "cluster_ip": "192.0.2.1",
                 "nccl": {
-                    "ib_hca": "mlx5_0,mlx5_1",
+                    "ib_hca": "rocep1s0f0,roceP2p1s0f0",
                     "socket_ifname": "enp1s0f0np0"
                 }
             },
@@ -470,3 +470,78 @@ def litellm_sync_two_nodes(deployer_two_nodes):
     from dgxmm.litellm import LiteLLMSync
     d = deployer_two_nodes
     return LiteLLMSync(None, d, d.db, d.events)
+
+
+CLUSTER = {"kind": "cluster", "nodes": ["local", "dgx-2"]}
+DEEPSEEK = "deepseek-ai/DeepSeek-Tiny"
+
+
+@pytest.fixture
+def vllm_engine(two_node_settings):
+    from dgxmm.engines.vllm import VllmEngine
+    return VllmEngine(two_node_settings)
+
+
+@pytest.fixture
+def cluster_launch(two_node_registry, fake_hf_repo, vllm_engine):
+    """Keyword arguments of VllmEngine.cluster_specs for a two-node cluster (head: local, worker: dgx-2)."""
+    from dgxmm.deployer.service import Placement
+    from dgxmm.engines.base import LaunchContext
+    from dgxmm.inventory.service import InventoryService
+    from tests.conftest import QWEN_TINY
+    settings = two_node_registry.settings
+    fake_hf_repo(DEEPSEEK, config=QWEN_TINY, files={"model.safetensors": 4 * GIB})
+    inv = InventoryService(settings)
+    inv.refresh()
+    art = inv.get(DEEPSEEK)
+    cfg = vllm_engine.validate_config(dict(SMALL_VLLM))
+    launch = LaunchContext(7, "ds", 8123, 20 * GIB, 121 * GIB, "local", api_key="k-test",
+                           rank_memory={"local": (12 * GIB, 121 * GIB), "dgx-2": (24 * GIB, 120 * GIB)})
+    return dict(artifact=art, cfg=cfg, draft=None, launch=launch, placement=Placement(**CLUSTER),
+                nodes=two_node_registry, master_port=29500, settings=settings)
+
+
+@pytest.fixture
+def deepseek_cluster_req(deployer_two_nodes, fake_hf_repo):
+    """A vLLM cluster request (local + dgx-2) for a model both nodes hold."""
+    from dgxmm.deployer.service import DeployRequest
+    from tests.conftest import QWEN_TINY
+    fake_hf_repo(DEEPSEEK, config=QWEN_TINY, files={"model.safetensors": 4 * GIB})
+    deployer_two_nodes.inventory.refresh()
+    deployer_two_nodes.fake("dgx-2").weights_on_node.add(DEEPSEEK)
+    return DeployRequest(name="ds", engine="vllm", model_ref=DEEPSEEK, config=dict(SMALL_VLLM), placement=CLUSTER)
+
+
+@pytest.fixture
+async def ready_cluster_dep(deployer_two_nodes, deepseek_cluster_req):
+    """A vLLM cluster deployment (head local, worker dgx-2) that reached ready. ranks: its rank entries;
+    ranks_reserved(node): the reservation of its rank on ``node``."""
+    from types import SimpleNamespace
+    d = deployer_two_nodes
+    v = await d.deploy(deepseek_cluster_req, user_id=1)
+    d.engines_http.healthy.add(v["port"])
+    assert await d.wait_ready(v["id"], 5) == "ready"
+    row = d._get(v["id"])
+    ranks = list(row.ranks)
+    yield SimpleNamespace(id=v["id"], name=v["name"], port=v["port"], ranks=ranks,
+                          ranks_reserved=lambda node: next(r["reserved"] for r in ranks if r["node"] == node))
+    await d.aclose()
+
+
+@pytest.fixture
+def starting_cluster_dep(deployer_two_nodes):
+    """A cluster deployment found "starting" after a dgxmm restart, whose rank container ids were never recorded."""
+    from types import SimpleNamespace
+    from dgxmm.db import Deployment
+    d = deployer_two_nodes
+    ranks = [{"node": "local", "rank": 0, "container_id": None, "port": 8150, "reserved": 4 * GIB,
+              "master_port": 29500},
+             {"node": "dgx-2", "rank": 1, "container_id": None, "port": None, "reserved": 4 * GIB}]
+    with d.db.session() as s:
+        row = Deployment(name="dsr", engine="vllm", model_ref="Qwen/Qwen3-Tiny", config=dict(SMALL_VLLM),
+                         state="starting", port=8150, reserved_bytes=8 * GIB, estimate={}, node="local",
+                         placement=dict(CLUSTER), ranks=ranks)
+        s.add(row)
+        s.flush()
+        dep_id = row.id
+    return SimpleNamespace(id=dep_id, name="dsr", ranks=ranks)

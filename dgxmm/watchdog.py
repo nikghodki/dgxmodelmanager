@@ -194,7 +194,10 @@ class Watchdog:
         current = {v["id"]: v["state"] for v in views}
         self._unstoppable = {i: st for i, st in self._unstoppable.items() if current.get(i) == st}
         on = self.deployer.nodes_by_id() if self._multi_node() else {}
-        active = [v for v in views if v["state"] in VICTIM_STATES and on.get(v["id"], LOCAL_NODE_ID) == node]
+        active = [v for v in views if v["state"] in VICTIM_STATES and (
+            on.get(v["id"], LOCAL_NODE_ID) == node
+            # a cluster holds memory on every node of its placement (a rank per node)
+            or (v.get("placement") or {}).get("kind") == "cluster" and node in v["placement"]["nodes"])]
         deciders = [v for v in active if is_decider(v) and v["id"] not in self._unstoppable]
         if deciders:
             return deciders[0]

@@ -80,8 +80,8 @@ def test_cluster_only_for_vllm_and_llamacpp(deployer_two_nodes, qwen_req):
 
 
 async def test_cluster_deploy_not_implemented(deployer_two_nodes, qwen_req):
-    """Cluster deploy raises not-implemented error until Task 12."""
-    req = DeployRequest(name="test", engine="vllm", model_ref="Qwen/Qwen-7B",
+    """llama.cpp cluster deploys raise not-implemented until Task 13 (vLLM clusters: tests/test_cluster_vllm.py)."""
+    req = DeployRequest(name="test", engine="llamacpp", model_ref="Qwen/Qwen-7B",
                         placement=Placement(kind="cluster", nodes=["local", "dgx-2"]))
     with pytest.raises(DeployError) as e:
         await deployer_two_nodes.deploy(req, None)

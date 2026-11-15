@@ -18,6 +18,8 @@ from sqlalchemy import select
 
 from dgxmm.config import LOCAL_NODE_ID
 from dgxmm.db import Deployment, DeploymentEvent
+from dgxmm.deployer import cluster
+from dgxmm.engines.base import RANK_LABEL
 from dgxmm.engines.decision import DECIDER_MODELS, DECIDER_REPO, MODEL_LABEL, SYSTEM_LABEL
 
 log = logging.getLogger(__name__)
@@ -102,6 +104,8 @@ async def reconcile(deployer, retry: bool = False) -> list[str]:
                 except Exception:
                     log.exception("reconcile error for deployment %s", d.name)
                     notes.append(f"{d.name}: error during reconciliation (logged)")
+    listings: dict[str, dict] = {}  # node -> its listed rank containers of cluster rows (reconciled after the loop)
+    retried: dict[str, dict[int, tuple]] = {}  # node -> the snapshot a retry reconciled it against
     for node in nodes:
         remote = node != LOCAL_NODE_ID
         before = _rows(deployer)  # a row removed while the listing runs still owns its (stale) listed container
@@ -109,7 +113,8 @@ async def reconcile(deployer, retry: bool = False) -> list[str]:
             listed, why = await _list_remote(deployer, node)
             if listed is _SKIP:
                 if node not in pending:
-                    pending[node] = {d.id: _snapshot(d) for d in _rows(deployer) if deployer._node_of(d) == node}
+                    pending[node] = {d.id: _snapshot(d) for d in _rows(deployer) if deployer._node_of(d) == node
+                                     or (cluster.is_cluster(d) and node in cluster.nodes_of(d))}
                     log.warning("reconcile: node %s skipped (%s); its %d deployment(s) left as they are until it "
                                 "answers", node, why, len(pending[node]))
                 continue
@@ -119,7 +124,14 @@ async def reconcile(deployer, retry: bool = False) -> list[str]:
         snap = pending.pop(node, None)
         try:
             rows = _rows(deployer)  # after the listing: every row and container id as they are now
-            node_rows = [d for d in rows if deployer._node_of(d) == node]
+            # cluster rows and their rank containers are reconciled together, across their nodes, after this loop
+            cluster_ids = {str(r.id) for r in (*before, *rows) if cluster.is_cluster(r)}
+            listings[node] = {cid: c for cid, c in containers.items()
+                              if c.labels.get("dgxmm.deployment_id") in cluster_ids}
+            containers = {cid: c for cid, c in containers.items() if cid not in listings[node]}
+            if snap is not None:
+                retried[node] = snap
+            node_rows = [d for d in rows if deployer._node_of(d) == node and not cluster.is_cluster(d)]
             if snap is not None:
                 notes.append(f"node {node}: answering again → reconciled")
             try:
@@ -136,9 +148,132 @@ async def reconcile(deployer, retry: bool = False) -> list[str]:
             notes.append(f"node {node}: error during reconciliation (logged)")
             if snap is not None:  # a retry: try again on the next pass
                 pending[node] = snap
+    try:
+        await _reconcile_clusters(deployer, listings, notes, retried if retry else None)
+    except Exception:
+        log.exception("reconcile of cluster deployments failed")
+        notes.append("cluster deployments: error during reconciliation (logged)")
     for n in notes:
         log.info("reconcile: %s", n)
     return notes
+
+
+async def _list_node(deployer, node: str) -> dict | None:
+    """The managed containers of ``node`` by id (None: a remote node that cannot be listed now)."""
+    if node == LOCAL_NODE_ID:
+        listed = await asyncio.to_thread(deployer.docker.list_managed)
+    else:
+        listed, _why = await _list_remote(deployer, node)
+        if listed is _SKIP:
+            return None
+    return {c.id: c for c in listed}
+
+
+async def _reconcile_clusters(deployer, listings: dict[str, dict], notes: list[str],
+                              retried: dict[str, dict[int, tuple]] | None) -> None:
+    """Cluster rows against the rank containers of all their nodes. A first pass leaves a cluster with a skipped node
+    as it is (that node is pending; its retry reconciles the cluster). ``retried``: a retry pass (the API serves): only
+    clusters on a retried node whose (state, container id) is still what the snapshot says, under their lock; their
+    other nodes are listed now."""
+    for d in _rows(deployer):
+        if not cluster.is_cluster(d):
+            continue
+        nodes = cluster.nodes_of(d)
+        if retried is not None:
+            snaps = [retried[n][d.id] for n in nodes if n in retried and d.id in retried[n]]
+            if not snaps:
+                continue
+        if any(not deployer.node_configured(n) for n in nodes):
+            notes.append(f"{d.name}: a node of its cluster is not configured → left as it is")
+            continue
+        try:
+            if retried is None:
+                if any(n not in listings for n in nodes):
+                    continue  # a skipped node: reconciled when it answers (reconcile_pending)
+                finish = await _act_cluster(deployer, d, listings, notes)
+            else:
+                lists = dict(listings)
+                for n in nodes:
+                    if n not in lists:
+                        got = await _list_node(deployer, n)
+                        if got is None:
+                            break
+                        lists[n] = {cid: c for cid, c in got.items()
+                                    if c.labels.get("dgxmm.deployment_id") == str(d.id)}
+                else:
+                    finish = False
+                    async with deployer._lock(d.id):
+                        cur = deployer._get(d.id)
+                        if cur is None or _snapshot(cur) != snaps[0] or cur.id in deployer.launching \
+                                or deployer.has_monitor(cur.id):
+                            continue  # changed since the restart: the live code owns it
+                        finish = await _act_cluster(deployer, cur, lists, notes)
+                    if finish:
+                        await deployer.stop(d.id, reason="reconcile")
+                        notes.append(f"{d.name}: finishing interrupted stop")
+                    continue
+                notes.append(f"{d.name}: a node of its cluster still does not answer → left as it is")
+                continue
+            if finish:
+                await deployer.stop(d.id, reason="reconcile")
+                notes.append(f"{d.name}: finishing interrupted stop")
+        except Exception:
+            log.exception("reconcile error for deployment %s", d.name)
+            notes.append(f"{d.name}: error during reconciliation (logged)")
+
+
+async def _act_cluster(deployer, d: Deployment, listings: dict[str, dict], notes: list[str]) -> bool:
+    """Bring one cluster row in line with its rank containers: each rank's container found by its stored id or by its
+    labels (deployment id + rank: a restart between docker run and storing the id), and linked. A rank missing or
+    exited fails the whole deployment (the others are removed). True if an interrupted stop must be finished."""
+    if d.state in ("stopped", "failed", "planned"):
+        return False
+    if d.state == "queued":
+        deployer.resume_queued(d.id)
+        notes.append(f"{d.name}: queued → back in the start-up queue")
+        return False
+    ranks = cluster.ranks_of(d)
+    linked = False
+    problem: tuple[dict, object] | None = None
+    for r in ranks:
+        found = listings.get(r["node"], {})
+        c = found.get(r["container_id"]) if r.get("container_id") else None
+        if c is None:
+            c = next((c for c in found.values() if c.labels.get("dgxmm.deployment_id") == str(d.id)
+                      and c.labels.get(RANK_LABEL) == str(r["rank"]) and _owned(c, deployer)), None)
+            if c is not None:
+                r["container_id"] = c.id
+                linked = True
+                notes.append(f"{d.name}: rank {r['rank']} container found on node {r['node']} by its label → linked")
+        if problem is None and (c is None or c.status in ("exited", "dead")):
+            problem = (r, c)
+    if linked:
+        head = next((r for r in ranks if r["rank"] == 0), None)
+        with deployer.db.session() as s:
+            row = s.get(Deployment, d.id)
+            row.ranks = [dict(r) for r in ranks]
+            if head is not None and head.get("container_id"):
+                row.container_id = head["container_id"]
+            s.add(DeploymentEvent(deployment_id=d.id, from_state=d.state, to_state=d.state,
+                                  message="rank containers found by their labels"))
+        d = deployer._get(d.id)
+    if d.state == "stopping":
+        return True
+    if problem is not None:
+        r, c = problem
+        if c is None:
+            await cluster.fail(deployer, d.id, f"rank {r['rank']} container on node {r['node']} missing after dgxmm "
+                                               "restart")
+            notes.append(f"{d.name}: rank {r['rank']} container missing → failed")
+        else:
+            await cluster._fail_rank(deployer, d, r, c)
+            notes.append(f"{d.name}: rank {r['rank']} container exited ({c.exit_code}) → failed")
+        return False
+    if d.state in ("starting", "loading"):
+        deployer.gate.hold(d.id, "resumed", d.name)
+        deployer.resume_monitor(d.id)
+        notes.append(f"{d.name}: still {d.state} → monitoring resumed")
+    return False
 
 
 def _mark_unconfigured(deployer, d: Deployment, notes: list[str]) -> None:

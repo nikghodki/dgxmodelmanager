@@ -204,6 +204,9 @@ class Deployer:
         self.wake_failures: dict[int, tuple[str, str]] = {}
         # OnDemandController.status (set by AppContext): in-flight / queued / phase of an on-demand deployment
         self.ondemand_status: Callable[[int, str], dict] | None = None
+        # cluster deployments (deployer/cluster.py): dep_id -> retry of rank-container removal; first retry wait
+        self._cleanups: dict[int, asyncio.Task] = {}
+        self.cluster_retry_s = cluster.CLUSTER_RETRY_BASE_S
 
     def _check_not_deleting(self, *refs: str | None) -> None:
         for ref in refs:
@@ -259,7 +262,9 @@ class Deployer:
 
     def base_url_for(self, dep: "Deployment | dict") -> str:
         """base_url of a deployment (row or view): on the node it runs on. The one helper for callers outside the
-        deployer (LiteLLM, metrics, on-demand gateway, decider)."""
+        deployer (LiteLLM, metrics, on-demand gateway, decider). A cluster: its head's cluster IP."""
+        if cluster.is_cluster(dep):
+            return cluster.head_url(self, dep)
         if isinstance(dep, dict):
             name, port, engine, dep_id = dep["name"], dep["port"], dep.get("engine"), dep.get("id")
             node = self._node_of(self._get(dep_id)) if self._has_remote() and dep_id is not None else LOCAL_NODE_ID
@@ -402,9 +407,17 @@ class Deployer:
         (re)launched right now (``launching``: e.g. a remote restart whose row is still stopped/failed while its
         container starts after mem_lock; counted like usage_rows does)."""
         with self.db.session() as s:
-            return {d.port for d in s.scalars(select(Deployment))
-                    if d.port and (d.state in ACTIVE_STATES | {"planned"} or d.id in self.launching)
-                    and d.id != exclude_dep and (d.node or "local") == node_id}
+            rows = list(s.scalars(select(Deployment)))
+        out = {d.port for d in rows
+               if d.port and (d.state in ACTIVE_STATES | {"planned"} or d.id in self.launching)
+               and d.id != exclude_dep and (d.node or "local") == node_id and not cluster.is_cluster(d)}
+        # a cluster's ranks run on the host network and publish nothing: its API and master ports are held on
+        # every node of its placement
+        for d in rows:
+            if cluster.is_cluster(d) and (d.state in ACTIVE_STATES | {"planned"} or d.id in self.launching) \
+                    and d.id != exclude_dep and node_id in cluster.nodes_of(d):
+                out |= cluster.held_ports(d)
+        return out
 
     def _unmanaged_ports(self, node_id: str) -> set[int]:
         """Host ports of containers DGXMM does not manage on ``node_id`` (blocking: docker call). A remote node that
@@ -661,11 +674,12 @@ class Deployer:
                              allow_cluster=not is_system_engine(prep.engine))
 
     async def deploy(self, req: DeployRequest, user_id: int | None) -> dict:
-        # Cluster deployments not yet implemented (Task 12)
         if req.placement.kind == "cluster":
-            raise DeployError("cluster_not_implemented",
-                              "cluster deployments will be available in a future release", 501)
-        
+            if req.engine != "vllm":  # llama.cpp clusters: not yet
+                raise DeployError("cluster_not_implemented",
+                                  "cluster deployments will be available in a future release", 501)
+            return await cluster.deploy(self, req, user_id)
+
         node = self._require_node(req.node)
         prep = self.prepare(req.engine, req.model_ref, req.config)
         system = is_system_engine(prep.engine)
@@ -824,6 +838,8 @@ class Deployer:
             except DeployError as e:
                 self._fail_queued(dep_id, f"cannot start: {e.message}")
                 return False
+            if cluster.is_cluster(dep):
+                return await cluster.launch_queued(self, dep, prep)
             node = self._node_of(dep)
             remote = self._is_remote(node)
             unmanaged = await self._remote_unmanaged_ports(node) if remote else set()  # before mem_lock
@@ -1035,6 +1051,8 @@ class Deployer:
         dep = self._get(dep_id)
         if dep is None or dep.state not in ("starting", "loading"):
             return True
+        if cluster.is_cluster(dep):
+            return await cluster.monitor_step(self, dep, start)
         node = self._node_of(dep)
         info = await asyncio.to_thread(self._docker_for(node).get, dep.container_id)
         if info is None:
@@ -1064,9 +1082,11 @@ class Deployer:
     async def _healthy(self, dep: Deployment) -> bool:
         engine = self.engines[dep.engine]
         cfg = engine.validate_config(dep.config)
+        base = cluster.head_url(self, dep) if cluster.is_cluster(dep) else \
+            self.base_url(dep.name, dep.port, dep.engine, self._node_of(dep))
         try:
-            return await engine.health(self.http, self.base_url(dep.name, dep.port, dep.engine, self._node_of(dep)),
-                                       engine.served_name(cfg, dep.model_ref), api_key=dep.engine_api_key)
+            return await engine.health(self.http, base, engine.served_name(cfg, dep.model_ref),
+                                       api_key=dep.engine_api_key)
         except (httpx.HTTPError, OSError):
             return False
 
@@ -1122,6 +1142,10 @@ class Deployer:
                 async with lock:
                     dep = self._get(dep_id)
                     if dep is None or dep.state not in self.LIVE_STATES or not dep.container_id:
+                        continue
+                    if cluster.is_cluster(dep):
+                        if await cluster.check_live(self, dep, skip_nodes):
+                            failed.append(dep_id)
                         continue
                     node = self._node_of(dep)
                     if self._is_remote(node):
@@ -1215,6 +1239,8 @@ class Deployer:
                 self.gate.withdraw(dep_id)
                 return self._transition(dep_id, "stopped", message=f"cancelled while queued ({reason})",
                                         actor=reason, container_id=None)
+            if cluster.is_cluster(dep):
+                return await cluster.stop(self, dep, reason, message)
             node = self._node_of(dep)
             if not self.node_configured(node):  # nothing to reach there: release the DB state only (R11)
                 if dep.state not in ("planned", "failed", "stopping"):
@@ -1247,6 +1273,8 @@ class Deployer:
                       model_ref: str | None = None, allow_rotating: bool = False) -> dict:
         if dep_id in self.rotating and not allow_rotating:
             raise DeployError("rotation_in_progress", "the decider's API key is being rotated; it restarts by itself", 409)
+        if cluster.is_cluster(self._get(dep_id)):  # a row's placement never changes
+            return await self._restart_cluster(dep_id, config_override, model_ref)
         async with self._lock(dep_id):
             dep = self._require(dep_id)
             if dep.state not in ("stopped", "failed"):
@@ -1283,13 +1311,26 @@ class Deployer:
             self._spawn_monitor(dep_id)
         return self.view(dep_id)
 
+    async def _restart_cluster(self, dep_id: int, config_override: dict | None, model_ref: str | None) -> dict:
+        async with self._lock(dep_id):
+            dep = self._require(dep_id)
+            if dep.state not in ("stopped", "failed"):
+                raise DeployError("not_stopped", f"deployment is {dep.state}; stop it first", 409)
+            launched = await cluster.restart(self, dep, model_ref or dep.model_ref,
+                                             config_override if config_override is not None else dep.config)
+        if launched:
+            self._spawn_monitor(dep_id)
+        return self.view(dep_id)
+
     async def remove(self, dep_id: int) -> None:
         async with self._lock(dep_id):
             dep = self._require(dep_id)
             if dep.state not in ("stopped", "failed"):
                 raise DeployError("not_stopped", "stop the deployment before removing it", 409)
             node = self._node_of(dep)
-            if self.node_configured(node):  # else: nothing to reach there, only the row goes (R11)
+            if cluster.is_cluster(dep):
+                await cluster.remove(self, dep)
+            elif self.node_configured(node):  # else: nothing to reach there, only the row goes (R11)
                 try:
                     await asyncio.to_thread(self._docker_for(node).stop_and_remove, dep.container_id)
                 except NodeUnreachable as e:
@@ -1323,8 +1364,9 @@ class Deployer:
             await asyncio.to_thread(fn, container_name(name), dep_id)
 
     async def aclose(self) -> None:
-        for t in [*self._monitors.values(), *self._queued.values(), *self._waking.values()]:
+        for t in [*self._monitors.values(), *self._queued.values(), *self._waking.values(), *self._cleanups.values()]:
             t.cancel()
+        self._cleanups.clear()
         self._monitors.clear()
         self._queued.clear()
         self._waking.clear()
@@ -1337,6 +1379,10 @@ class Deployer:
             rows = []
             for d in s.scalars(select(Deployment)):
                 node = d.node or "local"
+                if cluster.is_cluster(d):  # one row per rank, on its node
+                    if d.state in ACTIVE_STATES or d.id in self.launching:
+                        rows.extend(cluster.usage_rows(d, launching=d.id in self.launching))
+                    continue
                 if d.state in ACTIVE_STATES:
                     rows.append((d.id, d.name, d.state, d.reserved_bytes, d.container_id, node))
                 elif node != LOCAL_NODE_ID and d.id in self.launching:
@@ -1396,7 +1442,8 @@ class Deployer:
             "model_name": d.alias or served,  # what clients pass as "model" to the single LiteLLM endpoint
             "litellm_error": self.litellm_error(d.id, d.state) if self.litellm_error is not None else None,
             **self._endpoints(d),
-            "sleep_capable": bool(engine and engine.supports_sleep and d.config.get("enable_sleep_mode")),
+            "sleep_capable": bool(engine and engine.supports_sleep and d.config.get("enable_sleep_mode"))
+                             and not cluster.is_cluster(d),  # clusters cannot sleep yet (cluster_unsupported)
             "placement": self._read_placement(d),
             "placement_label": self._placement_label(self._read_placement(d)),
             "created_at": d.created_at.isoformat() if d.created_at else None,
@@ -1407,6 +1454,9 @@ class Deployer:
         node = self._node_of(d)
         if not self.node_configured(node):  # its node was removed from config.yaml: no address (R11)
             return {"endpoint": None, "host_endpoint": None}
+        if cluster.is_cluster(d):  # the head serves the API on its cluster IP (host network)
+            url = f"{cluster.head_url(self, d)}/v1" if d.port else None
+            return {"endpoint": url, "host_endpoint": url}
         if self._is_remote(node):  # no docker DNS across hosts: both are the node's published address
             url = f"http://{self.nodes.config(node).engine_address()}:{d.port}/v1" if d.port else None
             return {"endpoint": url, "host_endpoint": url}
@@ -1490,6 +1540,7 @@ class Deployer:
         """``precheck``: as for ``stop``."""
         async with self._lock(dep_id):
             dep = self._require(dep_id)
+            cluster.refuse(dep, "sleep")
             if dep.state != "ready":
                 raise DeployError("not_ready", f"deployment is {dep.state}", 409)
             if precheck is not None and (why := await precheck()):
@@ -1707,6 +1758,8 @@ class Deployer:
         dep = self._require(dep_id)
         if dep.system:
             raise DeployError("system_deployment", f"{dep.name} is a system deployment and is always on", 409)
+        if "on_demand" in (mode, pending_mode):
+            cluster.refuse(dep, "on-demand mode")
         with self.db.session() as s:
             row = s.get(Deployment, dep_id)
             row.mode, row.idle_timeout_s, row.pending_mode = mode, idle_timeout_s, pending_mode
@@ -1737,6 +1790,9 @@ class Deployer:
     async def switch(self, old_id: int, req: DeployRequest, actions, user_id: int | None) -> dict:
         old = self._require(old_id)
         self._refuse_system_change(old, "switched")
+        cluster.refuse(old, "switching")
+        if req.placement.kind == "cluster":
+            raise cluster.unsupported("switching")
         acts = [a if isinstance(a, PlanAction) else PlanAction.model_validate(a) for a in actions]
 
         # Check memory fit before touching anything; auto-escalate sleep→stop if needed
@@ -1822,6 +1878,7 @@ class Deployer:
                           user_id: int | None = None) -> dict:
         dep = self._require(dep_id)
         self._refuse_system_change(dep, "reconfigured")
+        cluster.refuse(dep, "reconfiguring")
         old_cfg, old_ref = dict(dep.config), dep.model_ref
         old_reserved, old_estimate, old_port = dep.reserved_bytes, dict(dep.estimate), dep.port
         was_active = dep.state in ("ready", "sleeping", "unknown", "starting", "loading")
@@ -1871,3 +1928,6 @@ class Deployer:
                                   f"reconfigure failed ({original_error}); rollback incomplete: {', '.join(rollback_failures)}",
                                   502)
             raise
+
+
+from dgxmm.deployer import cluster  # noqa: E402  (cluster.py imports this module)

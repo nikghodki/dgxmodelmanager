@@ -49,6 +49,7 @@ the container.
 | `images.llamacpp` | string | `ghcr.io/ggml-org/llama.cpp@sha256:e4cfff28…c2b5` | llama.cpp server image (build b11669, multi-arch, pinned by digest). |
 | `docker_network` | string | `dgxmm` | Docker network that engine containers join. **Must equal `DGXMM_NETWORK` in `.env`.** |
 | `port_range` | `[low, high]` | `[8100, 8199]` | Host ports handed to engine containers (1024–65535, ascending). Ports used by other containers are skipped. |
+| `cluster_port_range` | `[low, high]` | `[29500, 29599]` | Master ports (`vllm --master-port`) of cluster deployments, allocated per head node. A cluster's API and master ports are held on every node of its placement. |
 | `publish_bind` | string | `127.0.0.1` | Host address that engine ports are published on. Keep it on loopback: clients should go through LiteLLM or the Docker network. |
 | `engine_base_host` | string or null | `null` | `null`: DGXMM (and LiteLLM) reach engines as `dgxmm-<name>:<port>` on `docker_network`. Set a hostname or IP to use the published ports on that host instead. |
 | `startup_timeout_s` | int | `900` | Seconds an engine may take to become ready before DGXMM fails it. |
