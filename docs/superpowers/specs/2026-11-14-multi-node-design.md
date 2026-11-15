@@ -50,6 +50,24 @@ Measured on this hardware on 2026-11-14 (manual runs, not DGXMM):
    insights work for remote and cluster deployments. Where an engine cannot do something across nodes, DGXMM
    uses the nearest equivalent and the UI says so (for example, if vLLM `/sleep` does not work multi-node, a
    cluster "sleep" is a stop that frees both nodes; decided by a hardware check in the plan). (R4)
+
+   **Hardware check (Task 14, 2026-11-15): vLLM sleep does not work across nodes.** Two GB10 nodes, one
+   vLLM 0.26.1 container per node, TP=2 over NCCL/RDMA (`--nnodes 2`, `--enable-sleep-mode`,
+   `VLLM_SERVER_DEV_MODE=1`), Qwen3.8-27B-NVFP4, `--gpu-memory-utilization 0.60`. MemAvailable (GB, node 1 /
+   node 2), second run: loaded 36.5 / 42.5; after `POST /sleep?level=1` 89.2 / 95.7 (about 52 GB freed on each
+   node; vLLM: 10.98 GiB backed up to CPU, 56 GiB discarded per rank); after `POST /wake_up` 19.0 / 24.3 (about
+   17.5 GB *less* than before the sleep, on each node). The first run gave the same figures. Completions before
+   the sleep were correct ("What is 17+25?" -> 42, largest planet -> Jupiter); after the wake-up the same requests
+   produced garbage (the model reports a garbled question, invents unrelated tasks), also after
+   `/reset_prefix_cache`. Decision: `supports_sleep` is false for every cluster
+   (`cluster.SLEEP_ACROSS_NODES = False`). A cluster "sleep" stops every rank and frees every node; the API labels
+   it `sleep_label: "sleep (stops all nodes)"` and `sleep_capable` is false; cluster ranks never get
+   `--enable-sleep-mode` or the dev endpoints. llama.cpp has no sleep, so its clusters behave the same.
+   Everything else works for clusters as for single deployments: on-demand mode (idle reap stops all ranks; a
+   request starts all ranks and waits for the head's health; the gateway proxies to the head), schedules (a sleep
+   schedule stops every rank, its wake starts them again), switch single <-> cluster, reconfigure (a restart of
+   every rank), the watchdog and the planner (decisions about one node count only the cluster's share there;
+   stopping it frees every node), and the decider (each deployment carries its placement and label, never ranks).
 9. **Weights.** A deploy on a node whose HF cache lacks the artifact is refused with `weights_missing` and an
    action that copies the snapshot over the cluster link.
 
