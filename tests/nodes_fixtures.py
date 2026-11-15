@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from dgxmm.config import PathMapping, Settings
+from dgxmm.config import GIB, PathMapping, Settings
 
 
 @pytest.fixture
@@ -62,12 +62,13 @@ def two_node_registry(two_node_settings):
     from dgxmm.nodes.registry import NodeRegistry
     from tests.fakes import FakeDockerClient
     
-    # Create a fake client for each node
-    fake_clients = {}
+    # Create a fake client for each node upfront
+    fake_clients = {
+        "local": FakeDockerClient(),
+        "dgx-2": FakeDockerClient(),
+    }
     
     def client_factory(node):
-        if node.id not in fake_clients:
-            fake_clients[node.id] = FakeDockerClient()
         return fake_clients[node.id]
     
     registry = NodeRegistry(two_node_settings, client_factory=client_factory)
@@ -76,3 +77,55 @@ def two_node_registry(two_node_settings):
     registry.fake = lambda node_id: fake_clients[node_id]
     
     return registry
+
+
+@pytest.fixture
+def budget_service_two_nodes(two_node_registry):
+    """BudgetService with two nodes and deployments on each."""
+    from dgxmm.memory.budget import BudgetService
+    from dgxmm.memory.hostmem import HostMemory, HostSample
+    from dgxmm.nodes.probe import NodeProbe
+    
+    # Set up memory samples for remote node
+    two_node_registry.fake("dgx-2").exec_output = "MemTotal: 127000000 kB\nMemAvailable: 100000000 kB\n"
+    
+    # Create usage rows: one local, one remote
+    def usage_provider():
+        return [
+            (1, "local-model", "ready", 10 * GIB, "local-cid", "local"),
+            (2, "remote-model", "ready", 20 * GIB, "remote-cid", "dgx-2"),
+        ]
+    
+    # Create a fake probe that returns HostSample for local
+    class FakeLocalProbe:
+        def sample(self, ids):
+            return HostSample(
+                mem=HostMemory(total=121 * GIB, available=100 * GIB, free=0, cached=0, swap_total=0, swap_free=0),
+                managed={cid: 0 for cid in ids},
+                external_top=[],
+                gpu={},
+                managed_gpu={}
+            )
+    
+    # Create NodeProbe for remote nodes
+    node_probe = NodeProbe(two_node_registry, two_node_registry.settings)
+    
+    # Monkey-patch NodeProbe to also handle local node
+    orig_sample = node_probe.sample
+    local_probe = FakeLocalProbe()
+    
+    def combined_sample(node_id_or_ids):
+        if isinstance(node_id_or_ids, str):
+            # Called with node_id
+            if node_id_or_ids == "local":
+                return None
+            return orig_sample(node_id_or_ids)
+        else:
+            # Called with container ids (local probe)
+            return local_probe.sample(node_id_or_ids)
+    
+    node_probe.sample = combined_sample
+    
+    budget = BudgetService(two_node_registry.settings, node_probe, usage_provider, nodes=two_node_registry)
+    
+    return budget

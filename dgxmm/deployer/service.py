@@ -875,9 +875,9 @@ class Deployer:
         self._waking.clear()
 
     # ---------- views ----------
-    def usage_rows(self) -> list[tuple[int, str, str, int, str | None]]:
+    def usage_rows(self) -> list[tuple[int, str, str, int, str | None, str]]:
         with self.db.session() as s:
-            return [(d.id, d.name, d.state, d.reserved_bytes, d.container_id)
+            return [(d.id, d.name, d.state, d.reserved_bytes, d.container_id, getattr(d, "node", "local"))
                     for d in s.scalars(select(Deployment)) if d.state in ACTIVE_STATES]
 
     def _actual(self, dep_id: int) -> int | None:

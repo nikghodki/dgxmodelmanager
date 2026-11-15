@@ -113,6 +113,7 @@ class Images(BaseModel):
     # llama.cpp build b11669 (server-cuda-b11669; multi-arch manifest list, arm64 + amd64). To update: see
     # config.example.yaml (images.llamacpp)
     llamacpp: str = "ghcr.io/ggml-org/llama.cpp@sha256:e4cfff28678327b0ae7eda129e700e56a0fa55aa23db2f016256ea155c15c2b5"
+    probe: str = "busybox@sha256:a7dbc319b1438115a207e11930dc4bb3e643dcb3ec0bdd694bb36cd8fad289ec"
     # built locally from deploy/decider (never pulled). Bump the tag when the image's contract with the app changes
     # (2: non-root, read-only rootfs, key delivered as a file): an older image is then "missing" and gets rebuilt.
     decision: str = "dgxmm-decider:3"

@@ -49,6 +49,12 @@ class FakeContainer:
     def logs(self, tail=200, **_):
         return self.log_text.encode()
 
+    def exec_run(self, cmd, **kwargs):
+        """Execute command in container; returns (exit_code, output)."""
+        output = self.client.exec_output if hasattr(self.client, 'exec_output') and self.client.exec_output else ""
+        exit_code = 0 if not (hasattr(self.client, 'exec_fail') and self.client.exec_fail) else 1
+        return exit_code, output.encode() if isinstance(output, str) else output
+
 
 class FakeHelperContainer:
     """A short-lived auto-removed helper (dgxmm.helper=true); never appears in containers.list()."""
@@ -289,6 +295,8 @@ class FakeDockerClient:
         self.helper_wait_error: Exception | None = None
         self.helper_waits: list = []
         self.helper_killed = 0
+        self.exec_output = ""
+        self.exec_fail = False
 
     @staticmethod
     def default_image_labels() -> dict:

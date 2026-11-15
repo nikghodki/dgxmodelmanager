@@ -12,7 +12,7 @@ COMMITTED_STATES = frozenset({"queued", "starting", "loading", "ready", "unknown
 MEASURED_STATES = COMMITTED_STATES | {"sleeping", "stopping"}
 CREDITED_STATES = frozenset({"ready"})  # reservation fully allocated: unattributed gap is ours
 
-UsageRow = tuple[int, str, str, int, str | None]
+UsageRow = tuple[int, str, str, int, str | None, str]  # (id, name, state, reserved, container_id, node)
 
 
 @dataclass(frozen=True)
@@ -23,6 +23,7 @@ class DeploymentUsage:
     reserved: int
     actual: int
     container_id: str | None = None
+    node: str = "local"
 
 
 @dataclass(frozen=True)
@@ -67,20 +68,74 @@ def compute_budget(mem: HostMemory, usages: list[DeploymentUsage], settings: Set
 
 
 class BudgetService:
-    def __init__(self, settings: Settings, probe, usage_provider: Callable[[], list[UsageRow]]):
+    def __init__(self, settings: Settings, probe, usage_provider: Callable[[], list[UsageRow]], nodes=None):
         self.settings, self.probe, self.usage_provider = settings, probe, usage_provider
-        self._current: Budget | None = None
+        self.nodes = nodes
+        self._current: dict[str, Budget] = {}
         self.last_sample: HostSample | None = None
 
-    def current(self) -> Budget | None:
-        return self._current
+    def current(self, node_id: str = "local") -> Budget | None:
+        if self._current is None:
+            return None
+        return self._current.get(node_id)
+
+    def all(self) -> dict[str, Budget]:
+        """Return all per-node budgets."""
+        return dict(self._current)
 
     async def refresh(self) -> Budget:
+        """Refresh budget for local node (backward compatible)."""
+        if self._current is None:
+            self._current = {}
         rows = self.usage_provider()
-        ids = {cid for (_, _, _, _, cid) in rows if cid}
+        
+        # Group usage rows by node
+        by_node: dict[str, list[UsageRow]] = {}
+        for row in rows:
+            if len(row) == 6:
+                # New format: (id, name, state, reserved, cid, node)
+                node = row[5]
+            else:
+                # Old format: (id, name, state, reserved, cid) - default to local
+                node = "local"
+            if node not in by_node:
+                by_node[node] = []
+            by_node[node].append(row)
+        
+        # Always refresh local node, even if no rows
+        local_rows = by_node.get("local", [])
+        ids = {cid for row in local_rows if len(row) >= 5 and row[4] for cid in [row[4]]}
         sample = await asyncio.to_thread(self.probe.sample, ids)
-        usages = [DeploymentUsage(i, n, st, res, sample.managed.get(cid, 0) if cid else 0, cid)
-                  for (i, n, st, res, cid) in rows]
+        usages = []
+        for row in local_rows:
+            if len(row) == 6:
+                i, n, st, res, cid, node = row
+            else:
+                i, n, st, res, cid = row
+                node = "local"
+            actual = sample.managed.get(cid, 0) if cid else 0
+            usages.append(DeploymentUsage(i, n, st, res, actual, cid, node))
         self.last_sample = sample
-        self._current = compute_budget(sample.mem, usages, self.settings)
-        return self._current
+        self._current["local"] = compute_budget(sample.mem, usages, self.settings)
+        
+        # Refresh remote nodes if node probe is available
+        if self.nodes:
+            for node_id in self.nodes.ids():
+                if node_id != "local" and self.nodes.is_remote(node_id):
+                    mem = self.probe.sample(node_id)
+                    if mem:
+                        node_rows = by_node.get(node_id, [])
+                        usages = []
+                        for row in node_rows:
+                            if len(row) == 6:
+                                i, n, st, res, cid, node = row
+                            else:
+                                # Should not happen for remote nodes, but handle it
+                                i, n, st, res, cid = row
+                                node = node_id
+                            # For remote nodes, we don't have container-level memory yet
+                            actual = 0
+                            usages.append(DeploymentUsage(i, n, st, res, actual, cid, node))
+                        self._current[node_id] = compute_budget(mem, usages, self.settings)
+        
+        return self._current["local"]
