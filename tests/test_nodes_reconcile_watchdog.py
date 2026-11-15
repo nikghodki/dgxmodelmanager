@@ -396,3 +396,38 @@ async def test_litellm_leaves_out_on_demand_deployment_on_unconfigured_node(lite
             row.mode, row.alias = "on_demand", alias
     want = litellm_sync_two_nodes.desired()
     assert {k[0] for k in want} == {str(kept)}
+
+
+# ---------- fix round 2 ----------
+
+async def test_retry_does_not_adopt_a_deployment_removed_during_the_listing(deployer_two_nodes, ready_remote_dep):
+    d = deployer_two_nodes
+    await _restarted_with_dgx2_skipped(d)
+    release = _hold_listing(d, early=True)  # the listing still holds the removed deployment's container
+    task = await _start_retry(d)
+    await d.stop(ready_remote_dep.id, reason="user")
+    await d.remove(ready_remote_dep.id)
+    release.set()
+    notes = await task
+    assert d.count_rows() == 0
+    assert not [n for n in notes if "orphan" in n]
+
+
+async def test_a_retry_that_fails_outside_the_rows_keeps_the_node_pending(deployer_two_nodes, ready_remote_dep,
+                                                                          monkeypatch, caplog):
+    from dgxmm.deployer import reconcile as rec
+    d = deployer_two_nodes
+    await _restarted_with_dgx2_skipped(d)
+    snap = dict(d.reconcile_pending["dgx-2"])
+
+    async def boom(*a, **kw):
+        raise RuntimeError("database is locked")
+    monkeypatch.setattr(rec, "_reconcile_node", boom)
+    with caplog.at_level(logging.ERROR, logger="dgxmm.deployer.reconcile"):
+        notes = await reconcile(d, retry=True)
+    assert d.reconcile_pending == {"dgx-2": snap}
+    assert any("node dgx-2: error during reconciliation" in n for n in notes)
+    assert [r for r in caplog.records if "reconcile of node dgx-2 failed" in r.getMessage()]
+    monkeypatch.undo()
+    await reconcile(d, retry=True)
+    assert d.reconcile_pending == {}

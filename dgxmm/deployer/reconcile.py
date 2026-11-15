@@ -104,6 +104,7 @@ async def reconcile(deployer, retry: bool = False) -> list[str]:
                     notes.append(f"{d.name}: error during reconciliation (logged)")
     for node in nodes:
         remote = node != LOCAL_NODE_ID
+        before = _rows(deployer)  # a row removed while the listing runs still owns its (stale) listed container
         if remote:
             listed, why = await _list_remote(deployer, node)
             if listed is _SKIP:
@@ -115,17 +116,26 @@ async def reconcile(deployer, retry: bool = False) -> list[str]:
         else:
             listed = await asyncio.to_thread(deployer.docker.list_managed)
         containers = {c.id: c for c in listed if not c.labels.get("dgxmm.oneshot")}
-        rows = _rows(deployer)  # after the listing: every row and container id as they are now
-        node_rows = [d for d in rows if deployer._node_of(d) == node]
         snap = pending.pop(node, None)
-        if snap is not None:
-            notes.append(f"node {node}: answering again → reconciled")
         try:
-            _clear_unconfigured_marks(deployer, node, node_rows, notes)
+            rows = _rows(deployer)  # after the listing: every row and container id as they are now
+            node_rows = [d for d in rows if deployer._node_of(d) == node]
+            if snap is not None:
+                notes.append(f"node {node}: answering again → reconciled")
+            try:
+                _clear_unconfigured_marks(deployer, node, node_rows, notes)
+            except Exception:
+                log.exception("reconcile: clearing node-not-configured marks on node %s failed", node)
+            # not orphans: containers and deployment ids of rows that existed before or after the listing
+            known = {r.container_id for r in (*before, *rows) if r.container_id}
+            dep_ids = {str(r.id) for r in (*before, *rows) if deployer._node_of(r) == node}
+            await _reconcile_node(deployer, node, remote, node_rows, containers, {r.name for r in rows}, known,
+                                  notes, snap, dep_ids)
         except Exception:
-            log.exception("reconcile: clearing node-not-configured marks on node %s failed", node)
-        await _reconcile_node(deployer, node, remote, node_rows, containers, {r.name for r in rows},
-                              {r.container_id for r in rows if r.container_id}, notes, snap)
+            log.exception("reconcile of node %s failed", node)
+            notes.append(f"node {node}: error during reconciliation (logged)")
+            if snap is not None:  # a retry: try again on the next pass
+                pending[node] = snap
     for n in notes:
         log.info("reconcile: %s", n)
     return notes
@@ -181,9 +191,11 @@ async def _act(deployer, d: Deployment, c, node: str, linked: bool, notes: list[
 
 
 async def _reconcile_node(deployer, node: str, remote: bool, rows: list[Deployment], containers: dict, taken: set,
-                          known: set[str], notes: list[str], snap: dict[int, tuple] | None = None) -> None:
+                          known: set[str], notes: list[str], snap: dict[int, tuple] | None = None,
+                          dep_ids: set[str] | None = None) -> None:
     """``snap``: a retry (the API is serving): only rows whose (state, container id) still equal it, each under its
-    deployment's lock."""
+    deployment's lock. ``known`` / ``dep_ids``: container ids / deployment ids (of this node) of rows that existed at
+    any point of this pass; a container with either is never adopted as an orphan (on a remote node)."""
     by_label: dict[str, object] = {}
     if remote:  # a remote launch interrupted between docker run and storing the container id
         for c in containers.values():
@@ -247,7 +259,7 @@ async def _reconcile_node(deployer, node: str, remote: bool, rows: list[Deployme
             except Exception:
                 log.exception("reconcile error for deployment %s", d.name)
                 notes.append(f"{d.name}: error during reconciliation (logged)")
-    node_ids = {str(d.id) for d in rows}
+    node_ids = {str(d.id) for d in rows} | (dep_ids or set())
     for cid, c in containers.items():
         if cid in known or cid in linked:
             continue
