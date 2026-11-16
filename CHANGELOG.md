@@ -1,13 +1,18 @@
 # Changelog
 
 All notable changes to DGXMM are documented in this file. The format is based on
-[Keep a Changelog](https://keepachangelog.com/en/1.1.0/). DGXMM does not publish tagged releases yet
-(the package version is `0.1.0`), so each section below is identified by its date. Upgrade notes for existing installs are in
-[upgrade](docs/getting-started/upgrade.md#upgrading-an-existing-install).
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Releases are tagged from 0.2.0 on (`v0.2.0`); the
+sections before it are identified by their date (the package version was `0.1.0` throughout). Upgrade notes for
+existing installs are in [upgrade](docs/getting-started/upgrade.md#upgrading-an-existing-install).
 
-## [Unreleased] — Multi-node deployments
+## [0.2.0] — 2026-11-16
 
-### Added
+The first tagged release: multi-node deployments (models on a second DGX Spark, or one model across two as a
+cluster) and on-demand models.
+
+### Multi-node deployments
+
+#### Added
 
 - **Multi-node deployments.** DGXMM can now manage models across multiple DGX Spark nodes (or similar). Configure
   a `nodes:` list in `config.yaml` with each node's id, label, Docker connection (`ssh://user@cluster-ip` for
@@ -46,7 +51,7 @@ All notable changes to DGXMM are documented in this file. The format is based on
   cannot be started or reconfigured, and can be stopped/removed (the operation succeeds by releasing database state,
   with no Docker call to the removed node).
 
-### Changed
+#### Changed
 
 - **Direct engine URLs need the engine key.** Once a deployment has an engine key (every new one, and every
   existing single-node deployment after its next restart), its direct engine URLs ("Gateway network", "On the
@@ -65,7 +70,7 @@ All notable changes to DGXMM are documented in this file. The format is based on
   always carry `sleep_label` (`null` where Sleep is vLLM's own sleep or not offered). See
   [sleep and wake](docs/user-guide/deployments.md#sleep-and-wake).
 
-### Fixed
+#### Fixed
 
 - **A failed sleep no longer leaves a deployment "ready".** When vLLM's `/sleep` failed, DGXMM kept the deployment
   ready although the engine reported itself asleep (requests hung; a later wake crashed the engine). Now any
@@ -79,12 +84,9 @@ All notable changes to DGXMM are documented in this file. The format is based on
   removed, LiteLLM entry dropped, `last_error` set. Deployments that are not ready, system deployments, ones with an
   operation in progress and ones on a stale node are never probed. See
   [health checks](docs/user-guide/deployments.md#health-checks).
-
-
-### Fixed
-
 - **DeepSeek-V4 memory estimation.** DeepSeek-V4 compressed/sliding/indexer KV is now modelled from vLLM's
-  packed pool (matches vLLM byte-for-byte for the pinned image vllm/vllm-openai:pinned-2026-08-27);
+  packed pool (matches vLLM byte-for-byte for the image configured as `images.vllm`, default
+  `vllm/vllm-openai@sha256:22d3b121…`);
   single-KV-head / MLA KV is counted in full on every TP rank; config.json attention fields the parser doesn't
   model now give low confidence + the 20% margin (split per rank like its base).
 - **GPU memory utilization never exceeds reservation.** `--gpu-memory-utilization` is now floored to 4 decimals
@@ -92,7 +94,7 @@ All notable changes to DGXMM are documented in this file. The format is based on
 - **tools/vllm_dsv4_pool_sim.py** added to verify DeepSeek-V4 pool calculation against vLLM ground truth after
   image upgrades.
 
-### Security
+#### Security
 
 - **Node SSH key.** The SSH key for Docker-over-SSH on remote nodes (`node_ssh_key_file`, default
   `data/secrets/node_ssh_key`) grants root-equivalent Docker socket access on those nodes. Protect it with mode
@@ -103,23 +105,31 @@ All notable changes to DGXMM are documented in this file. The format is based on
   `<data_dir>/ssh/config` (pinned `known_hosts`, the key, `StrictHostKeyChecking yes`, `BatchMode yes`) and the image's
   `ssh` passes it explicitly, so docker-py's `ssh://` transport uses it too.
 
-### Upgrade notes
+#### Upgrade notes
 
-- Migration 41 adds `deployments.node`; existing deployments are mapped to the implicit local node. Migration 42
-  adds `deployments.placement` (JSON) and `engine_api_key`; migration 43 adjusts placement structure. Every existing
-  deployment remains on the local node and works exactly as before.
-- With no `nodes:` in `config.yaml`, DGXMM creates one implicit local node and behaves as before multi-node support.
-  Add a `nodes:` list to enable multi-node management.
+- Migrations run once at the first start: 41 adds `deployments.node` (existing deployments get `local`), 42 adds
+  `deployments.engine_api_key` (existing rows stay empty until their next start), 43 adds `deployments.placement`
+  and `deployments.ranks` and backfills them (`{"kind": "single", "nodes": [<node>]}` and `[]`), 44 adds
+  `downloads.kind` and `downloads.node` (empty for existing Hub downloads). Every existing deployment stays on the
+  local node.
+- With no `nodes:` in `config.yaml`, DGXMM manages one implicit local node, the host it runs on. The changes
+  above still apply to it: once a deployment restarts its direct engine URLs answer `401` (use LiteLLM), Sleep of a
+  vLLM deployment stops it (`vllm_sleep: stop`; sleep schedules stop and start, and a wake is a cold start), and
+  the engine health probe is on (`engine_health_interval_s: 0` turns it off). Add a `nodes:` list to enable
+  multi-node management.
+- Stored memory estimates keep the old even KV split until the deployment's next start, restart or reconfigure.
 - The `node_ssh_key_file` (SSH key for remote nodes) must be readable by the user the DGXMM container runs as
-  (set by `DGXMM_UID` in `.env`). Create it with mode 0600 and install its public key on each remote node. See
+  (set by `DGXMM_UID` in `.env`). Create it with mode 0600 and install its public key on each remote node. Remote
+  `docker_url`s use SSH on port 22 (`ssh://<user>@<cluster_ip>`, no `:port`). See
   [configuration](docs/configuration/index.md#node-ssh-key-and-known-hosts).
 - For llama.cpp clusters, build and load the RPC image on every node: `docker build -t dgxmm-llamacpp-rpc:61dbf49-u1
   deploy/llamacpp-rpc`, then `docker save dgxmm-llamacpp-rpc:61dbf49-u1 | ssh user@node docker load` for each remote node.
+- Rolling back: stop and remove remote and cluster deployments first, then restart the remaining engines. See
+  [upgrading an existing install](docs/getting-started/upgrade.md#upgrading-an-existing-install).
 
+### On-demand models
 
-## [Unreleased] — On-demand models
-
-### Added
+#### Added
 
 - **On-demand models.** A deployment can now be *on demand* or *always on*. An on-demand model starts on the
   first request through LiteLLM, which waits on its open connection and then gets the normal answer, and is
@@ -159,7 +169,7 @@ All notable changes to DGXMM are documented in this file. The format is based on
   `ondemand_max_queued`, `ondemand_allowed_cidrs` and `dgxmm_internal_url`; see
   [configuration](docs/configuration/index.md#on-demand-models) and [how it works](docs/architecture/ondemand.md).
 
-### Fixed
+#### Fixed
 
 - **Speculative decoding with a draft model DGXMM downloaded.** A vLLM deployment with a draft (`dflash`, `eagle`,
   `eagle3`, `draft_model`) failed at start with `Invalid repository ID or local directory specified` when the draft
@@ -168,7 +178,7 @@ All notable changes to DGXMM are documented in this file. The format is based on
   model's `--revision`. Adopting an external container drops a `revision` in its `--speculative-config` the same
   way it drops `--revision`.
 
-### Security
+#### Security
 
 - The gateway answers only direct connections from DGXMM's own Docker networks (never the host, the LAN, the
   decider's network or anything with forwarding headers) and needs a generated bearer key
@@ -177,7 +187,7 @@ All notable changes to DGXMM are documented in this file. The format is based on
   forwarded. Request bodies and the key are never logged. The shipped nginx example returns 404 for
   `/dgxmm/ondemand/`. See [security](docs/security.md#on-demand-gateway).
 
-### Upgrade notes
+#### Upgrade notes
 
 - Migration 40 adds `deployments.mode` and `idle_timeout_s` (and `pending_mode` is added automatically);
   **every existing deployment becomes always on**, so nothing changes until you switch one. New deployments are
