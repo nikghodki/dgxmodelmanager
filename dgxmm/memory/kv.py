@@ -54,7 +54,12 @@ def kv_shards(spec: ArchSpec) -> int:
     return max(min(heads), 1) if heads else 0
 
 
-# ---- vLLM's packed KV pool for DeepSeek-V4 (vllm/v1/core/kv_cache_utils.py, image pinned-2026-08-27) ----
+# ---- vLLM's packed KV pool for DeepSeek-V4 (vllm/v1/core/kv_cache_utils.py) ----
+# Mirrors the vLLM image DGXMM deploys, vllm/vllm-openai:pinned-2026-08-27. Assumptions taken from that image:
+# blocks of 256 tokens (compressed latent / indexer), 64 (SWA), 4 / 8 (compressor states); fp8 kv-cache stored as
+# fp8_ds_mla (584 B per state, pages padded to 576 B; other dtypes: plain rows padded to 512 B); async scheduling,
+# so 2 x max_num_batched_tokens in flight; no speculative (MTP) layers. After a vLLM upgrade re-run
+# tools/vllm_dsv4_pool_sim.py in the new image and compare with tests/test_deepseek_v4_kv.py.
 # The model registers several caches per layer with different page sizes (models/deepseek_v4/attention.py,
 # compressor.py, v1/attention/backends/mla/sparse_swa.py). vLLM groups them (group_and_unify_kv_cache_specs,
 # _get_kv_cache_groups_uniform_groups) and every group draws blocks from ONE shared pool whose block is as large as
@@ -114,11 +119,14 @@ def vllm_dsv4_pool_bytes(spec: ArchSpec, *, tokens_total: int, seqs: int, contex
     block each); a windowed group's blocks are bounded by every sequence's window (+2 blocks for block alignment)
     plus the in-flight tokens once (SlidingWindowSpec.max_admission_blocks_per_request)."""
     caches = _dsv4_caches(spec, kv_dtype, spec.torch_dtype)
-    if not caches:
-        return 0
+    if not any(window is None for _, _, window, _ in caches):
+        raise ValueError("DeepSeek-V4 pool without a compressed layer: not the layout vLLM packs")
     in_flight = VLLM_MAX_CONCURRENT_BATCHES * max_num_batched_tokens
     full: Counter[int] = Counter()
     windowed: dict[tuple[int, int], Counter[int]] = {}
+    # keyed by page size, as vLLM does (layers_per_size in _get_kv_cache_groups_uniform_groups): two caches with
+    # equal pages in one (block, window) group become one size with both caches' layers (verified against vLLM:
+    # tests/test_deepseek_v4_kv.py::test_caches_with_equal_page_sizes_match_vllm)
     for page, bs, window, count in caches:
         if window is None:
             full[page] += count
@@ -132,7 +140,7 @@ def vllm_dsv4_pool_bytes(spec: ArchSpec, *, tokens_total: int, seqs: int, contex
     for (bs, window), pages in windowed.items():
         layers = max(pages.values())
         n_sub = _cdiv(layers, t)
-        tuple_bytes = sum(pages)
+        tuple_bytes = sum(pages)  # one page of each size per layer tuple
         bytes_per_block = max(bytes_per_block, _cdiv(layers, n_sub) * tuple_bytes)
         one = _cdiv(min(window - 1 + in_flight, context), bs) + 1
         many = seqs * (_cdiv(min(window - 1, context), bs) + 2) + _cdiv(min(in_flight, tokens_total), bs) - 1

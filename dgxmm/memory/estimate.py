@@ -5,8 +5,7 @@ from dataclasses import asdict, dataclass, field, replace
 
 from dgxmm.config import GIB, Settings
 from dgxmm.inventory.archspec import ArchSpec
-from dgxmm.memory.kv import (VLLM_MAX_CONCURRENT_BATCHES, kv_cache_bytes, kv_dtype_bytes, kv_shards, state_bytes,
-                             vllm_dsv4_pool_bytes)
+from dgxmm.memory.kv import kv_cache_bytes, kv_dtype_bytes, kv_shards, state_bytes, vllm_dsv4_pool_bytes
 
 LOW_CONFIDENCE_MARGIN = 0.20
 # vllm_gpu_util floors --gpu-memory-utilization to 1e-4 of device memory so vLLM never takes more than the
@@ -59,21 +58,29 @@ def per_rank_bytes(engine: str, est: MemoryEstimate, free: dict[str, int]) -> di
     needed in full on every rank. vLLM shards the KV cache by KV head, so it splits at most ``est.kv_shards`` ways
     (a rank holds max(1, heads // tp) heads): MLA latents and other single-KV-head caches are replicated, i.e.
     needed in full on every rank (llama.cpp's layer split keeps each layer's KV with the layer: always split).
-    ``margin`` is entirely proportional to the model: the low-confidence margin is
-    LOW_CONFIDENCE_MARGIN x (KV + state + activations) and calibration (``with_total``) only scales the total
-    (measured x 1.05, a mean ratio, +10% after an OOM), so it is split like the weights. (Absolute safety bytes live
+    ``margin``: the low-confidence margin (confidence ``low``) is LOW_CONFIDENCE_MARGIN x (KV + state +
+    activations), so it is split like that base: its KV share like the KV, the rest needed in full on every rank
+    (activations are per rank; state is counted per rank too, conservatively). Any other margin comes from
+    calibration (``with_total``), which only scales the total (measured x 1.05, a mean ratio, +10% after an OOM),
+    so it is split like the weights. (Absolute safety bytes live
     in the per-node Budget: settings.margin_bytes / os_reserve_bytes, already out of free_for_new.) vLLM (tensor
     parallel, tp = number of nodes): split evenly. llama.cpp (RPC layer split): split in proportion to each node's
     free memory (a node with none gets no share; all none: even). Rounded up (never under-estimates a rank)."""
     nodes = list(free)
     if len(nodes) <= 1:
         return {n: est.total for n in nodes}
-    shard = est.weights + est.draft_weights + est.kv_cache + est.state + est.margin
-    fixed = est.activations + est.runtime
+    margin_base = est.kv_cache + est.state + est.activations
+    if est.confidence == "low" and margin_base > 0:  # split the margin like its base
+        margin_kv = est.margin * est.kv_cache // margin_base
+        kv, margin_fixed, margin_shard = est.kv_cache + margin_kv, est.margin - margin_kv, 0
+    else:  # calibration: like the weights
+        kv, margin_fixed, margin_shard = est.kv_cache, 0, est.margin
+    shard = est.weights + est.draft_weights + kv + est.state + margin_shard
+    fixed = est.activations + est.runtime + margin_fixed
     kv_split = min(len(nodes), est.kv_shards) if est.kv_shards else len(nodes)
     if engine != "llamacpp" and kv_split < len(nodes):
-        shard -= est.kv_cache
-        fixed += -(-est.kv_cache // kv_split)
+        shard -= kv
+        fixed += -(-kv // kv_split)
     if engine == "llamacpp":
         weights = {n: max(free[n], 0) for n in nodes}
         if sum(weights.values()) <= 0:
@@ -114,13 +121,12 @@ def estimate_vllm(spec: ArchSpec, weights_bytes: int, cfg: VllmSizing, settings:
                   draft_spec: ArchSpec | None = None, draft_bytes: int = 0) -> MemoryEstimate:
     b = kv_dtype_bytes(cfg.kv_cache_dtype, spec.torch_dtype)
     tokens_total = cfg.kv_tokens or cfg.max_model_len * cfg.max_num_seqs
-    # sliding windows also hold the tokens in flight: max_num_batched_tokens per concurrent (async) batch
-    # (vllm/v1/kv_cache_interface.py SlidingWindowSpec.max_admission_blocks_per_request)
     kw = dict(tokens_total=tokens_total, seqs=cfg.max_num_seqs, context=cfg.max_model_len,
-              bytes_per_elem=b, window_slack=VLLM_MAX_CONCURRENT_BATCHES * cfg.max_num_batched_tokens)
+              bytes_per_elem=b, window_slack=cfg.max_num_batched_tokens)
 
     def kv_of(s: ArchSpec) -> int:
-        if any(g.kind == "csa" for g in s.layer_groups):  # vLLM's packed DeepSeek-V4 pool
+        # vLLM's packed DeepSeek-V4 pool (it needs a compressed group: an all-window layout is not that pool)
+        if any(g.kind == "csa" and g.compress_ratio > 1 for g in s.layer_groups):
             return vllm_dsv4_pool_bytes(s, tokens_total=tokens_total, seqs=cfg.max_num_seqs,
                                         context=cfg.max_model_len, kv_dtype=cfg.kv_cache_dtype,
                                         max_num_batched_tokens=cfg.max_num_batched_tokens)

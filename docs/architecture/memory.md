@@ -55,7 +55,7 @@ Each deploy gets an estimate (`memory/estimate.py`). The total is the sum of its
 | Part | vLLM | llama.cpp |
 |---|---|---|
 | weights | size of the safetensors files (plus a speculative draft model's weights) | size of the GGUF file |
-| KV cache | from `config.json`: layers, KV heads, head size, KV dtype, attention window (plus the tokens in flight: 2 × `max_num_batched_tokens`), for the KV pool (`kv_tokens`, default `min(context × seqs, 2 × context)`). DeepSeek-V4 (compressed sparse attention): vLLM's packed pool, in which every cache group draws whole blocks of the largest group's size | from GGUF metadata for `ctx_size` across `parallel` slots, K/V cache types |
+| KV cache | from `config.json`: layers, KV heads, head size, KV dtype, attention window (plus `max_num_batched_tokens` in flight), for the KV pool (`kv_tokens`, default `min(context × seqs, 2 × context)`). DeepSeek-V4 (compressed sparse attention): vLLM's packed pool, in which every cache group draws whole blocks of the largest group's size (2 × `max_num_batched_tokens` in flight; `tools/vllm_dsv4_pool_sim.py` checks it against vLLM) | from GGUF metadata for `ctx_size` across `parallel` slots, K/V cache types |
 | state | recurrent state of SSM and hybrid layers, per sequence | same |
 | activations | from batched tokens, hidden and intermediate sizes, and vocabulary | compute buffers from `n_ubatch` |
 | runtime | `vllm_runtime_fixed_gib` + `vllm_cuda_graph_gib` (3.0 + 1.5 GiB) + 16 MiB (`--gpu-memory-utilization` flooring) | `llamacpp_runtime_fixed_gib` (0.5 GiB) |
@@ -67,7 +67,8 @@ The estimate's **confidence** is `low` (fields were missing or not modelled), `e
 On a multi-node vLLM deployment (tensor parallel) each rank needs its share of the weights and the KV
 cache plus the activations and runtime in full. The KV cache splits by KV head, at most as many ways as
 the model has KV heads: MLA latents and other single-KV-head caches (DeepSeek-V3, DeepSeek-V4, MQA) are
-replicated, so every rank needs all of it.
+replicated, so every rank needs all of it. A low-confidence margin is split like its base (its KV share like
+the KV, the rest in full on every rank); a calibration margin is split like the weights.
 
 ## Calibration
 

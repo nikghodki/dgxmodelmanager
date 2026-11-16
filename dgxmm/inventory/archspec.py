@@ -123,6 +123,8 @@ def _deepseek_v4_groups(c: dict[str, Any], n_layers: int, kv_heads: int, head_di
     ratios = ratios[:n_layers]  # the rest are the MTP layers (attention.py: layer_id >= num_hidden_layers -> 1)
     if not all(isinstance(r, int) and r in _DSV4_RATIOS for r in ratios) or kv_heads != 1 or not window:
         return None
+    if max(ratios) <= 1:  # no compressed layer: vLLM does not build its packed pool (kv_cache_utils.py:1568)
+        return None
     index_dim = int(c.get("index_head_dim") or 0)
     if 4 in ratios and not index_dim:
         return None

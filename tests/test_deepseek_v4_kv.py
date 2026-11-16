@@ -161,3 +161,63 @@ def test_reservation_leaves_vllm_its_estimate(settings):
     est = estimate_vllm(dsv4(), 166_886_535_336, VllmSizing(32768, 4, 8192, "fp8", 65536), settings)
     for need in _two(est).values():
         assert vllm_gpu_util(need, total) * total >= need - VLLM_UTIL_SLACK
+
+
+# ---------- fix round 1 ----------
+
+def test_low_confidence_margin_follows_its_base_on_every_rank(settings):
+    """The low-confidence margin is 20% of (KV + state + activations). On TP=2 with replicated KV none of that base is
+    split, so each rank carries the whole margin (not half of it)."""
+    s = dsv4(model_type="deepseek_v5", architectures=["DeepseekV5ForCausalLM"])  # unmodelled -> low, 1 KV head
+    est = estimate_vllm(s, 166_886_535_336, VllmSizing(32768, 4, 8192, "fp8", 65536), settings)
+    assert est.confidence == "low" and est.kv_shards == 1 and est.margin > 0
+    want = -(-est.weights // 2) + est.kv_cache + est.state + est.activations + est.runtime + est.margin
+    for need in _two(est).values():
+        assert want <= need <= want + 2
+
+
+def test_low_confidence_margin_kv_part_splits_with_gqa_kv(settings):
+    cfg = json.loads((FIX / "qwen3-8b.json").read_text())
+    cfg.pop("max_position_embeddings")  # missing field -> low
+    est = estimate_vllm(parse_hf_config(cfg), 16 * GIB, VllmSizing(32768, 4, 8192, "fp8", 65536), settings)
+    assert est.confidence == "low" and est.kv_shards == 8
+    base = est.kv_cache + est.state + est.activations
+    m_kv = est.margin * est.kv_cache // base
+    want = (est.weights + est.kv_cache + m_kv) / 2 + est.state + est.activations + est.runtime + (est.margin - m_kv)
+    for need in _two(est).values():
+        assert want <= need <= want + 3
+
+
+def test_calibrated_margin_still_splits_like_the_weights():
+    est = MemoryEstimate(10 * GIB, 0, 2 * GIB, 0, GIB, GIB, 4 * GIB, "calibrated", kv_shards=1)
+    assert set(_two(est).values()) == {(10 + 4) * GIB // 2 + 2 * GIB + GIB + GIB}
+
+
+def test_gemma_sliding_window_single_node_kv_unchanged(settings):
+    """Sliding-window models other than DeepSeek-V4 keep the pre-existing slack (1 x max_num_batched_tokens)."""
+    g = parse_hf_config(json.loads((FIX / "gemma-4-31b-it.json").read_text()))
+    est = estimate_vllm(g, 0, VllmSizing(32768, 4, 8192, "auto", 65536), settings)
+    assert est.kv_cache == 15_435_038_720  # 14.38 GiB, as before the DeepSeek-V4 change
+
+
+def test_all_sliding_window_deepseek_v4_is_low_confidence_not_a_crash(settings):
+    s = dsv4(compress_ratios=[0] * 46)
+    assert not s.confident and "compress_ratios" in s.unmodeled
+    est = estimate_vllm(s, 10 * GIB, VllmSizing(32768, 4, 8192, "fp8", 65536), settings)
+    assert est.confidence == "low" and est.kv_cache > 0
+
+
+def test_csa_groups_without_compression_do_not_crash_the_pool(settings):
+    from dataclasses import replace
+    s = replace(dsv4(), layer_groups=(LayerGroup("csa", 43, kv_heads=1, head_dim=512, window=128, compress_ratio=1),))
+    est = estimate_vllm(s, 0, VllmSizing(32768, 4, 8192, "fp8", 65536), settings)
+    assert est.kv_cache > 0
+
+
+def test_caches_with_equal_page_sizes_match_vllm(settings):
+    """index_head_dim 512 makes the indexer's compressor state page equal the C4 compressor state page (32832 B).
+    vLLM groups windowed caches by page size (kv_cache_utils._get_kv_cache_groups_uniform_groups: layers_per_size),
+    so the two merge into 42 layers split over 2 groups of 21. Ground truth from tools/vllm_dsv4_pool_sim.py:
+    bytes_per_block 1534464, one 32k request 16739467776 B."""
+    est = estimate_vllm(dsv4(index_head_dim=512), 0, VllmSizing(32768, 1, 8192, "fp8", 32768), settings)
+    assert est.kv_cache == 16_739_467_776 + 1_534_464
