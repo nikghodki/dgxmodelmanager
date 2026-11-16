@@ -32,6 +32,18 @@ description: "What DGXMM does not do, or does only on a best-effort basis."
 - **The on-demand queue does not survive a restart.** Restarting DGXMM drops waiting requests (their
   connections close) and resets the in-flight counters; ready on-demand models then wait a full idle
   timeout before they are stopped.
+- **NCCL all-reduce throughput with GPU Direct RDMA disabled.** Measured cluster all-reduce bandwidth is
+  approximately 3 GB/s on 2x DGX Spark over ConnectX-7 direct link with RoCE, because GPU Direct RDMA is
+  disabled (the vLLM image's libmlx5 lacks `mlx5dv_reg_dmabuf_mr`). With GPU Direct RDMA enabled, the
+  expected bandwidth is significantly higher. This affects multi-node vLLM cluster performance.
+- **GB10 unified memory and cgroup accounting.** On GB10, CUDA allocations are not charged to
+  cgroups or RSS, so the container's measured memory is only its host-side memory (the process, page
+  cache, tmpfs). Keep a host-level GPU-aware OOM guard to prevent the host from running out of
+  unified memory. This is a known GB10 driver behavior.
+- **Memory estimator accuracy for novel attention architectures.** Memory estimates for models with
+  novel attention mechanisms (such as DeepSeek-V4's compressed/sliding/indexer attention) may be lower
+  than actual usage. <!-- TODO estimator fix --> A fix for improved estimation accuracy is being integrated
+  separately; until then, monitor actual memory usage for these models and adjust manually if needed.
 
 ## Next steps
 
