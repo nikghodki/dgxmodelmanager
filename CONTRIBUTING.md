@@ -207,5 +207,6 @@ and security problems privately as described in [SECURITY.md](SECURITY.md).
 - Update the docs in `docs/` when you change behaviour, configuration keys or installer options.
 - Add user-visible changes to the `[Unreleased]` section of [CHANGELOG.md](CHANGELOG.md).
 - Screenshots in `docs/images/` must come from a demo instance with made-up data, never from a real box
-  (they would show deployment, container and repository names and command lines).
+  (they would show deployment, container and repository names and command lines). `tools/screenshots/run.sh`
+  regenerates them all from `tools/screenshots/demo_data.py` (see the Screenshots section of `docs/README.md`).
 - Never commit `.env`, `config.yaml`, `data/` or `secrets/` (they are gitignored).
