@@ -14,7 +14,7 @@ Press <kbd>⌘</kbd> <kbd>K</kbd> (macOS) or <kbd>Ctrl</kbd> <kbd>K</kbd> (elsew
 
 ## Ask: natural-language commands
 
-![Command palette interpreting "put the qwen chat model to sleep" as Sleep qwen3-8b-chat](../images/command-ask-light.png#only-light) ![Command palette interpreting "put the qwen chat model to sleep" as Sleep qwen3-8b-chat](../images/command-ask-dark.png#only-dark)
+![Command palette interpreting "put the qwen chat model to sleep" as Sleep qwen3-8-27b](../images/command-ask-light.png#only-light) ![Command palette interpreting "put the qwen chat model to sleep" as Sleep qwen3-8-27b](../images/command-ask-dark.png#only-dark)
 
 When what you type matches no palette entry, the palette offers **Interpret: <your text>**. Press
 <kbd>Enter</kbd> on it and DGXMM turns the text into an action and a target:

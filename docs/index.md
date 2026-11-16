@@ -12,8 +12,8 @@ containers, checks before every start that a model fits next to everything alrea
 all of them through one OpenAI-compatible LiteLLM endpoint with virtual keys. It runs as a single
 container and installs with one command.
 
-![DGXMM dashboard: free memory, the unified-memory bar, KPI tiles and deployments (demo data)](images/dashboard-light.png#only-light)
-![DGXMM dashboard: free memory, the unified-memory bar, KPI tiles and deployments (demo data)](images/dashboard-dark.png#only-dark)
+![DGXMM dashboard: unified memory per node for two DGX Sparks, KPI tiles and deployments (demo data)](images/dashboard-light.png#only-light)
+![DGXMM dashboard: unified memory per node for two DGX Sparks, KPI tiles and deployments (demo data)](images/dashboard-dark.png#only-dark)
 
 ## Key capabilities
 

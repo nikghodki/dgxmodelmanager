@@ -32,7 +32,7 @@ Tabs:
   change them with **Save mode**, see [on-demand models](on-demand.md#choosing-and-changing-the-mode)),
   the **API access** card, memory (reserved, measured, estimate parts and
   confidence), and the full configuration. When multiple nodes are configured, **Runs on** shows
-  the placement: the node label (e.g. *DGX-1*) for single deployments, or *DGX-1 + DGX-2 (cluster)* for
+  the placement: the node label (e.g. *dgx-1*) for single deployments, or *dgx-1 + dgx-2 (cluster)* for
   clusters. API access shows how clients call this deployment: the single LiteLLM
   **Endpoint** (`…/v1`) and the **Model** name, each with a copy button, the LiteLLM status, and
   ready-to-copy `curl` and Python (OpenAI SDK) snippets that read the key from `LITELLM_API_KEY`. A
@@ -66,6 +66,20 @@ Tabs:
   when Docker reports an OOM kill or the log has the kernel OOM killer's line; otherwise it says *killed
   by SIGKILL* (for example `docker kill`, or a stop that timed out), and the memory estimate is not
   raised.
+
+## Cluster deployments
+
+![Cluster deployment deepseek-v4-flash on dgx-1 + dgx-2: the Sleep (stops all nodes) action, the Mode card and the Ranks card with the head on dgx-1 and the worker on dgx-2, both running](../images/deployment-cluster-light.png#only-light) ![Cluster deployment deepseek-v4-flash on dgx-1 + dgx-2: the Sleep (stops all nodes) action, the Mode card and the Ranks card with the head on dgx-1 and the worker on dgx-2, both running](../images/deployment-cluster-dark.png#only-dark)
+
+A deployment that runs on several nodes ([multi-node deployments](deploying.md#multi-node-deployments-and-cluster-limits))
+says *runs on dgx-1 + dgx-2 (cluster)* under its name. Its **Ranks** card lists one container per node: the rank,
+the node, its role (the **head** serves the API, **workers** run headless) and the rank container's state. Its
+Sleep reads **Sleep (stops all nodes)**: a cluster cannot sleep across nodes, so it stops every rank and frees
+the memory on each node, after a confirmation.
+
+The Deployments list has a **Runs on** column whenever more than one node is configured:
+
+![Deployments list with the Runs on column: deployments on dgx-1, on dgx-2 and one on dgx-1 + dgx-2 (cluster), and an on-demand model asleep](../images/deployments-light.png#only-light) ![Deployments list with the Runs on column: deployments on dgx-1, on dgx-2 and one on dgx-1 + dgx-2 (cluster), and an on-demand model asleep](../images/deployments-dark.png#only-dark)
 
 ## Sleep and wake
 

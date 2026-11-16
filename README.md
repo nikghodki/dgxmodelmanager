@@ -14,7 +14,7 @@ your confirmation. It runs as a single container and installs with one command.
 
 **Documentation: <https://nikghodki.github.io/dgxmodelmanager/>**
 
-![DGXMM dashboard: free memory, unified memory bar, KPI tiles and deployments (demo data)](docs/images/dashboard-light.png)
+![DGXMM dashboard: unified memory per node for two DGX Sparks, KPI tiles and deployments (demo data)](docs/images/dashboard-light.png)
 
 ## Highlights
 

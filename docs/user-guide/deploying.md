@@ -6,7 +6,7 @@ description: "The deploy wizard: memory check, plans when a model does not fit, 
 
 Open **Deploy model** (Dashboard, Deployments, or the command palette). It needs the admin role.
 
-![Deploy wizard with a suggested config for the goal, the engine suggestion, parser suggestions and a suggested draft model](../images/deploy-wizard-light.png#only-light) ![Deploy wizard with a suggested config for the goal, the engine suggestion, parser suggestions and a suggested draft model](../images/deploy-wizard-dark.png#only-dark)
+![Deploy wizard with the mode, a suggested config for the goal, the engine suggestion, parser suggestions, a suggested draft model and the Where to run step](../images/deploy-wizard-light.png#only-light) ![Deploy wizard with the mode, a suggested config for the goal, the engine suggestion, parser suggestions, a suggested draft model and the Where to run step](../images/deploy-wizard-dark.png#only-dark)
 
 1. **Model**: pick a complete, downloaded model. Only models an engine can serve are listed. The line
    below shows the architecture, quantization, weight size and maximum context.
@@ -22,7 +22,12 @@ Open **Deploy model** (Dashboard, Deployments, or the command palette). It needs
    on, with the hint *On demand needs LiteLLM (it starts models on requests that come through it)*. For
    on demand, **Idle minutes before sleeping** (1 to 1440) starts at the DGXMM default. See
    [on-demand models](on-demand.md).
-3. **Where to run** (when multiple nodes are configured): DGXMM shows placement options with their
+3. **Sizing and features**: the **Goal**, then context length, concurrent sequences, KV cache dtype, the
+   shared KV pool size, prefix caching, sleep mode, **Speculative decoding** and so on. Advanced options
+   include tool-call and reasoning parsers, trust_remote_code, the served model name, and allowlisted
+   extra flags. The suggestions in this step (suggested config, engine, parsers, draft model, code scan)
+   are described in [deploy-time advice](#deploy-time-advice).
+4. **Where to run** (when multiple nodes are configured): DGXMM shows placement options with their
    per-node memory need and whether each fits. Options are single nodes (dgx-1, dgx-2) and the cluster
    (dgx-1 + dgx-2). One is marked **Recommended**: the single node with the most free memory if the model
    fits on one node; otherwise the cluster if it fits there. The recommendation appears when you first open
@@ -31,11 +36,8 @@ Open **Deploy model** (Dashboard, Deployments, or the command palette). It needs
    of nodes). The memory check updates for your choice. When the model does not fit anywhere, no placement
    is recommended and deploy is refused until you make it fit. When only one node is configured (the default),
    this step is skipped and the implicit local node is used.
-4. **Sizing and features**: the **Goal**, then context length, concurrent sequences, KV cache dtype, the
-   shared KV pool size, prefix caching, sleep mode, **Speculative decoding** and so on. Advanced options
-   include tool-call and reasoning parsers, trust_remote_code, the served model name, and allowlisted
-   extra flags. The suggestions in this step (suggested config, engine, parsers, draft model, code scan)
-   are described in [deploy-time advice](#deploy-time-advice).
+
+   ![Where to run for DeepSeek-V4-Flash: dgx-1 and dgx-2 each too big for one DGX with the memory needed and free on each node, and the dgx-1 + dgx-2 cluster recommended](../images/deploy-placement-light.png#only-light) ![Where to run for DeepSeek-V4-Flash: dgx-1 and dgx-2 each too big for one DGX with the memory needed and free on each node, and the dgx-1 + dgx-2 cluster recommended](../images/deploy-placement-dark.png#only-dark)
 
 The **Memory check** panel updates as you type. It shows the estimate split into weights, KV cache,
 activations and runtime, the KV pool in tokens, the vLLM memory share it will be started with, and a

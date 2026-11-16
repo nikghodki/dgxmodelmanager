@@ -4,7 +4,7 @@ description: "The DGXMM dashboard: free memory, the unified-memory bar, KPI tile
 
 # Dashboard
 
-![Dashboard in the dark theme: free memory, the unified-memory bar, KPI tiles and deployments](../images/dashboard-light.png#only-light) ![Dashboard in the dark theme: free memory, the unified-memory bar, KPI tiles and deployments](../images/dashboard-dark.png#only-dark)
+![Dashboard with two nodes: unified memory per node for dgx-1 and dgx-2, KPI tiles and the deployments with where each runs](../images/dashboard-light.png#only-light) ![Dashboard with two nodes: unified memory per node for dgx-1 and dgx-2, KPI tiles and the deployments with where each runs](../images/dashboard-dark.png#only-dark)
 
 - **Free for new deployments** is the headline number: memory a new model may use right now, after the
   safety margin and OS reserve, what running deployments have reserved, and what other processes use
@@ -12,9 +12,13 @@ description: "The DGXMM dashboard: free memory, the unified-memory bar, KPI tile
 - **Unified memory** bar: one segment per DGXMM deployment, external processes, safety margin + OS
   reserve, and free memory. It also shows GPU utilisation, temperature and free disk. **Table** shows the same numbers as
   a table.
+- With more than one node configured, **Unified memory per node** takes the place of both: one bar per node
+  (dgx-1, dgx-2) with its free memory, and **Deploy model** / **Plan combinations**. A cluster deployment's share
+  appears on each node it uses. A node without a recent memory reading is marked *Node unavailable*, with the
+  reason.
 - **KPI tiles**: total generation throughput, the worst time to first token (p50) among ready
   deployments, the highest KV-cache usage, and the request queue.
-- **Deployments** table with state, memory (measured / reserved), tok/s, KV usage, and the LiteLLM model
+- **Deployments** table with state, **Runs on** (with more than one node: the node, or e.g. *dgx-1 + dgx-2 (cluster)*), memory (measured / reserved), tok/s, KV usage, and the LiteLLM model
   name with its registration status. When a ready deployment is not registered (for example because
   LiteLLM is unreachable or another deployment holds the same model name), the status has a tooltip
   with the exact reason. A deployment waiting for its turn to start shows *Queued* with its position
