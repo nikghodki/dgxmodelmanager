@@ -51,14 +51,14 @@ description: "What DGXMM does not do, or does only on a best-effort basis."
   cache, tmpfs). Keep a host-level GPU-aware OOM guard to prevent the host from running out of
   unified memory. This is a known GB10 driver behavior. See
   [Host memory protection](../operations/host-memory-protection.md).
-- **Memory estimator accuracy for novel attention architectures.** DeepSeek-V4 compressed/sliding/indexer
-  KV is now modelled from vLLM's packed pool (matches vLLM byte-for-byte for the pinned image
-  vllm/vllm-openai:pinned-2026-08-27); single-KV-head / MLA KV is counted in full on every TP rank;
-  config.json attention fields the parser doesn't model now give low confidence + the 20% margin (split per
-  rank like its base). The `--gpu-memory-utilization` is floored to 4 decimals so it never exceeds the
-  reservation. After a vLLM image upgrade, run `tools/vllm_dsv4_pool_sim.py` to verify the pool calculation
-  still matches; estimates stored before the upgrade keep the old even split until the model is re-prepared
-  (see upgrade notes).
+- **Memory estimates for attention the parser does not model.** DGXMM estimates KV-cache memory from
+  `config.json`. Attention fields its parser does not model give the estimate low confidence and a 20% margin
+  (split per rank like the rest of it), so such a model may reserve more memory than it uses, or, if the
+  architecture needs much more KV than its base, still too little. DeepSeek-V4's KV pool is modelled after the
+  vLLM image configured as `images.vllm` (default `vllm/vllm-openai@sha256:22d3b121…`); after changing or
+  upgrading that image, re-run `tools/vllm_dsv4_pool_sim.py` in the new image and compare it with
+  `tests/test_deepseek_v4_kv.py`. A deployment keeps the estimate stored at its last start (see
+  [upgrading an existing install](../getting-started/upgrade.md#upgrading-an-existing-install)).
 
 ## Next steps
 

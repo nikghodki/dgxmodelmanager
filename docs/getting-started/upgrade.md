@@ -67,7 +67,48 @@ What changes when an older install is upgraded with `./install.sh upgrade` (see 
 [changelog](../changelog.md) for each release). Nothing needs to be done by hand unless a point below
 applies to you.
 
-- **On-demand models (unreleased).** Migration 40 adds `deployments.mode` and `idle_timeout_s` at the
+- **Multi-node deployments, 0.2.0 (2026-11-16).** Without a `nodes:` key in `config.yaml` DGXMM keeps managing
+  the one host it runs on; the points below still apply to an existing single-node install.
+  - *Migrations 41–44 run once at the first start*: 41 adds `deployments.node` (existing deployments get
+    `local`); 42 adds `deployments.engine_api_key` (existing rows stay empty until their next start); 43 adds
+    `deployments.placement` and `deployments.ranks` and backfills them (`{"kind": "single", "nodes": [<node>]}`
+    and `[]`); 44 adds `downloads.kind` and `downloads.node` (empty for existing downloads, which are Hub
+    downloads). Take a [backup](../operations/backup.md) first.
+  - *Engine API keys.* Every engine started from now on gets its own API key, and LiteLLM and DGXMM's own checks
+    send it. Running engines keep serving without a key, but once a deployment restarts (Stop/Start, Restart,
+    Reconfigure, a wake from a stop) its direct engine URLs (`127.0.0.1:<port>`, the container name on the
+    DGXMM network) answer `401` without that key, which DGXMM never shows. Send clients through LiteLLM.
+  - *vLLM Sleep now stops the model.* The new setting `vllm_sleep` defaults to `stop`: on DGX Spark's unified
+    memory vLLM's level-1 sleep frees nothing and fails. Sleep on a single-node vLLM deployment then stops it
+    (after a confirmation), and Wake starts it again: a cold start that takes as long as a normal start, not a
+    fast wake. Sleep schedules therefore stop and start their deployments. Engines started from now on get
+    neither `--enable-sleep-mode` nor vLLM's development routes. On a host with separate GPU memory, set
+    `vllm_sleep: level1` in `config.yaml` to keep vLLM's own sleep, then `docker restart dgxmm`.
+  - *Engine health probe, on by default.* Every `engine_health_interval_s` (30 s) DGXMM sends `GET /health` to
+    each ready deployment's engine; after `engine_health_failures` (3) failures in a row the deployment is
+    failed, its containers removed and its LiteLLM entry dropped. To turn it off, set
+    `engine_health_interval_s: 0` in `config.yaml` and `docker restart dgxmm`. See
+    [health checks](../user-guide/deployments.md#health-checks).
+  - *Stored memory estimates.* The estimator now splits a tensor-parallel deployment's KV cache only as far as
+    vLLM does (MLA and single-KV-head caches are needed in full on every rank) and models DeepSeek-V4's KV pool.
+    A deployment keeps the estimate stored at its last start, with the old even KV split, until it is prepared
+    again: its next Start, Restart, Reconfigure or wake from a stop.
+  - *llama.cpp RPC image.* Only llama.cpp cluster deployments need it (`images.llamacpp_rpc`, default
+    `dgxmm-llamacpp-rpc:61dbf49-u1`). It is built locally, not pulled: on the node running DGXMM run
+    `docker build -t dgxmm-llamacpp-rpc:61dbf49-u1 deploy/llamacpp-rpc`, then load it on every remote node with
+    `docker save dgxmm-llamacpp-rpc:61dbf49-u1 | ssh dgxuser@192.0.2.2 docker load`. See
+    [configuration](../configuration/index.md#nodes).
+  - *New `config.yaml` keys* take their defaults: `nodes`, `node_ssh_key_file`, `remote_probe_interval_s`,
+    `remote_dev_endpoints`, `cluster_port_range`, `images.llamacpp_rpc`, `images.probe`, `vllm_sleep`,
+    `engine_health_interval_s` and `engine_health_failures`.
+  - *Rolling back* to a release before multi-node support: first stop and remove every deployment on a remote
+    node and every cluster deployment, and let weight copies finish or cancel them (older versions know only the
+    local node and would try to run them there). Then go back to the previous image: retag it if you kept it
+    (`docker tag <previous image> dgxmm:latest` and `docker compose up -d dgxmm`), or
+    `git checkout <previous commit> && ./install.sh`. Finally restart every running engine (Stop, then Start):
+    engines started by 0.2.0 require their engine key, which older versions neither send nor give LiteLLM.
+    Older versions ignore the new columns.
+- **On-demand models (0.2.0).** Migration 40 adds `deployments.mode` and `idle_timeout_s` at the
   first start; every existing deployment becomes *always on*, so nothing changes until you switch one.
   New deployments are always on unless you pick on demand (the deploy wizard preselects it when LiteLLM
   is enabled and synced; the API needs `"mode": "on_demand"`). `./install.sh upgrade` generates `secrets/dgxmm_ondemand_key` and
@@ -149,7 +190,9 @@ applies to you.
   and DGXMM does not start; the next start retries it. Migrations so far: 1 (baseline), 2 (one
   diagnosis per failure event: a unique index on `diagnoses (deployment_id, event_id)`; duplicates, if
   any, are removed and the newest is kept), 3 (one live insight per dedupe key), 20 (one traffic-profile
-  row per deployment and hour) and 30 (the `deployments` rebuild with `AUTOINCREMENT`, see above). They were tested on databases of the previous release and
+  row per deployment and hour), 30 (the `deployments` rebuild with `AUTOINCREMENT`, see above), 40
+  (on-demand mode), 41 (deployment node), 42 (engine API key), 43 (placement and ranks, backfilled) and 44
+  (download kind and target node), see above. They were tested on databases of the previous release and
   of this one. **Rolling back** to an older checkout (`git checkout <old> && ./install.sh`) keeps
   working: migrations only add tables, columns and indexes, and older versions ignore them
   (`schema_version`, `cli_tokens`, `decisions`, `diagnoses`, `artifact_kinds`); the previous release

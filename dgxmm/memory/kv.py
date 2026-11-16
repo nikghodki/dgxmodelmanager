@@ -55,7 +55,8 @@ def kv_shards(spec: ArchSpec) -> int:
 
 
 # ---- vLLM's packed KV pool for DeepSeek-V4 (vllm/v1/core/kv_cache_utils.py) ----
-# Mirrors the vLLM image DGXMM deploys, vllm/vllm-openai:pinned-2026-08-27. Assumptions taken from that image:
+# Mirrors the vLLM image DGXMM deploys by default (images.vllm, vllm/vllm-openai@sha256:22d3b121...). Assumptions
+# taken from that image:
 # blocks of 256 tokens (compressed latent / indexer), 64 (SWA), 4 / 8 (compressor states); fp8 kv-cache stored as
 # fp8_ds_mla (584 B per state, pages padded to 576 B; other dtypes: plain rows padded to 512 B); async scheduling,
 # so 2 x max_num_batched_tokens in flight; no speculative (MTP) layers. After a vLLM upgrade re-run

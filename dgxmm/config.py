@@ -95,7 +95,7 @@ def unsafe_publish_reason(addr: str | None) -> str | None:
 
 
 class NcclConfig(BaseModel):
-    """NCCL network configuration for multi-node training."""
+    """NCCL network configuration of a node in a vLLM cluster."""
     ib_hca: str
     socket_ifname: str
 

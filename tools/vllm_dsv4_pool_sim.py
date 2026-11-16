@@ -2,18 +2,19 @@
 """Ground truth for dgxmm.memory.kv.vllm_dsv4_pool_bytes: rebuild DeepSeek-V4's per-layer KV-cache specs with vLLM's
 own classes and run vLLM's own grouping and sizing (vllm/v1/core/kv_cache_utils.py) on them. No GPU needed.
 
-Run it inside the vLLM image DGXMM deploys (re-run after every vLLM image upgrade and compare with
-tests/test_deepseek_v4_kv.py):
+Run it inside the vLLM image DGXMM deploys, the one configured as images.vllm (the command below uses its
+default; re-run after every vLLM image upgrade and compare with tests/test_deepseek_v4_kv.py):
 
     docker run --rm --entrypoint python3 -v "$PWD/tools:/sim:ro" -v /path/to/config.json:/cfg.json:ro \\
-        vllm/vllm-openai:pinned-2026-08-27 -I /sim/vllm_dsv4_pool_sim.py /cfg.json <max_model_len> \\
+        vllm/vllm-openai@sha256:22d3b1217fda569653f32f1e00a2a4e64119c1601c67ff94cc72d7ca5ef352c8 \\
+        -I /sim/vllm_dsv4_pool_sim.py /cfg.json <max_model_len> \\
         [<max_num_batched_tokens> [<available_kv_gib>]]
 
 It prints vLLM's KV-cache groups, the shared pool's bytes per block, the bytes one request at max_model_len needs
 (vLLM's start-up check; the pool also holds back one null block) and, given the KV memory available, the maximum
 model length vLLM would report. Last line: the same as JSON.
 
-The spec constructors below copy what the model registers in vllm/vllm-openai:pinned-2026-08-27 (fp8 kv-cache ->
+The spec constructors below copy what the model registers in that default image (fp8 kv-cache ->
 fp8_ds_mla layout; the backend's 256-token block; async scheduling, i.e. 2 x max_num_batched_tokens in flight). If a
 vLLM upgrade changes models/deepseek_v4/attention.py, compressor.py or v1/attention/backends/mla/sparse_swa.py,
 update both this file and dgxmm/memory/kv.py.

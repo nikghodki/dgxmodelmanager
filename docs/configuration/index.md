@@ -50,7 +50,7 @@ the container.
 | `images.llamacpp_rpc` | string | `dgxmm-llamacpp-rpc:61dbf49-u1` | llama.cpp image for cluster deployments (`ggml-rpc-server` workers, `llama-server --rpc` head): built locally from `deploy/llamacpp-rpc` (commit 61dbf49, `GGML_RPC=ON`, CUDA sm_121) and loaded on every node of the cluster (`docker save … \| ssh <node> docker load`). A local build has no registry digest, so it is referenced by tag; the Dockerfile pins its bases by digest and the source by commit. |
 | `docker_network` | string | `dgxmm` | Docker network that engine containers join. **Must equal `DGXMM_NETWORK` in `.env`.** |
 | `port_range` | `[low, high]` | `[8100, 8199]` | Host ports handed to engine containers (1024–65535, ascending). Ports used by other containers are skipped. |
-| `cluster_port_range` | `[low, high]` | `[29500, 29599]` | Master ports (`vllm --master-port`) of cluster deployments, allocated per head node. A cluster's API and master ports are held on every node of its placement. |
+| `cluster_port_range` | `[low, high]` | `[29500, 29599]` | One cluster port per cluster deployment: vLLM's master port (`--master-port`) or the RPC port the llama.cpp workers listen on. A cluster's API and cluster ports are held on every node of its placement. |
 | `publish_bind` | string | `127.0.0.1` | Host address that engine ports are published on. Keep it on loopback: clients should go through LiteLLM or the Docker network. |
 | `engine_base_host` | string or null | `null` | `null`: DGXMM (and LiteLLM) reach engines as `dgxmm-<name>:<port>` on `docker_network`. Set a hostname or IP to use the published ports on that host instead. |
 | `startup_timeout_s` | int | `900` | Seconds an engine may take to become ready before DGXMM fails it. |
@@ -133,7 +133,8 @@ Per deployment you choose where it runs:
 **Configuration.** The list holds exactly one local node: the entry whose `docker_url` starts with `unix://`.
 Its `id` must be `local` (deployments and the API name it so); its `label` is free (shown in the UI) and its place
 in the list does not matter. Every other entry is a remote node (`docker_url: ssh://<user>@<cluster_ip>`, the
-docker_url host must be the node's `cluster_ip`), with an `id` of lowercase letters, digits and `-` (1–32
+docker_url host must be the node's `cluster_ip`; SSH must listen on port 22, since a `:port` in the URL is refused at
+load), with an `id` of lowercase letters, digits and `-` (1–32
 characters, starting with a letter or digit), its `cluster_ip`, a pinned `known_hosts` line and the SSH key file
 (`node_ssh_key_file`, below). `nccl` is needed on every node of a vLLM cluster; llama.cpp clusters need only
 `cluster_ip`.
@@ -166,7 +167,7 @@ nodes:
 |---|---|---|
 | `id` | string | `local` for the local node; a remote node: 1–32 characters, lowercase letters, digits and `-`. Used in placements, the API and the database. |
 | `label` | string | Name shown in the UI. |
-| `docker_url` | string | Docker connection. Local: `unix:///var/run/docker.sock`. Remote: `ssh://<user>@<cluster_ip>` (the host must equal `cluster_ip`). |
+| `docker_url` | string | Docker connection. Local: `unix:///var/run/docker.sock`. Remote: `ssh://<user>@<cluster_ip>` (the host must equal `cluster_ip`; port 22 only, no `:port`). |
 | `cluster_ip` | IP or null | The node's address on the cluster link (point-to-point RDMA network). Required on remote nodes and on every node of a cluster. |
 | `publish_bind` | IP or null | Remote nodes: address their engine API ports are published on. Defaults to `cluster_ip`; must be a concrete unicast address (never `0.0.0.0`, loopback or a hostname). Not used for the local node (its engines use `publish_bind` of the main settings, `127.0.0.1`). |
 | `hf_cache_host` | path or null | The node's Hugging Face cache on its host filesystem (mounted read-only into its engines and its probe). Local node default: `hf_cache.host`. It must exist on a remote node, or its probe cannot start and the node stays stale. |

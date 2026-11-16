@@ -1,7 +1,7 @@
 """DeepSeek-V4 (compressed sparse attention) KV sizing, KV replication across tensor-parallel ranks, unmodelled
 attention features and the --gpu-memory-utilization rounding.
 
-Ground truth: the KV-cache specs vLLM (image pinned-2026-08-27) builds for DeepseekV4ForCausalLM, run through
+Ground truth: the KV-cache specs vLLM (the default images.vllm, vllm/vllm-openai@sha256:22d3b121...) builds for DeepseekV4ForCausalLM, run through
 vLLM's own grouping and sizing (v1/core/kv_cache_utils.py), and a real 2-node TP=2 start-up failure of
 deepseek-ai/DeepSeek-V4-Flash-0731 (max_model_len 32768, kv_cache_dtype fp8, max_num_batched_tokens 8192):
   "To serve at least one request with the model's max seq len (32768), (6.36 GiB KV cache is needed ..."

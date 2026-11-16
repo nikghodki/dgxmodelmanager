@@ -18,35 +18,56 @@ mechanisms are blind to GPU allocations.
 
 Deploy a GPU-aware OOM guard that monitors both CPU and GPU memory:
 
-1. **Kill the largest GPU user when memory is critically low.** Query running processes with:
+1. **Kill a large GPU user when memory is critically low** (the sample below prefers processes outside
+   DGXMM). Query running processes with:
    ```bash
    nvidia-smi --query-compute-apps=pid,used_memory --format=csv,noheader,nounits
    ```
 
 2. **Set the threshold below DGXMM's reserved margins.** For example, trigger when `MemAvailable` falls
-   below 6 GiB (below DGXMM's 8 GiB `safety_margin_gib` + 4 GiB `os_reserve_gib`), so DGXMM-placed models
-   are never terminated.
+   below 6 GiB (below DGXMM's 8 GiB `safety_margin_gib` + 4 GiB `os_reserve_gib`). DGXMM only places a model
+   when it fits with those margins left over, so the guard fires only when something DGXMM does not account
+   for (another process, or an engine using more than its estimate) has eaten into them. It does not protect
+   DGXMM's models: when it fires, the largest GPU process is often a DGXMM engine.
 
 3. **Combine with earlyoom for CPU-only protection:**
    - Configure with swap ignored (`--ignore-root-user` to protect system services)
    - Exclude critical services: sshd, systemd, dockerd, containerd
    - Set memory threshold to match the GPU guard (e.g., 6 GiB available)
 
-**Example guard script skeleton:**
+**If the guard kills a DGXMM engine.** DGXMM notices it like any other engine crash: its liveness check sees
+the container exit, or, when only a process inside the container died, the engine health probe fails
+(`engine_health_interval_s`, see [health checks](../user-guide/deployments.md#health-checks)). Either way the
+deployment is marked failed and DGXMM stops counting its memory; start it again once memory is free.
+
+**Example guard script skeleton.** It prefers GPU processes outside DGXMM: processes in containers labelled
+`dgxmm.managed=true` (DGXMM's engines) are only killed when no other GPU process is left. Drop the label check
+to always kill the largest GPU process.
 ```bash
 #!/bin/bash
 # Check MemAvailable
 AVAIL=$(awk '/MemAvailable:/ {print $2}' /proc/meminfo)
 THRESHOLD=$((6 * 1024 * 1024))  # 6 GiB in KiB
 
+dgxmm_managed() {  # is PID $1 in a container labelled dgxmm.managed=true?
+  local cid
+  cid=$(grep -oE '[0-9a-f]{64}' "/proc/$1/cgroup" 2>/dev/null | head -1)
+  [ -n "$cid" ] && [ "$(docker inspect -f '{{index .Config.Labels "dgxmm.managed"}}' "$cid" 2>/dev/null)" = true ]
+}
+
 if [ "$AVAIL" -lt "$THRESHOLD" ]; then
-  # Find largest GPU process
-  LARGEST=$(nvidia-smi --query-compute-apps=pid,used_memory --format=csv,noheader,nounits | \
-            sort -t, -k2 -rn | head -1 | cut -d, -f1)
-  
-  if [ -n "$LARGEST" ]; then
-    logger "GPU OOM guard: killing process $LARGEST (MemAvailable: ${AVAIL}K)"
-    kill -9 "$LARGEST"
+  # GPU processes, largest first
+  mapfile -t PIDS < <(nvidia-smi --query-compute-apps=pid,used_memory --format=csv,noheader,nounits | \
+                      sort -t, -k2 -rn | cut -d, -f1 | tr -d ' ')
+  VICTIM=""
+  for pid in "${PIDS[@]}"; do
+    if ! dgxmm_managed "$pid"; then VICTIM=$pid; break; fi
+  done
+  VICTIM=${VICTIM:-${PIDS[0]}}  # only DGXMM engines left: the largest of them
+
+  if [ -n "$VICTIM" ]; then
+    logger "GPU OOM guard: killing process $VICTIM (MemAvailable: ${AVAIL}K)"
+    kill -9 "$VICTIM"
   fi
 fi
 ```
