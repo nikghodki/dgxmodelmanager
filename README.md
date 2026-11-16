@@ -20,6 +20,9 @@ your confirmation. It runs as a single container and installs with one command.
 
 - **Memory-safe deploys:** every deploy is previewed against a unified-memory budget; when a model does not
   fit, DGXMM offers plans and does nothing until you confirm one.
+- **Multi-node deployments:** deploy models on any DGX Spark, or across two as one cluster (vLLM tensor
+  parallel over the ConnectX-7 link, llama.cpp RPC); one shared LiteLLM for all nodes. See
+  [multi-node configuration](https://nikghodki.github.io/dgxmodelmanager/configuration/#nodes).
 - **vLLM and llama.cpp**, with switch and reconfigure that roll back automatically, and engines that start
   one at a time.
 - **One LiteLLM endpoint** for every deployment, with virtual keys (your LiteLLM or a bundled one).
@@ -49,6 +52,9 @@ bundled LiteLLM endpoint, `--with-decider` for the decision model, or `--dry-run
 would do. Next: [install options](https://nikghodki.github.io/dgxmodelmanager/getting-started/install/),
 [first login](https://nikghodki.github.io/dgxmodelmanager/getting-started/first-login/) and
 [upgrade](https://nikghodki.github.io/dgxmodelmanager/getting-started/upgrade/).
+
+**Add a second DGX Spark:** Configure a `nodes:` list in `config.yaml` with SSH access and cluster IPs.
+See [multi-node configuration](https://nikghodki.github.io/dgxmodelmanager/configuration/#nodes).
 
 > **Cloned before 2026-10-18?** The repository history was rewritten, so `./install.sh upgrade` refuses
 > to fast-forward an older clone. Move it once with `git fetch && git reset --hard origin/main`, then run

@@ -185,6 +185,39 @@ the snapshot over the cluster link (tar over ssh). For llama.cpp clusters, only 
 (workers receive tensors over RPC); for vLLM clusters, every node needs the full model. Once the copy
 completes, try deploying again.
 
+
+## Multi-node reference results
+
+Performance and timing measurements from 2x DGX Spark (GB10 GPUs, ConnectX-7 direct link, RoCE) running
+the pinned vLLM and llama.cpp images:
+
+**Single-node baseline:**
+
+- **Qwen3.8-27B** on dgx-2 alone: **11.26 tok/s** (single node, vLLM)
+
+**Cluster deployments:**
+
+- **Qwen3.8-27B** 2-node vLLM cluster (TP=2): **19.54 tok/s**, ready in **255 s**
+- **DeepSeek-V4-Flash-0731** 2-node vLLM cluster (fp8 KV cache, 8192 context; 32k: pending re-test with fixed estimator):
+  - Cold start: **24.85 tok/s**
+  - Warm (after kernels compiled): **28.52 tok/s**
+  - Note: 8192 context was a pre-fix estimator workaround; fixed estimator sizes 32768 ctx at 89.42 GiB per rank (fits)
+- **GLM-4.7** (UD-Q4_K_XL GGUF, 190.5 GiB) 2-node llama.cpp RPC cluster:
+  - Ready in **210 s**
+  - Cold: **9.93 tok/s** (via LiteLLM)
+  - Warm: **9.43 tok/s**
+  - Per-node memory: ~97.5 GiB
+- **Cluster wake time**: **268 s** (model reload and health check on both nodes)
+
+**Weight copying over cluster link (tar over ssh):**
+
+- Small model (23.4 GB): **35 s**
+- Large model (166.9 GB): **240 s** (~700 MB/s sustained)
+
+These results are specific to the tested hardware configuration. Performance will vary with different GPU
+types, network configurations, and model architectures. The NCCL all-reduce bandwidth observed was approximately
+3 GB/s (GPU Direct RDMA disabled; see [known limitations](../operations/known-limitations.md)).
+
 ## The start-up queue
 
 Only one engine starts at a time (`max_concurrent_startups`, see

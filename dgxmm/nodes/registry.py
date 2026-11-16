@@ -27,7 +27,7 @@ def ssh_config_path(settings: Settings | None = None) -> Path:
     env = os.environ.get(SSH_CONFIG_ENV)
     if env:
         return Path(env)
-    data_dir = settings.data_dir if settings is not None else Settings.model_fields["data_dir"].default
+    data_dir = settings.data_dir if settings is not None else Settings.model_fields.get("data_dir").default
     return Path(data_dir) / "ssh" / "config"
 
 

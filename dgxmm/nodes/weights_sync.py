@@ -301,7 +301,8 @@ class WeightsSync:
                 os.close(r)  # the children hold their ends; ssh sees EOF when tar exits
                 os.close(w)
             job.procs = procs
-            error = await self._wait(*procs)
+            tar_proc, ssh_proc = procs
+            error = await self._wait(tar_proc, ssh_proc)
             if error:
                 self._update(job.id, state="failed", error=error)
                 log.warning("copy of %s to %s failed: %s", job.ref, job.node, error)

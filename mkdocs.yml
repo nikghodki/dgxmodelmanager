@@ -178,6 +178,7 @@ nav:
       - operations/decision-model.md
       - operations/troubleshooting.md
       - operations/known-limitations.md
+      - Host memory protection: operations/host-memory-protection.md
   - Security:
       - security/overview.md
       - Threat model: security.md
