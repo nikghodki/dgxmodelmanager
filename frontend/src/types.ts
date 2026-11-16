@@ -108,7 +108,8 @@ export interface Deployment {
   placement?: Placement;
   /** e.g. "dgx-2", "dgx-1 + dgx-2 (cluster)" (the local node's label on a single-node install). */
   placement_label?: string;
-  /** Clusters only: what "sleep" does to it ("sleep (stops all nodes)" while sleep fails across nodes). */
+  /** Where "sleep" stops it: what it does ("sleep (stops all nodes)" for a cluster, "sleep (stops the model)" for a
+   *  single vLLM deployment while vllm_sleep is "stop"). null for a real sleep or no sleep. */
   sleep_label?: string | null;
   /** Clusters: each rank's node, role and status (no container ids or ports); [] for a single-node deployment. */
   rank_summary?: RankSummary[];

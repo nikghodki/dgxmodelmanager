@@ -27,7 +27,8 @@ description: "The essentials of DGXMM's security: the Docker socket, network exp
   `LLAMA_API_KEY`, never on the command line). LiteLLM and DGXMM's health checks send the key. vLLM enforces it
   only on `/v1`, `/v2`, `/inference` and `/cohere`: other routes (`/invocations`, `/tokenize`, `/metrics`, ...)
   stay open, and so do the development routes (`/sleep`, `/collective_rpc`, `/update_weights`, ...) that sleep
-  mode turns on (`VLLM_SERVER_DEV_MODE`). Sleep mode is used by local single deployments only: remote single
+  mode turns on (`VLLM_SERVER_DEV_MODE`). With the default `vllm_sleep: stop` no engine gets sleep mode (a sleep
+  stops the model). With `vllm_sleep: level1` it is used by local single deployments only: remote single
   deployments get it only with `remote_dev_endpoints: true` (default off), clusters never.
 - Remote engine API ports are published on the node's `publish_bind` address (default its cluster IP), never
   `0.0.0.0`. Cluster ranks run on the host network. What DGXMM controls: the vLLM head serves its API on its

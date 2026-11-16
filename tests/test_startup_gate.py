@@ -129,6 +129,7 @@ async def test_restart_of_stopped_deployment_queues_behind_a_startup(stack):
     await until(lambda: state(stack, b["id"]) == "ready")
 
 
+@pytest.mark.usefixtures("vllm_level1_sleep")
 async def test_wake_waits_for_a_running_startup(stack):
     s = await stack.deployer.deploy(req("s", enable_sleep_mode=True), 1)
     stack.http.healthy.add(s["port"])
@@ -143,6 +144,7 @@ async def test_wake_waits_for_a_running_startup(stack):
     assert (await asyncio.wait_for(wake, 5))["state"] == "ready"
 
 
+@pytest.mark.usefixtures("vllm_level1_sleep")
 async def test_wake_gives_up_after_its_queue_timeout(stack):
     stack.settings.wake_queue_timeout_s = 0.1
     s = await stack.deployer.deploy(req("s", enable_sleep_mode=True), 1)
@@ -287,6 +289,7 @@ async def test_queue_changes_are_published_for_waiting_deployments(stack):
     assert (c["id"], 1) in seen  # c moved up: its new position reaches the UI without a reload
 
 
+@pytest.mark.usefixtures("vllm_level1_sleep")
 async def test_stop_is_not_blocked_by_a_wake_waiting_for_the_gate(stack):
     s = await stack.deployer.deploy(req("s", enable_sleep_mode=True), 1)
     stack.http.healthy.add(s["port"])
@@ -342,6 +345,7 @@ async def test_unexpected_error_after_the_slot_is_granted_fails_the_queued_row(s
     assert not stack.deployer.gate.holds(b["id"])
 
 
+@pytest.mark.usefixtures("vllm_level1_sleep")
 async def test_removing_a_deployment_whose_wake_waits_is_a_clean_error(stack):
     stack.settings.wake_sync_wait_s = 5
     s = await stack.deployer.deploy(req("s", enable_sleep_mode=True), 1)
@@ -358,6 +362,7 @@ async def test_removing_a_deployment_whose_wake_waits_is_a_clean_error(stack):
     assert e.value.code == "not_found" and e.value.status == 404
 
 
+@pytest.mark.usefixtures("vllm_level1_sleep")
 async def test_a_long_wake_wait_returns_queued_and_finishes_in_the_background(stack):
     stack.settings.wake_sync_wait_s = 0.1
     s = await stack.deployer.deploy(req("s", enable_sleep_mode=True), 1)
@@ -376,6 +381,7 @@ async def test_a_long_wake_wait_returns_queued_and_finishes_in_the_background(st
     assert stack.http.calls.count(("POST", s["port"], "/wake_up")) == 1
 
 
+@pytest.mark.usefixtures("vllm_level1_sleep")
 def test_wake_api_answers_202_while_queued(api_stack):
     from tests.test_api_deployments import admin
     h = admin(api_stack)

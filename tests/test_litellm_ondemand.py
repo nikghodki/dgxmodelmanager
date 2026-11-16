@@ -371,6 +371,7 @@ async def test_entry_registered_without_health_params_replaced_once(stack, key):
 
 
 @pytest.mark.parametrize("frm", ["stopped", "sleeping"])
+@pytest.mark.usefixtures("vllm_level1_sleep")
 async def test_switch_to_always_on_keeps_one_entry_while_it_starts(stack, key, monkeypatch, frm):
     """On demand -> always on of a deployment that is not ready: it stays on demand (switch pending), registered
     through the gateway, for the whole start, and the direct entry replaces the gateway one only once it is ready.

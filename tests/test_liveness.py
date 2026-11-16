@@ -1,6 +1,8 @@
 """I2: ready/sleeping/unknown deployments are re-checked; crashed engines go to failed."""
 import asyncio
 
+import pytest
+
 from dgxmm.config import GIB
 from dgxmm.deployer.service import DeployRequest
 from dgxmm.memory.calibration import Calibration
@@ -36,6 +38,7 @@ async def test_container_exit_after_ready_fails_and_records_oom(stack):
     assert any(r["oom"] for r in cal.summary("vllm", "Qwen/Qwen3-Tiny"))
 
 
+@pytest.mark.usefixtures("vllm_level1_sleep")
 async def test_missing_container_of_sleeping_deployment_fails(stack):
     d = await ready(stack, "a")
     await stack.deployer.sleep(d["id"])

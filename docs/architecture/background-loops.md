@@ -37,6 +37,7 @@ Background loops:
 | Container directory | 30 s | Refresh the read-only container id → name/image map used by the process view. |
 | vLLM architectures | once | Run a one-off container from the vLLM image to list supported architectures. The result is cached in `data/` per image reference. |
 | Deployment monitor | `monitor_poll_s` (3 s), per deployment | Only while starting or loading. |
+| Engine health probe | `engine_health_interval_s` (30 s) | Probe every ready deployment's engine (`engine.health()` without its test completion: `GET /health`; a cluster: its head); fail one after `engine_health_failures` (3) failed probes in a row (see [deployer](deployer.md#deployment-state-machine)). |
 | Calibration | 15 s after ready | Record measured memory. |
 | Decider supervisor | `decider_probe_interval_s` (30 s) | Probe the ready decider, restart it after a crash or hang (see [decision model](decision-model.md#decision-model-decider)). |
 | Model kinds | 60 s | Ask the decision model about models no rule recognises (once per snapshot). |

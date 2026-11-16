@@ -106,6 +106,7 @@ async def test_unreadable_model_list_fails_open_without_integration(stack):
     assert ("GET", "/model/info") not in fake.calls
 
 
+@pytest.mark.usefixtures("vllm_level1_sleep")
 async def test_rename_start_and_wake_refuse_foreign_names(stack):
     fake = FakeLiteLLM()
     make(stack, fake)

@@ -181,6 +181,9 @@ StateHook = Callable[[int, str, str], Awaitable[None]]
 STARTUP_STATES = ("starting", "loading")  # states that hold a start-up slot (deployer/gate.py)
 PENDING_MODE_APPLIES = frozenset({"ready", "failed", "stopped"})  # a pending mode switch takes effect here
 GIB_F = float(1024**3)
+# a single-node vLLM deployment's "sleep" while vllm_sleep is "stop" (unified memory: vLLM's level-1 sleep frees
+# nothing there); a cluster's is cluster.SLEEP_AS_STOP_LABEL
+SLEEP_AS_STOP_LABEL = "sleep (stops the model)"
 _SKIPPED = object()  # a remote liveness lookup that was not done (node stale, busy or too slow)
 
 
@@ -1139,14 +1142,16 @@ class Deployer:
             return True
         return False
 
-    async def _healthy(self, dep: Deployment) -> bool:
+    async def _healthy(self, dep: Deployment, completion: bool = True) -> bool:
+        """engine.health() of ``dep`` (a cluster: its head). ``completion`` False: the health route only (the
+        periodic probe of a ready deployment, deployer/health.py)."""
         engine = self.engines[dep.engine]
         cfg = engine.validate_config(dep.config)
         base = cluster.head_url(self, dep) if cluster.is_cluster(dep) else \
             self.base_url(dep.name, dep.port, dep.engine, self._node_of(dep))
         try:
             return await engine.health(self.http, base, engine.served_name(cfg, dep.model_ref),
-                                       api_key=dep.engine_api_key)
+                                       api_key=dep.engine_api_key, completion=completion)
         except (httpx.HTTPError, OSError):
             return False
 
@@ -1261,6 +1266,29 @@ class Deployer:
             log.exception("failed to cleanup container for deployment %s", dep.id)
         self._transition(dep.id, "failed", message=reason, log_tail=logs, last_error=reason, container_id=None)
 
+    async def fail_unhealthy(self, dep: Deployment, reason: str) -> None:
+        """A ready deployment whose engine stopped answering its health probes (deployer/health.py), under its lock:
+        "stopping", its container removed (a cluster: every rank, ``cluster.fail``), then "failed" with ``reason``
+        as last_error and the container's log tail on the event. If the container cannot be removed, it ends failed
+        with its container id kept (a later Stop removes it)."""
+        if cluster.is_cluster(dep):
+            await cluster.fail(self, dep.id, reason)
+            return
+        node = self._node_of(dep)
+        try:
+            logs = await asyncio.to_thread(self._stored_logs, dep.container_id, node)
+        except Exception:
+            log.exception("failed to capture logs for deployment %s", dep.id)
+            logs = ""
+        self._transition(dep.id, "stopping", message=f"{reason}; stopping the container", last_error=reason)
+        try:
+            await asyncio.to_thread(self._docker_for(node).stop_and_remove, dep.container_id)
+        except Exception as e:
+            msg = f"{reason}; could not remove its container: {e}"
+            self._transition(dep.id, "failed", message=msg, log_tail=logs, last_error=msg)
+            return
+        self._transition(dep.id, "failed", message=reason, log_tail=logs, last_error=reason, container_id=None)
+
     async def wait_ready(self, dep_id: int, timeout: float) -> str:
         deadline = self.clock() + timeout
         while True:
@@ -1289,45 +1317,51 @@ class Deployer:
             if precheck is not None and (dep.state == "ready" or require_states is not None) and \
                     (why := await precheck()):
                 raise DeployError("precheck", why, 409)
-            mon = self._monitors.pop(dep_id, None)
-            if mon and not mon.done():
-                mon.cancel()
-            if dep.state == "queued":
-                q = self._queued.pop(dep_id, None)
-                if q and not q.done():
-                    q.cancel()
-                self.gate.withdraw(dep_id)
-                return self._transition(dep_id, "stopped", message=f"cancelled while queued ({reason})",
-                                        actor=reason, container_id=None)
-            if cluster.is_cluster(dep):
-                return await cluster.stop(self, dep, reason, message)
-            node = self._node_of(dep)
-            if not self.node_configured(node):  # nothing to reach there: release the DB state only (R11)
-                if dep.state not in ("planned", "failed", "stopping"):
-                    self._transition(dep_id, "stopping", message=message or f"stop requested ({reason})", actor=reason)
-                return self._transition(dep_id, "stopped", actor=reason, container_id=None,
-                                        message=f"stopped without contacting node {node}, which is not configured "
-                                                f"({reason}); a container left there is not removed")
-            docker = self._docker_for(node)
-            if dep.state in ("planned", "failed"):
-                try:
-                    await asyncio.to_thread(docker.stop_and_remove, dep.container_id)
-                except NodeUnreachable as e:
-                    raise DeployError("node_unreachable", f"could not stop container: {e}", 503)
-                await self._remove_leftover(dep.name, dep_id, self._node_of(dep))
-                return self._transition(dep_id, "stopped", message=f"cleaned up ({reason})", actor=reason,
-                                        container_id=None)
-            if dep.state != "stopping":
+            return await self._stop_locked(dep, reason, message)
+
+    async def _stop_locked(self, dep: Deployment, reason: str, message: str | None = None) -> dict:
+        """``stop`` of ``dep`` (not stopped), under its lock: also a sleep that stops (``sleep``) and the stop after
+        a failed sleep."""
+        dep_id = dep.id
+        mon = self._monitors.pop(dep_id, None)
+        if mon and not mon.done():
+            mon.cancel()
+        if dep.state == "queued":
+            q = self._queued.pop(dep_id, None)
+            if q and not q.done():
+                q.cancel()
+            self.gate.withdraw(dep_id)
+            return self._transition(dep_id, "stopped", message=f"cancelled while queued ({reason})",
+                                    actor=reason, container_id=None)
+        if cluster.is_cluster(dep):
+            return await cluster.stop(self, dep, reason, message)
+        node = self._node_of(dep)
+        if not self.node_configured(node):  # nothing to reach there: release the DB state only (R11)
+            if dep.state not in ("planned", "failed", "stopping"):
                 self._transition(dep_id, "stopping", message=message or f"stop requested ({reason})", actor=reason)
+            return self._transition(dep_id, "stopped", actor=reason, container_id=None,
+                                    message=f"stopped without contacting node {node}, which is not configured "
+                                            f"({reason}); a container left there is not removed")
+        docker = self._docker_for(node)
+        if dep.state in ("planned", "failed"):
             try:
                 await asyncio.to_thread(docker.stop_and_remove, dep.container_id)
-            except NodeUnreachable as e:  # failed, container id kept: a stop once the node is back removes it
-                self._transition(dep_id, "failed", message=f"stop failed: {e}", last_error=f"stop failed: {e}")
+            except NodeUnreachable as e:
                 raise DeployError("node_unreachable", f"could not stop container: {e}", 503)
-            except Exception as e:
-                self._transition(dep_id, "failed", message=f"stop failed: {e}", last_error=f"stop failed: {e}")
-                raise DeployError("docker_error", f"could not stop container: {e}", 502)
-            return self._transition(dep_id, "stopped", message="container removed", container_id=None)
+            await self._remove_leftover(dep.name, dep_id, self._node_of(dep))
+            return self._transition(dep_id, "stopped", message=f"cleaned up ({reason})", actor=reason,
+                                    container_id=None)
+        if dep.state != "stopping":
+            self._transition(dep_id, "stopping", message=message or f"stop requested ({reason})", actor=reason)
+        try:
+            await asyncio.to_thread(docker.stop_and_remove, dep.container_id)
+        except NodeUnreachable as e:  # failed, container id kept: a stop once the node is back removes it
+            self._transition(dep_id, "failed", message=f"stop failed: {e}", last_error=f"stop failed: {e}")
+            raise DeployError("node_unreachable", f"could not stop container: {e}", 503)
+        except Exception as e:
+            self._transition(dep_id, "failed", message=f"stop failed: {e}", last_error=f"stop failed: {e}")
+            raise DeployError("docker_error", f"could not stop container: {e}", 502)
+        return self._transition(dep_id, "stopped", message="container removed", container_id=None)
 
     async def restart(self, dep_id: int, user_id: int | None = None, config_override: dict | None = None,
                       model_ref: str | None = None, allow_rotating: bool = False) -> dict:
@@ -1505,8 +1539,9 @@ class Deployer:
             # the engine needs its key (never in a view): its direct URLs answer 401 without it (call it via LiteLLM)
             "engine_key": bool(d.engine_api_key),
             "sleep_capable": self.supports_sleep(d),
-            # a cluster: what "sleep" does to it ("sleep (stops all nodes)" while sleep fails across nodes)
-            **({"sleep_label": cluster.sleep_label(d, engine)} if cluster.is_cluster(d) else {}),
+            # what "sleep" does where it is a stop: a cluster's ("sleep (stops all nodes)" while sleep fails across
+            # nodes), a single vLLM deployment's with vllm_sleep "stop" ("sleep (stops the model)"); else None
+            "sleep_label": self.sleep_label(d),
             "placement": self._read_placement(d),
             "placement_label": self._placement_label(self._read_placement(d)),
             # a cluster: each rank's node, role and status (never its container id or ports; R15); [] otherwise
@@ -1646,15 +1681,49 @@ class Deployer:
                 raise DeployError("precheck", why, 409)
             if cluster.is_cluster(dep) and not self.supports_sleep(dep):
                 return await cluster.sleep_as_stop(self, dep)  # every rank stopped: frees every node
+            if self.sleep_label(dep) == SLEEP_AS_STOP_LABEL:  # vllm_sleep "stop": the container is stopped
+                return await self._stop_locked(dep, "sleep", f"{SLEEP_AS_STOP_LABEL}: stopping the container")
             engine = self.engines[dep.engine]
             cfg = engine.validate_config(dep.config)
             if not (engine.supports_sleep and engine.sleep_enabled(cfg)):
                 raise DeployError("sleep_unsupported", "this deployment was not started with sleep mode", 409)
             try:
                 await engine.sleep(self.http, self._engine_url(dep), api_key=dep.engine_api_key)
-            except httpx.HTTPError as e:
-                raise DeployError("engine_error", f"sleep failed: {e}", 502)
-            return self._transition(dep_id, "sleeping", message="sleeping (level 1: KV freed, weights offloaded)")
+            except Exception as e:  # the engine may be asleep, half asleep or broken now: never leave it "ready"
+                failure = f"sleep failed: {e}"
+                log.warning("deployment %s: %s; restarting it", dep_id, failure)
+                try:
+                    await self._stop_locked(dep, "sleep failed", f"{failure}; restarting the deployment")
+                except DeployError as se:  # the stop failed: the deployment is failed (stop's own path)
+                    self._set_last_error(dep_id, f"{failure}; {se.message}")
+                    raise DeployError("engine_error", f"{failure}; could not stop it: {se.message}", 502)
+            else:
+                return self._transition(dep_id, "sleeping", message="sleeping (level 1: KV freed, weights offloaded)")
+        await self._restart_after_failed_sleep(dep_id, failure)
+        raise DeployError("engine_error", f"{failure}; the deployment was restarted", 502)
+
+    async def _restart_after_failed_sleep(self, dep_id: int, failure: str) -> None:
+        """Start a deployment again (the normal start path) that was stopped because its engine sleep failed;
+        ``failure`` stays its last_error. If the start fails, it ends failed (and DeployError is raised)."""
+        try:
+            await self.restart(dep_id)
+        except Exception as e:
+            msg = f"{failure}; restart failed: {e.message if isinstance(e, DeployError) else e}"
+            dep = self._get(dep_id)
+            if dep is not None and dep.state == "stopped":
+                self._transition(dep_id, "failed", message=msg, last_error=msg)
+            elif dep is not None and dep.state == "failed":
+                self._set_last_error(dep_id, msg)
+            raise DeployError("engine_error", msg, 502)
+        self._set_last_error(dep_id, failure)  # the start cleared it
+
+    def _set_last_error(self, dep_id: int, message: str) -> None:
+        with self.db.session() as s:
+            row = s.get(Deployment, dep_id)
+            if row is None:
+                return
+            row.last_error = message
+        self.events.publish("deployment", self.view(dep_id))
 
     async def wake(self, dep_id: int, user_id: int | None = None) -> dict:
         """Wake a sleeping deployment. Waking re-allocates the KV cache, so it waits for the start-up slot (never
@@ -1662,8 +1731,8 @@ class Deployer:
         is still taken then, the wake-up continues in the background (up to ``wake_queue_timeout_s``) and the view
         is returned with ``startup_queue`` set (the API answers 202), like a queued deploy."""
         dep = self._require(dep_id)
-        if dep.state == "stopped" and cluster.is_cluster(dep) and cluster.stopped_by_sleep(self, dep_id):
-            return await self.restart(dep_id, user_id)  # its "sleep" stopped every rank: wake = start them again
+        if dep.state == "stopped" and cluster.stopped_by_sleep(self, dep_id):
+            return await self.restart(dep_id, user_id)  # its "sleep" stopped it (every rank): wake = start it again
         if dep.state != "sleeping":
             raise DeployError("not_sleeping", f"deployment is {dep.state}", 409)
         old = self._waking.get(dep_id)
@@ -1888,13 +1957,34 @@ class Deployer:
 
     def supports_sleep(self, dep: "Deployment | dict") -> bool:
         """Can ``dep`` (row or view) be put to sleep (KV cache freed, weights kept, a fast wake-up)? A single
-        deployment: its engine sleeps and it was configured with sleep mode. A cluster: cluster.supports_sleep (no:
-        its "sleep" stops every rank). Anything else with an ``id`` is looked up."""
+        deployment: its engine sleeps, it was configured with sleep mode and the engine's own sleep is used (vLLM:
+        vllm_sleep "level1"; with "stop" its "sleep" stops it, ``sleep_label``). A cluster: cluster.supports_sleep
+        (no: its "sleep" stops every rank). Anything else with an ``id`` is looked up."""
         if not isinstance(dep, (dict, Deployment)):
             dep = self._require(dep.id)
         engine = self.engines.get(dep["engine"] if isinstance(dep, dict) else dep.engine)
         if cluster.is_cluster(dep):
             return cluster.supports_sleep(dep, engine)
+        return self._sleep_configured(dep, engine) and self._engine_sleep_used(engine)
+
+    def sleep_label(self, dep: "Deployment | dict") -> str | None:
+        """What "sleep" does to ``dep`` (row or view) where it is not the engine's own sleep: a cluster's
+        cluster.sleep_label, a single vLLM deployment configured with sleep mode while vllm_sleep is "stop":
+        SLEEP_AS_STOP_LABEL. None: a real sleep, or no sleep at all."""
+        engine = self.engines.get(dep["engine"] if isinstance(dep, dict) else dep.engine)
+        if cluster.is_cluster(dep):
+            return cluster.sleep_label(dep, engine)
+        if self._sleep_configured(dep, engine) and not self._engine_sleep_used(engine):
+            return SLEEP_AS_STOP_LABEL
+        return None
+
+    def _engine_sleep_used(self, engine) -> bool:
+        """A sleep is the engine's own sleep (vLLM: only with vllm_sleep "level1"), else a stop."""
+        return engine.name != "vllm" or self.settings.vllm_sleep == "level1"
+
+    def _sleep_configured(self, dep: "Deployment | dict", engine) -> bool:
+        """A single deployment that would run with sleep mode: its engine sleeps, it was configured with sleep mode,
+        and its node allows the dev routes (``_sleep_allowed_on``)."""
         cfg = (dep.get("config") if isinstance(dep, dict) else dep.config) or {}
         if isinstance(dep, dict):  # a view: its node, else its row's
             node = dep["node"] if dep.get("node") else self._node_of(self._get(dep.get("id")))

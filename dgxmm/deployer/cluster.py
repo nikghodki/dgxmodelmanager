@@ -171,10 +171,11 @@ def sleep_label(dep, engine) -> str | None:
 
 
 def stopped_by_sleep(d, dep_id: int) -> bool:
-    """The cluster's latest stop was its "sleep" (``sleep_as_stop``, event actor "sleep"), not a user, a schedule, the
-    watchdog or a failure: a wake starts it again. The stop that led to the latest transition into "stopped": that
-    event's actor (a planned / failed row goes straight to "stopped" with the actor on it), else, when it carries
-    none (the end of a running cluster's stop), the "stopping" event right before it."""
+    """The deployment's latest stop was its "sleep" (a cluster's ``sleep_as_stop``, or a single vLLM deployment's with
+    vllm_sleep "stop": event actor "sleep"), not a user, a schedule, the watchdog or a failure: a wake starts it
+    again. The stop that led to the latest transition into "stopped": that event's actor (a planned / failed row
+    goes straight to "stopped" with the actor on it), else, when it carries none (the end of a running stop), the
+    "stopping" event right before it."""
     from sqlalchemy import select
     with d.db.session() as s:
         last = s.scalar(select(DeploymentEvent).where(DeploymentEvent.deployment_id == dep_id,

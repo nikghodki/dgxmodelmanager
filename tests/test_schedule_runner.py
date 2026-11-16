@@ -19,6 +19,8 @@ from dgxmm.deployer.service import DeployRequest
 from dgxmm.metrics.store import MetricsStore
 from tests.fakes import free_on_stop
 
+pytestmark = pytest.mark.usefixtures("vllm_level1_sleep")  # vLLM's own sleep (vllm_sleep: level1)
+
 SMALL = {"max_model_len": 4096, "max_num_seqs": 2, "max_num_batched_tokens": 2048}
 NOW = datetime(2026, 10, 19, 10, 0, 30, tzinfo=timezone.utc)  # a Monday
 MON = 1

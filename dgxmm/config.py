@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from typing import Literal
 from urllib.parse import urlsplit
 
 import yaml
@@ -262,6 +263,19 @@ class Settings(BaseModel):
     # vLLM serves without the engine key; a remote engine publishes on the cluster IP, which every container of the
     # DGXMM host can reach (local engines publish on 127.0.0.1). Clusters never get sleep mode.
     remote_dev_endpoints: bool = False
+    # What "sleep" does to a single-node vLLM deployment. "stop" (default): it stops the deployment, like a cluster's
+    # sleep (the view's sleep_label "sleep (stops the model)"), and a wake starts it again; the engine never gets
+    # --enable-sleep-mode nor VLLM_SERVER_DEV_MODE. On unified memory (every DGX Spark / GB10) vLLM's level-1 sleep
+    # backs the weights up into the same RAM, so it frees nothing and vLLM refuses it ("Memory usage increased after
+    # sleeping"). "level1": vLLM's own sleep (KV cache freed, weights offloaded to CPU RAM), for hosts with separate
+    # GPU memory. A stored enable_sleep_mode is kept either way: it only takes effect with "level1".
+    vllm_sleep: Literal["stop", "level1"] = "stop"
+    # Health probe of ready deployments (dgxmm/deployer/health.py): engine.health() without its test completion (the
+    # engine's /health, 5 s timeout) every engine_health_interval_s (0 = off); after engine_health_failures failed
+    # probes in a row (about failures x interval) the deployment is failed and its containers removed. One slow or
+    # failed probe alone never fails a deployment.
+    engine_health_interval_s: float = Field(30.0, ge=0)
+    engine_health_failures: int = Field(3, ge=1)
     # SSH key for Docker-over-SSH on remote nodes (mode 600). None -> <data_dir>/secrets/node_ssh_key.
     node_ssh_key_file: str | None = None
 

@@ -140,6 +140,8 @@ API; worker nodes run headless. Any rank exiting fails the whole deployment and 
 - A "sleep" of a cluster deployment is actually a **stop** that frees every node.
 - The deployment detail page shows `sleep_capable: false` and labels the action as "Sleep (stops all nodes)"; like
   Stop, it asks for confirmation first.
+- Single-node vLLM deployments behave the same way on DGX Spark by default ("Sleep (stops the model)"), because
+  vLLM's sleep cannot free unified memory; see [sleep and wake](deployments.md#sleep-and-wake).
 
 **Remote single deployments and sleep.** A vLLM deployment on a remote node gets no sleep mode unless
 `remote_dev_endpoints: true` is set (default off; see [configuration](../configuration/index.md#nodes)): sleep

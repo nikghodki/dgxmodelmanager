@@ -55,6 +55,30 @@ All notable changes to DGXMM are documented in this file. The format is based on
   `engine_key: true|false` (never the key).
 - **A cluster "Sleep (stops all nodes)" asks first.** Like Stop, it opens a confirmation (type the name when the
   deployment is ready), since it stops the containers on every node.
+- **vLLM sleep on DGX Spark stops the model.** On GB10 unified memory vLLM's level-1 sleep backs the weights up
+  into the same RAM, so it frees nothing and vLLM fails it (`Memory usage increased after sleeping`, HTTP 500). New
+  setting `vllm_sleep: stop | level1` (default `stop`): a single-node vLLM deployment's Sleep is then a stop, like a
+  cluster's (`sleep_capable: false`, `sleep_label: "sleep (stops the model)"`, a confirmation in the UI), Wake
+  starts it again, and engines get neither `--enable-sleep-mode` nor vLLM's development routes. Deployments stored
+  with `enable_sleep_mode: true` keep their setting and keep working; `level1` restores vLLM's sleep on hosts with
+  separate GPU memory. On-demand idle handling already stopped models and is unchanged. Deployment views now
+  always carry `sleep_label` (`null` where Sleep is vLLM's own sleep or not offered). See
+  [sleep and wake](docs/user-guide/deployments.md#sleep-and-wake).
+
+### Fixed
+
+- **A failed sleep no longer leaves a deployment "ready".** When vLLM's `/sleep` failed, DGXMM kept the deployment
+  ready although the engine reported itself asleep (requests hung; a later wake crashed the engine). Now any
+  failed engine sleep stops the deployment and starts it again through the normal path, with `last_error`
+  *sleep failed: …*; if that start fails, the deployment ends failed.
+- **Ready deployments get a health probe.** After start-up, only the container's existence was checked, so an
+  engine whose process died inside a running container (vLLM's EngineCore crash) stayed "ready" for ever. Every
+  `engine_health_interval_s` (30 s; `0` = off) DGXMM now probes each ready deployment's engine (`engine.health()`
+  without its test completion: the engine's `/health`, so the probe never counts as traffic; a cluster: its head);
+  after `engine_health_failures` (3) failures in a row it is failed: its container (every rank)
+  removed, LiteLLM entry dropped, `last_error` set. Deployments that are not ready, system deployments, ones with an
+  operation in progress and ones on a stale node are never probed. See
+  [health checks](docs/user-guide/deployments.md#health-checks).
 
 ### Security
 

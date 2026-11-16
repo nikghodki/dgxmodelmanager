@@ -216,6 +216,7 @@ async def test_cluster_sleep_follows_hardware_check(deployer_two_nodes, ready_cl
 
 
 # ---------- sleep ----------
+@pytest.mark.usefixtures("vllm_level1_sleep")
 async def test_supports_sleep_single_and_cluster(deployer_two_nodes, ready_cluster_dep, qwen_req):
     d = deployer_two_nodes
     single = await _ready(d, qwen_req, config={**SMALL_VLLM, "enable_sleep_mode": True})
@@ -226,7 +227,7 @@ async def test_supports_sleep_single_and_cluster(deployer_two_nodes, ready_clust
     assert cluster.SLEEP_ACROSS_NODES is False and not d.supports_sleep(d.row(ready_cluster_dep.id))
     v = d.view(ready_cluster_dep.id)
     assert v["sleep_capable"] is False and v["sleep_label"] == "sleep (stops all nodes)"
-    assert "sleep_label" not in d.view(single.id)  # single deployments' views are unchanged
+    assert d.view(single.id)["sleep_label"] is None  # a real sleep (vllm_sleep: level1): no label
 
 
 async def test_cluster_sleep_stops_every_rank_and_frees_both_nodes(deployer_two_nodes, ready_cluster_dep):

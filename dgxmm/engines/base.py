@@ -124,7 +124,7 @@ class Engine(Protocol):
     def container_spec(self, artifact: ModelArtifact, cfg: Any, draft: ModelArtifact | None,
                        launch: LaunchContext, settings: Settings) -> ContainerSpec: ...
     async def health(self, http: httpx.AsyncClient, base_url: str, served_name: str,
-                     api_key: str | None = None) -> bool: ...
+                     api_key: str | None = None, completion: bool = True) -> bool: ...
     def parse_metrics(self, text: str) -> EngineMetrics: ...
     async def sleep(self, http: httpx.AsyncClient, base_url: str, api_key: str | None = None) -> None: ...
     async def wake(self, http: httpx.AsyncClient, base_url: str, api_key: str | None = None) -> None: ...
@@ -153,11 +153,16 @@ def auth_headers(api_key: str | None) -> dict[str, str]:
 
 
 async def openai_health(http: httpx.AsyncClient, base_url: str, served_name: str, health_path: str = "/health",
-                        api_key: str | None = None) -> bool:
+                        api_key: str | None = None, completion: bool = True) -> bool:
+    """The health route answers 200, then (``completion``, the start-up check) a one-token test completion
+    succeeds. Without ``completion`` (the periodic probe of a ready engine, deployer/health.py) only the health
+    route: a completion every few seconds would count as request traffic in the metrics."""
     headers = auth_headers(api_key)
     r = await http.get(f"{base_url}{health_path}", headers=headers, timeout=5)
     if r.status_code != 200:
         return False
+    if not completion:
+        return True
     r = await http.post(f"{base_url}/v1/completions", headers=headers,
                         json={"model": served_name, "prompt": "Hi", "max_tokens": 1}, timeout=120)
     return r.status_code == 200

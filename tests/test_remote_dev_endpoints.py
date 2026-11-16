@@ -1,6 +1,8 @@
 """Final review I7: remote engines publish on the cluster IP, reachable from every container of this host, so a
 remote single-node vLLM deployment gets no sleep mode (VLLM_SERVER_DEV_MODE exposes /sleep, /collective_rpc,
 /update_weights... without the engine key) unless remote_dev_endpoints allows it."""
+import pytest
+
 from dgxmm.deployer.service import DeployRequest
 
 
@@ -19,6 +21,7 @@ async def test_remote_single_vllm_deploy_has_no_dev_endpoints(deployer_two_nodes
     assert d.supports_sleep(d.row(v["id"])) is False
 
 
+@pytest.mark.usefixtures("vllm_level1_sleep")
 async def test_local_single_vllm_deploy_keeps_sleep_mode(deployer_two_nodes, qwen_req):
     d = deployer_two_nodes
     req = qwen_req.model_copy(update={"config": {**qwen_req.config, "enable_sleep_mode": True}})
@@ -28,6 +31,7 @@ async def test_local_single_vllm_deploy_keeps_sleep_mode(deployer_two_nodes, qwe
     assert d.supports_sleep(d.row(v["id"])) is True
 
 
+@pytest.mark.usefixtures("vllm_level1_sleep")
 async def test_remote_dev_endpoints_setting_allows_sleep_mode(deployer_two_nodes, qwen_req):
     d = deployer_two_nodes
     d.settings.remote_dev_endpoints = True

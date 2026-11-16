@@ -1,3 +1,4 @@
+import pytest
 from tests.test_api_deployments import SMALL, admin
 
 
@@ -18,6 +19,7 @@ def wait(c, dep_id, want):
     return False
 
 
+@pytest.mark.usefixtures("vllm_level1_sleep")
 def test_sleep_wake_switch_reconfigure_audit(api_stack):
     h = admin(api_stack)
     a = deploy(api_stack, h, "a", alias="chat")

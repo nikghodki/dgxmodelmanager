@@ -17,8 +17,9 @@ of the last one. Admins can:
 - **Pause all schedules** on the Decision model page (Schedules card): no schedule runs until you resume
   them; each keeps its own settings.
 
-Sleep is used where it is reliable: on vLLM with sleep mode on, and where a sleep and wake-up has already
-worked on that deployment (or it runs with `--enforce-eager`); otherwise stop and start.
+Sleep is used where it is reliable: on vLLM with sleep mode on and `vllm_sleep: level1` (on DGX Spark, the
+default `stop`, a sleep is a stop; see [sleep and wake](deployments.md#sleep-and-wake)), and where a sleep and
+wake-up has already worked on that deployment (or it runs with `--enforce-eager`); otherwise stop and start.
 
 **Safety rules.** The schedule runner checks every minute and acts through the same paths as the
 buttons on the deployment page:

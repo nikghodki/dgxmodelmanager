@@ -62,6 +62,7 @@ def test_config_validation(settings):
             e.validate_config(bad)
 
 
+@pytest.mark.usefixtures("vllm_level1_sleep")
 def test_container_spec(settings, tiny):
     e = VllmEngine(settings)
     cfg = e.validate_config({"max_model_len": 4096, "max_num_seqs": 2, "kv_cache_dtype": "fp8",

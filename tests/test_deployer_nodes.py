@@ -206,6 +206,7 @@ async def test_remote_monitor_loop_backs_off_and_keeps_state(deployer_two_nodes,
     assert d.state(v["id"]) in ("starting", "loading")
 
 
+@pytest.mark.usefixtures("vllm_level1_sleep")
 async def test_sleep_and_wake_on_remote_use_remote_url_and_node_budget(deployer_two_nodes, qwen_req):
     d = deployer_two_nodes
     d.settings.remote_dev_endpoints = True  # sleep mode on a remote node is opt-in (final review I7)

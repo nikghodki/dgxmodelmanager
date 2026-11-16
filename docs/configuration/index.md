@@ -58,6 +58,9 @@ the container.
 | `startup_queue_timeout_s` | float > 0 | `1800` | A queued deployment fails after waiting this long for a start-up slot. |
 | `wake_queue_timeout_s` | float > 0 | `300` | A wake-up waiting for a running start-up gives up after this long (409 `startup_busy`, or the reason in the deployment's last error if it was already continuing in the background). |
 | `wake_sync_wait_s` | float ≥ 0 | `50` | The wake request waits this long for its turn; after that it answers 202 with `startup_queue` and the wake-up continues in the background. |
+| `vllm_sleep` | `stop` / `level1` | `stop` | What **Sleep** does to a single-node vLLM deployment. `stop`: it stops the deployment (the action reads *Sleep (stops the model)* and asks first, like a cluster's) and **Wake** starts it again (a full model load); engines never get `--enable-sleep-mode` or vLLM's development routes. On unified memory (every DGX Spark / GB10) vLLM's level-1 sleep copies the weights into the same RAM, so it frees nothing and vLLM refuses it (`Memory usage increased after sleeping`). `level1`: vLLM's own sleep (KV cache freed, weights offloaded to CPU RAM), for hosts with separate GPU memory; it takes effect at each deployment's next start. A stored `enable_sleep_mode` is kept either way. Clusters always stop. See [deployments](../user-guide/deployments.md#sleep-and-wake). |
+| `engine_health_interval_s` | float ≥ 0 | `30` | How often every ready deployment's engine is probed: its `GET /health` (5 s timeout; a cluster: on its head; no test completion, which would count as traffic). `0` turns the probe off. |
+| `engine_health_failures` | int ≥ 1 | `3` | Failed probes in a row after which a ready deployment is failed: its container (every rank of a cluster) is removed, `last_error` says why and LiteLLM drops it. One slow or failed probe alone never fails it. |
 | `vllm_cache_mounts` | list of `{host, target, mode}` | `~/.cache/vllm`, `~/.cache/flashinfer`, `~/.triton` → `/root/...` | Host directories mounted into vLLM containers so compiled kernels survive restarts. `mode` defaults to `rw`. |
 | `llmfit_bin` | string | `llmfit` | llmfit executable used for catalog scores. |
 
@@ -193,7 +196,8 @@ the reason of the last failed attempt (`reason`, e.g. the probe could not be cre
 not exist there), and the Dashboard shows it. When the node answers again it is marked fresh and new deployments
 are admitted again.
 
-**Sleep mode on remote nodes.** A remote engine publishes on its node's cluster IP, which every container of the
+**Sleep mode on remote nodes.** (Only with `vllm_sleep: level1`; with the default `stop` no engine gets sleep
+mode.) A remote engine publishes on its node's cluster IP, which every container of the
 DGXMM host can reach (local engines publish on `127.0.0.1`), and vLLM's sleep mode turns on development routes
 (`/sleep`, `/wake_up`, `/collective_rpc`, ...) that do not check the engine key. So a single-node vLLM deployment on
 a remote node gets no sleep mode unless `remote_dev_endpoints: true` (default `false`): it then has no Sleep

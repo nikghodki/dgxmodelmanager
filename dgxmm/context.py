@@ -32,6 +32,7 @@ class AppContext:
     probe: Any = None
     http: Any = None
     watchdog: Any = None
+    health: Any = None  # EngineHealth (dgxmm/deployer/health.py)
     litellm: Any = None
     catalog: Any = None
     downloads: Any = None
@@ -220,6 +221,9 @@ def build_context(settings: Settings, client_factory=None) -> AppContext:
     ctx.watchdog = Watchdog(settings, deployer, events, db)
     ctx.budget_listeners.append(ctx.watchdog.check_nodes)
     ctx.budget_listeners.append(liveness_listener(deployer))
+    from dgxmm.deployer.health import EngineHealth
+    ctx.health = EngineHealth(settings, deployer)  # health probe of ready deployments (its own loop: probes are slow)
+    ctx.background.append(ctx.health.run)
 
 
     from dgxmm.catalog.support import VllmArchRegistry

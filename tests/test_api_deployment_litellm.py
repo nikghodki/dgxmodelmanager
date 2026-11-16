@@ -73,6 +73,7 @@ def test_start_rejects_taken_model_name(lite):
     assert lite.post(f"{DEP}/{a['id']}/start", headers=lite.h).status_code == 200
 
 
+@pytest.mark.usefixtures("vllm_level1_sleep")
 def test_wake_rejects_taken_model_name(lite):
     a = deploy(lite, lite.h, "a", config={**SMALL, "enable_sleep_mode": True})
     assert wait(lite, a["id"], "ready")

@@ -298,6 +298,7 @@ def test_box_zone_is_a_named_iana_zone_used_for_profiles_and_proposals(tmp_path,
     assert sch.zone_name(sch.box_zone(SimpleNamespace(settings=SimpleNamespace(tz="Europe/Berlin")))) == "Europe/Berlin"
 
 
+@pytest.mark.usefixtures("vllm_level1_sleep")
 async def test_sleep_is_proposed_only_where_sleep_mode_is_proven(env):
     from dgxmm.decider.schedule import sleep_proven
     v = await ready(env, "a")

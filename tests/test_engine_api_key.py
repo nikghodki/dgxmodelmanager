@@ -117,6 +117,7 @@ async def test_deploy_generates_key_and_starts_engine_with_it(stack):
     assert key_of(stack, other["id"]) not in (None, key)  # one key per deployment
 
 
+@pytest.mark.usefixtures("vllm_level1_sleep")
 async def test_key_kept_across_sleep_wake_stop_restart(stack):
     d = await ready(stack)
     key = key_of(stack, d["id"])
@@ -138,6 +139,7 @@ async def test_reconfigure_keeps_key(stack):
     assert stack.sdk.run_calls[-1]["environment"]["VLLM_API_KEY"] == key
 
 
+@pytest.mark.usefixtures("vllm_level1_sleep")
 async def test_legacy_row_without_key_unchanged_until_relaunch(stack):
     """A deployment from before this version (NULL key): no Authorization header, until its next launch gives it
     a key."""

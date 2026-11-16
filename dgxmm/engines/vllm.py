@@ -194,6 +194,8 @@ class VllmEngine:
         util = vllm_gpu_util(launch.reserved, launch.mem_total)
         if launch.node != LOCAL_NODE_ID and not settings.remote_dev_endpoints:
             cfg = cfg.model_copy(update={"enable_sleep_mode": False})  # no dev routes on a remote node (I7)
+        if settings.vllm_sleep != "level1":  # "sleep" stops the deployment: no sleep mode, no dev routes
+            cfg = cfg.model_copy(update={"enable_sleep_mode": False})
         cmd = self._serve_args(artifact, cfg, draft, util, "0.0.0.0", launch.port)
         env = self._env(cfg, launch.api_key)
         if launch.node == LOCAL_NODE_ID:
@@ -250,8 +252,8 @@ class VllmEngine:
         return out
 
     async def health(self, http: httpx.AsyncClient, base_url: str, served_name: str,
-                     api_key: str | None = None) -> bool:
-        return await openai_health(http, base_url, served_name, api_key=api_key)
+                     api_key: str | None = None, completion: bool = True) -> bool:
+        return await openai_health(http, base_url, served_name, api_key=api_key, completion=completion)
 
     def parse_metrics(self, text: str) -> EngineMetrics:
         return metrics_from(text, VLLM_METRICS)

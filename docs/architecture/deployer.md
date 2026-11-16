@@ -105,8 +105,8 @@ stateDiagram-v2
   loading --> ready: health + test completion OK
   loading --> failed: exited, timeout, memory low
   loading --> stopping
-  ready --> sleeping: sleep (vLLM)
-  ready --> stopping
+  ready --> sleeping: sleep (vLLM, vllm_sleep level1)
+  ready --> stopping: stop, a sleep that stops, a failed sleep, health probes failed
   ready --> failed: container exited or vanished
   sleeping --> ready: wake
   sleeping --> stopping
@@ -130,9 +130,28 @@ event. A deployment can only be removed when it is `stopped` or `failed`. On eve
 liveness check moves `ready`, `sleeping` and `unknown` deployments whose container exited or vanished
 to `failed`.
 
-**Sleep** (vLLM only, and only when started with `enable_sleep_mode`, which is the default) calls the
-engine's `/sleep?level=1`. That frees the KV cache while the model stays loaded for a fast wake-up.
-**Wake** first checks that the memory it will take back is free.
+**Sleep** (vLLM only, and only when started with `enable_sleep_mode`, which is the default) depends on
+`vllm_sleep`. With `level1` it calls the engine's `/sleep?level=1`. That frees the KV cache while the model
+stays loaded for a fast wake-up. **Wake** first checks that the memory it will take back is free. With `stop`
+(the default: on GB10 unified memory a level-1 sleep frees nothing and vLLM refuses it) a sleep is a stop
+(`Deployer._stop_locked`, actor `sleep`), exactly like a cluster's (`cluster.sleep_as_stop`): the view has
+`sleep_capable: false` and `sleep_label: "sleep (stops the model)"` (`SLEEP_AS_STOP_LABEL` in
+`deployer/service.py`; a cluster's is `"sleep (stops all nodes)"`; `null` for a real sleep or none), the container
+gets neither `--enable-sleep-mode` nor `VLLM_SERVER_DEV_MODE` (`VllmEngine.container_spec`), and a **wake** of a
+deployment whose last stop was its sleep (`cluster.stopped_by_sleep`) is a `restart`. A level-1 sleep whose engine call
+fails for any reason never leaves the deployment `ready`: it is stopped (`ready → stopping → stopped`, actor
+`sleep failed`) and restarted through `restart`, keeping `last_error` *sleep failed: …*; if the restart fails,
+it ends `failed`.
+
+**Health probe** (`deployer/health.py`, its own background loop, every `engine_health_interval_s`): each `ready`
+deployment that is not a system deployment, has no operation in progress (its lock is free) and whose nodes are
+configured and fresh gets `engine.health(completion=False)`: the start-up check without its one-token test
+completion, i.e. the engine's `GET /health` (5 s timeout; a cluster: on its head), all concurrently and outside the
+lock. A completion every interval would count as request traffic in the metrics (`decider/common.py`
+`BUSY_KEYS`), so schedules, plans and proposals would never see the deployment idle. A result is discarded when the deployment had a
+new event meanwhile, and any new event restarts the count. `engine_health_failures` failures in a row:
+`Deployer.fail_unhealthy` under the lock: `ready → stopping`, the container removed (a cluster: `cluster.fail`,
+every rank), `→ failed` with `last_error` and the log tail; the state hooks deregister it from LiteLLM.
 
 ## Switch and reconfigure with rollback
 

@@ -13,7 +13,7 @@ import { useActionMutation } from "@/hooks/use-action-mutation";
 import { nameFixHref, takenHolder } from "@/lib/litellm";
 import { SYSTEM_REMOVE_TEXT, deploymentActions, queueShort } from "@/logic";
 import { ondemandBadge } from "@/lib/ondemand";
-import { CLUSTER_SLEEP_TEXT, showRunsOn, sleepLabel, sleepNeedsConfirm } from "@/lib/placement";
+import { showRunsOn, sleepConfirmText, sleepLabel, sleepNeedsConfirm } from "@/lib/placement";
 import { useLive } from "@/stream";
 import type { Deployment, NodeInfo } from "@/types";
 import { ConfirmDialog } from "./confirm-dialog";
@@ -126,7 +126,7 @@ export function DeploymentsTable({ deployments, isAdmin, loading, searchable, on
         mobileTitle={(d) => <div className="flex items-center gap-2"><Link to={`/deployments/${d.id}`} className="hover:underline">{d.name}</Link>{d.system && <SystemBadge />}</div>} />
       <ConfirmDialog open={!!pending} onOpenChange={(o) => !o && setPending(null)}
         title={pending?.kind === "stop" ? `Stop ${pending?.d.name}?` : pending?.kind === "sleep" ? `Sleep ${pending?.d.name}?` : `Remove ${pending?.d.name}?`}
-        description={pending?.kind === "sleep" ? CLUSTER_SLEEP_TEXT : pending?.kind === "stop"
+        description={pending?.kind === "sleep" ? sleepConfirmText(pending.d) : pending?.kind === "stop"
           ? (pending?.d.system ? "The container is stopped and its memory is released; the decision model's features fall back to rules until it runs again."
             : "The container is stopped and its memory is released. LiteLLM routes to it are removed. You can start it again later.")
           : `Its settings, events and history are deleted. This cannot be undone.${pending?.d.system ? ` ${SYSTEM_REMOVE_TEXT}` : ""}`}

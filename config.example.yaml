@@ -67,6 +67,10 @@ max_concurrent_startups: 1    # engines starting/loading at once; others wait in
                               # memory profile breaks if another engine allocates/frees memory meanwhile). 0 = no limit
 startup_queue_timeout_s: 1800 # a queued deployment fails after waiting this long for its turn
 wake_queue_timeout_s: 300     # a wake-up waits this long for a running start-up, then answers 409 startup_busy
+# vllm_sleep: stop            # Sleep of a single-node vLLM deployment: stop (default; on unified memory / DGX Spark
+                              # vLLM's level-1 sleep frees nothing) | level1 (vLLM's own sleep: separate GPU memory)
+# engine_health_interval_s: 30  # health probe of ready engines (0 = off)
+# engine_health_failures: 3     # failed probes in a row before a ready deployment is failed and its containers removed
 
 # --- Decision model ("decider") container (docs/security.md) ------------------------------------
 # images: {decision: dgxmm-decider:3}   # built locally from deploy/decider (Decision model page or API)

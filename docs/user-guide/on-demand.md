@@ -105,8 +105,11 @@ DGXMM checks every 15 seconds. The deployment's state becomes **Stopped** and th
 after 5 min idle* is recorded. The next request starts it again. A model deployed on demand starts right
 away, like any deployment, and is put to sleep only once it has been idle for its timeout.
 
-An on-demand vLLM deployment you put into vLLM sleep mode by hand counts as idle as well and is stopped
-after its timeout.
+An on-demand vLLM deployment you put into vLLM sleep mode by hand (with `vllm_sleep: level1`) counts as idle as
+well and is stopped after its timeout. With the default `vllm_sleep: stop` its **Sleep** stops it, like the idle
+timeout: the next request starts it again. The idle timeout never uses vLLM's sleep: it always stops the model.
+An on-demand deployment that fails its [health checks](deployments.md#health-checks) is failed and dropped from
+LiteLLM like any other; its next request starts it again.
 
 ## Making room
 

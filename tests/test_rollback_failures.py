@@ -17,6 +17,7 @@ async def ready(stack, name, ref="Qwen/Qwen3-Tiny", alias=None, **cfg):
     return d
 
 
+@pytest.mark.usefixtures("vllm_level1_sleep")
 async def test_switch_rollback_incomplete_when_wake_fails(stack):
     """When undo_actions wake fails, switch raises rollback_incomplete with failure list."""
     a = await ready(stack, "a", enable_sleep_mode=True, alias="chat")

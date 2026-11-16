@@ -46,6 +46,17 @@ def settings(tmp_path) -> Settings:
 
 
 @pytest.fixture
+def vllm_level1_sleep(request):
+    """vLLM's own level-1 sleep (``vllm_sleep: level1``) for tests of that mechanism: with the default "stop" a
+    single-node vLLM sleep is a stop (tests/test_sleep_as_stop.py). Sets it on the two-node deployer's settings when
+    the test uses one, else on ``settings``."""
+    if "deployer_two_nodes" in request.fixturenames:
+        request.getfixturevalue("deployer_two_nodes").settings.vllm_sleep = "level1"
+    else:
+        request.getfixturevalue("settings").vllm_sleep = "level1"
+
+
+@pytest.fixture
 def db(settings) -> Database:
     Path(settings.data_dir).mkdir(parents=True, exist_ok=True)
     return Database(f"sqlite:///{settings.db_path}")

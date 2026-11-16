@@ -3,6 +3,8 @@ import pytest
 from dgxmm.config import GIB
 from dgxmm.deployer.service import DeployError, DeployRequest, InsufficientMemory
 
+pytestmark = pytest.mark.usefixtures("vllm_level1_sleep")  # vLLM's own sleep (vllm_sleep: level1)
+
 SMALL = {"max_model_len": 4096, "max_num_seqs": 2, "max_num_batched_tokens": 2048}
 
 

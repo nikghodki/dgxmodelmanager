@@ -26,7 +26,7 @@ import { benchmarkSeries, plausibleRows, readingBadge } from "@/lib/benchmarks";
 import { estimateParts } from "@/lib/estimate";
 import { SYSTEM_REMOVE_TEXT, adviceApplicable, deploymentActions } from "@/logic";
 import { useNodes } from "@/hooks/use-nodes";
-import { CLUSTER_SLEEP_TEXT, rankBadge, showRunsOn, sleepLabel, sleepNeedsConfirm } from "@/lib/placement";
+import { rankBadge, showRunsOn, sleepConfirmText, sleepLabel, sleepNeedsConfirm } from "@/lib/placement";
 import { useLive } from "@/stream";
 import type { Deployment, RankSummary, Workload } from "@/types";
 import { SwitchDialog } from "@/components/app/switch-dialog";
@@ -378,7 +378,7 @@ export function DeploymentDetail() {
       {admin && <LogsSheet id={id} open={logs} onOpenChange={setLogs} />}
       <ConfirmDialog open={!!confirm} onOpenChange={(o) => !o && setConfirm(null)}
         title={confirm === "stop" ? `Stop ${d.name}?` : confirm === "sleep" ? `Sleep ${d.name}?` : `Remove ${d.name}?`}
-        description={confirm === "stop" ? "The container is stopped and its memory released." : confirm === "sleep" ? CLUSTER_SLEEP_TEXT : `Its settings, events and history are deleted. This cannot be undone.${d.system ? ` ${SYSTEM_REMOVE_TEXT}` : ""}`}
+        description={confirm === "stop" ? "The container is stopped and its memory released." : confirm === "sleep" ? sleepConfirmText(d) : `Its settings, events and history are deleted. This cannot be undone.${d.system ? ` ${SYSTEM_REMOVE_TEXT}` : ""}`}
         confirmLabel={confirm === "stop" ? "Stop" : confirm === "sleep" ? sleepLabel(d) : d.system ? "Remove and turn off" : "Remove"} destructive pending={act.isPending || remove.isPending}
         requireText={(confirm === "stop" || confirm === "sleep") && d.state === "ready" ? d.name : undefined}
         onConfirm={() => { if (confirm === "stop" || confirm === "sleep") act.mutate(confirm, { onSettled: () => setConfirm(null) }); else remove.mutate(undefined); }} />

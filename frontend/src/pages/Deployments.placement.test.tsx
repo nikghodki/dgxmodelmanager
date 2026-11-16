@@ -183,6 +183,21 @@ describe("final review fixes", () => {
     expect(sleepCalls()).toEqual([]);
   });
 
+  it("asks before a single deployment's sleep that stops the model, saying so", async () => {
+    const user = userEvent.setup();
+    mockDeployments([dep("q", "dgx-1", { sleep_label: "sleep (stops the model)" })]);
+    setup(<Deployments />);
+    await user.click(await screen.findByRole("button", { name: "Actions for q" }));
+    await user.click(await screen.findByRole("menuitem", { name: "Sleep (stops the model)" }));
+    const dlg = await screen.findByRole("alertdialog");
+    expect(within(dlg).getByText(/stops the model's container/)).toBeInTheDocument();
+    expect(within(dlg).queryByText(/cannot sleep across nodes/)).toBeNull();
+    expect(sleepCalls()).toEqual([]);
+    await user.type(within(dlg).getByLabelText("Type q to confirm"), "q");
+    await user.click(within(dlg).getByRole("button", { name: "Sleep (stops the model)" }));
+    await waitFor(() => expect(sleepCalls().length).toBe(1));
+  });
+
   it("a plain single-node sleep needs no confirmation", async () => {
     const user = userEvent.setup();
     mockDeployments([dep("q", "dgx-1", { sleep_capable: true })]);

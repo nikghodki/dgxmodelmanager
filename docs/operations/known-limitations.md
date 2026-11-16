@@ -32,6 +32,16 @@ description: "What DGXMM does not do, or does only on a best-effort basis."
 - **The on-demand queue does not survive a restart.** Restarting DGXMM drops waiting requests (their
   connections close) and resets the in-flight counters; ready on-demand models then wait a full idle
   timeout before they are stopped.
+- **No fast sleep on DGX Spark.** On unified memory vLLM's level-1 sleep frees nothing, so a single-node vLLM
+  "sleep" stops the model (`vllm_sleep: stop`) and its wake is a full model load (minutes for a large model),
+  like a cluster's. `vllm_sleep: level1` is meant for hosts with separate GPU memory; on GB10 it fails
+  (DGXMM then restarts the deployment). See [sleep and wake](../user-guide/deployments.md#sleep-and-wake).
+- **The health probe checks the engine's health route only.** A ready deployment is failed after
+  `engine_health_failures` (3) failed `GET /health` probes `engine_health_interval_s` (30 s) apart, so about 1 to
+  1.5 minutes after its engine stopped answering; requests sent to it meanwhile hang or fail. The probe sends no
+  test completion (it would count as traffic and keep every deployment from ever looking idle), so an engine whose
+  `/health` still answers 200 while it cannot serve completions is not detected (vLLM's `/health` does fail once
+  its EngineCore is dead). The failure counts are kept in memory only.
 
 ## Next steps
 

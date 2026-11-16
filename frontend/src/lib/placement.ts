@@ -20,10 +20,18 @@ export const showRunsOn = (nodes: NodeInfo[] | undefined, deployments: Pick<Depl
 /** The confirmation of a cluster's "sleep" (it stops every rank: there is no sleep across nodes). */
 export const CLUSTER_SLEEP_TEXT = "A cluster cannot sleep across nodes: this stops its containers on every node and releases their memory. Start it again later (a full model load).";
 
-/** A Sleep that stops containers (a cluster's, labelled by sleep_label) asks first, like Stop. */
+/** The confirmation of a single vLLM deployment's "sleep" while vllm_sleep is "stop" (unified memory). */
+export const SINGLE_SLEEP_TEXT = "On unified memory vLLM's sleep cannot free memory: this stops the model's container and releases its memory. Wake starts it again (a full model load).";
+
+/** What a Sleep that stops containers does, for its confirmation: a cluster's or a single deployment's. */
+export const sleepConfirmText = (d: Pick<Deployment, "placement">) =>
+  d.placement?.kind === "cluster" ? CLUSTER_SLEEP_TEXT : SINGLE_SLEEP_TEXT;
+
+/** A Sleep that stops containers (labelled by sleep_label: a cluster's, or a single vLLM deployment's on unified
+ *  memory) asks first, like Stop. */
 export const sleepNeedsConfirm = (d: Pick<Deployment, "sleep_label">) => !!d.sleep_label;
 
-/** The Sleep action's label: a cluster's sleep_label (e.g. "Sleep (stops all nodes)"), else "Sleep". */
+/** The Sleep action's label: its sleep_label (e.g. "Sleep (stops all nodes)", "Sleep (stops the model)"), else "Sleep". */
 export const sleepLabel = (d: Pick<Deployment, "sleep_label">) =>
   d.sleep_label ? d.sleep_label[0].toUpperCase() + d.sleep_label.slice(1) : "Sleep";
 

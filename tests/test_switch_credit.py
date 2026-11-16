@@ -88,6 +88,7 @@ async def test_switch_credits_user_chosen_stop_of_third_deployment(stack):
     assert stack.deployer.view(c["id"])["state"] == "stopped"
 
 
+@pytest.mark.usefixtures("vllm_level1_sleep")
 async def test_switch_agrees_with_preview_for_sleeping_old(stack):
     """I1: preview credits a sleeping old deployment's measured memory; switch must do the same."""
     from tests.fakes import free_on_stop

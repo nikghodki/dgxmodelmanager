@@ -221,8 +221,8 @@ class LlamaCppEngine:
         return shares if sum(shares) > 0 else reserved
 
     async def health(self, http: httpx.AsyncClient, base_url: str, served_name: str,
-                     api_key: str | None = None) -> bool:
-        return await openai_health(http, base_url, served_name, api_key=api_key)
+                     api_key: str | None = None, completion: bool = True) -> bool:
+        return await openai_health(http, base_url, served_name, api_key=api_key, completion=completion)
 
     def parse_metrics(self, text: str) -> EngineMetrics:
         return metrics_from(text, LLAMA_METRICS)

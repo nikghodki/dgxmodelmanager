@@ -237,14 +237,17 @@ class DecisionEngine:
                              secret_files={KEY_FILE: key.encode()})
 
     async def health(self, http: httpx.AsyncClient, base_url: str, served_name: str,
-                     api_key: str | None = None) -> bool:
-        """``api_key`` is unused: the decision model has its own key (dgxmm/decider/secret.py)."""
+                     api_key: str | None = None, completion: bool = True) -> bool:
+        """``api_key`` is unused: the decision model has its own key (dgxmm/decider/secret.py). ``completion``
+        False: the health route only (no probe question, no warm-up)."""
         try:
             status, content = await capped_request(http, "GET", f"{base_url}/health", timeout_s=5)
         except ValueError:  # reply larger than the cap
             return False
         if status != 200 or json_object(content).get("status") != "ready":
             return False
+        if not completion:
+            return True
         key = read_key(self.settings)
         return await probe(http, base_url, key, timeout_s=60) and await warmup(http, base_url, key)
 

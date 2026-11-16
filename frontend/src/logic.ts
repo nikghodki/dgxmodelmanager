@@ -51,7 +51,8 @@ export function deploymentActions(d: { state: string; sleep_capable: boolean; sy
     if (canRemove(d.state)) out.push("remove");
     return out;
   }
-  // a cluster: "sleep" may stop every rank (its sleep_label says so); a wake of a slept cluster is a Start
+  // "sleep" may be a stop (its sleep_label says so: a cluster, or a single vLLM deployment on unified memory); the
+  // wake of a deployment its sleep stopped is a Start
   if (d.state === "ready" && (d.sleep_capable || !!d.sleep_label)) out.push("sleep");
   if (d.state === "sleeping") out.push("wake");
   if (d.state === "ready" || d.state === "sleeping") out.push("switch");

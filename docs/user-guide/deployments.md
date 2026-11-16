@@ -10,8 +10,8 @@ Header actions depend on the state (admins only):
 
 | Action | When | What happens |
 |---|---|---|
-| **Sleep** | ready, vLLM with sleep mode | Frees the KV cache. Weights stay loaded for a fast wake-up. LiteLLM deregisters it while asleep. |
-| **Wake** | sleeping | Takes the memory back (only if it is free). Waking re-allocates the KV cache, so it waits for the [start-up queue](deploying.md#the-start-up-queue) like a start: the page then says *Waiting to wake up*, and the wake-up continues in the background (the API answers `202` after 50 s). |
+| **Sleep** | ready, vLLM with sleep mode | On DGX Spark (the default `vllm_sleep: stop`): **Sleep (stops the model)** stops the container and frees all of its memory, after a confirmation. With `vllm_sleep: level1`: frees the KV cache, weights stay loaded for a fast wake-up. LiteLLM deregisters it while asleep. See [sleep and wake](#sleep-and-wake). |
+| **Wake** | sleeping, or stopped by its Sleep | Takes the memory back (only if it is free). Waking re-allocates the KV cache, so it waits for the [start-up queue](deploying.md#the-start-up-queue) like a start: the page then says *Waiting to wake up*, and the wake-up continues in the background (the API answers `202` after 50 s). A deployment its Sleep stopped is started again (the page offers **Start**). |
 | **Start** | stopped or failed | Starts again with the stored configuration, after a fresh memory check. |
 | **Reconfigure** | ready, sleeping, stopped, failed | Change the configuration with a live memory check. Applying it restarts the deployment. If the new configuration does not come up, the old one is restored. |
 | **Logs** | any | The last lines of the engine container log. |
@@ -66,6 +66,40 @@ Tabs:
   when Docker reports an OOM kill or the log has the kernel OOM killer's line; otherwise it says *killed
   by SIGKILL* (for example `docker kill`, or a stop that timed out), and the memory estimate is not
   raised.
+
+## Sleep and wake
+
+DGX Spark (GB10) has unified memory: the GPU and the CPU share one pool of RAM. vLLM's level-1 sleep frees the
+KV cache and copies the weights to CPU memory, which on GB10 is the same memory, so it frees nothing; vLLM then
+refuses the sleep itself (`Memory usage increased after sleeping`). So by default (`vllm_sleep: stop` in
+[config.yaml](../configuration/index.md#engines)) a single-node vLLM deployment's **Sleep** is a stop, exactly
+like a cluster's *Sleep (stops all nodes)*:
+
+- the action reads **Sleep (stops the model)**, the deployment shows `sleep_capable: false` and
+  `sleep_label: "sleep (stops the model)"`, and it asks for confirmation like Stop;
+- the container is removed and its whole reservation released; the deployment becomes **Stopped** (event
+  *sleep (stops the model): stopping the container*, actor `sleep`);
+- **Wake** (or **Start**) starts it again through the memory check and the start-up queue: a full model load,
+  not a fast wake-up. A deployment you stopped yourself is not started by a wake;
+- engines are started without `--enable-sleep-mode` and without vLLM's development routes, whatever the
+  deployment's *sleep mode* setting says. That setting is kept, so existing deployments keep working, and it
+  takes effect again with `vllm_sleep: level1`.
+
+On a host with separate GPU memory, `vllm_sleep: level1` restores vLLM's own sleep (it takes effect at each
+deployment's next start; one asleep at the switch can still be woken). If a sleep fails there for any reason,
+DGXMM never leaves the deployment *Ready* on an engine that may be asleep or broken: it stops it and starts it
+again, and the deployment's last error says *sleep failed: …*; if that start fails too, the deployment ends
+**Failed**.
+
+## Health checks
+
+While a deployment is ready, DGXMM probes its engine every 30 s (`engine_health_interval_s`): its `GET /health`
+(a cluster: on its head). The probe sends no test completion, so it never counts as traffic. After 3 failed probes in a row (`engine_health_failures`) it is
+**Failed**: its container (every rank of a cluster) is removed, LiteLLM drops it, and the last error says *engine
+not answering its health check*; the event keeps the engine's last log lines. Start it again, or, for an
+[on-demand](on-demand.md) deployment, its next request starts it. A single slow answer never fails a deployment,
+and deployments that are starting, waking, asleep, stopping or stopped, the decision model (it has its own
+supervisor) and deployments on a node that is not answering are not probed.
 
 ## Next steps
 
