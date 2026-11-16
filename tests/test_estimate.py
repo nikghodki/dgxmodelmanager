@@ -3,7 +3,7 @@ from pathlib import Path
 
 from dgxmm.config import GIB
 from dgxmm.inventory.archspec import parse_hf_config
-from dgxmm.memory.estimate import MemoryEstimate, VllmSizing, estimate_vllm, vllm_gpu_util
+from dgxmm.memory.estimate import VLLM_UTIL_SLACK, MemoryEstimate, VllmSizing, estimate_vllm, vllm_gpu_util
 from dgxmm.memory.kv import kv_cache_bytes, kv_dtype_bytes, state_bytes
 
 FIX = Path(__file__).parent / "fixtures" / "configs"
@@ -23,9 +23,9 @@ def test_vllm_estimate_qwen3_8b_exact(settings):
     est = estimate_vllm(s, 16_384_000_000, VllmSizing(32768, 4, 8192, "auto", None), settings)
     assert est.kv_cache == 147456 * 32768 * 4 == 19_327_352_832
     assert est.activations == 8192 * (4 * 4096 + 2 * 12288) * 2 + 4 * 151936 * 4 * 2
-    assert est.runtime == int(4.5 * GIB)
+    assert est.runtime == int(4.5 * GIB) + VLLM_UTIL_SLACK
     assert est.margin == 0 and est.confidence == "estimated"
-    assert est.total == 16_384_000_000 + 19_327_352_832 + est.activations + int(4.5 * GIB)
+    assert est.total == 16_384_000_000 + 19_327_352_832 + est.activations + int(4.5 * GIB) + VLLM_UTIL_SLACK
     fp8 = estimate_vllm(s, 16_384_000_000, VllmSizing(32768, 4, 8192, "fp8", None), settings)
     assert fp8.kv_cache == 19_327_352_832 // 2
 
@@ -74,9 +74,11 @@ def test_state_bytes_and_dtype_table():
     assert state_bytes(s, 8) == 0
 
 
-def test_gpu_util_rounds_up():
+def test_gpu_util_floors_to_the_reservation():
+    """Never more than the reservation (floored to 1e-4; the estimate carries VLLM_UTIL_SLACK for the remainder)."""
     assert vllm_gpu_util(50 * GIB, 100 * GIB) == 0.50
-    assert vllm_gpu_util(50 * GIB + 1, 100 * GIB) == 0.51
+    assert vllm_gpu_util(50 * GIB + 1, 100 * GIB) == 0.50
+    assert vllm_gpu_util(50 * GIB + GIB // 100 + 1, 100 * GIB) == 0.5001
 
 
 def test_estimate_dict_roundtrip(settings):

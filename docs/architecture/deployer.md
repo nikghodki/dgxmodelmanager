@@ -55,8 +55,8 @@ Details (`dgxmm/deployer/service.py`):
   memory and applies calibration.
 - **Fit** is `estimate.total <= free_for_new (+ memory the chosen actions free)` (`planner/fit.py`).
 - **Container creation** runs under a global memory lock, so two deploys cannot both claim the same
-  free memory. vLLM gets `--gpu-memory-utilization = ceil(reservation / MemTotal × 100) / 100`, so its
-  memory pool matches the reservation. vLLM containers run with `HF_HUB_OFFLINE=1`: they only use files
+  free memory. vLLM gets `--gpu-memory-utilization = floor(reservation / MemTotal × 10000) / 10000`, so its
+  memory pool never exceeds the reservation (each vLLM estimate carries 16 MiB for the flooring). vLLM containers run with `HF_HUB_OFFLINE=1`: they only use files
   already in the cache.
 - **Readiness**: the monitor marks the deployment `loading` once the container runs, and `ready` once
   `/health` returns 200 and a one-token completion succeeds. It fails the deployment if the container

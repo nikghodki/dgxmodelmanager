@@ -1,12 +1,22 @@
 """Turn a Hugging Face config.json into the numbers the memory estimator needs."""
 from __future__ import annotations
 
+import re
 from collections import Counter
 from dataclasses import dataclass
 from typing import Any, Literal
 
-LayerKind = Literal["full", "sliding", "mla", "linear", "mamba"]
-_KIND_ORDER = {"full": 0, "sliding": 1, "mla": 2, "linear": 3, "mamba": 4}
+LayerKind = Literal["full", "sliding", "mla", "linear", "mamba", "csa"]
+_KIND_ORDER = {"full": 0, "sliding": 1, "mla": 2, "linear": 3, "mamba": 4, "csa": 5}
+
+# config.json keys of attention / KV-cache features that change what an engine allocates per token (compressed KV,
+# sparse-attention indexer caches, ...). A key matching this that no modelled architecture consumed means the KV
+# estimate does not cover the model: the spec is not confident (estimate._low_conf_margin adds the margin).
+# ``compression_config`` (compressed-tensors quantisation) deliberately does not match.
+_UNMODELED_ATTENTION_KEY = re.compile(r"(^|_)compress(_|$)|(^|_)indexer(_|$)|^index_|sparse_attn|^nsa_|^dsa_")
+# DeepSeek-V4 compress ratios vLLM implements (models/deepseek_v4/compressor.py CompressorStateCache: 4 or 128;
+# attention.py: 0/1 = sliding window only)
+_DSV4_RATIOS = {0, 1, 4, 128}
 
 
 @dataclass(frozen=True)
@@ -18,6 +28,10 @@ class LayerGroup:
     window: int | None = None
     mla_dim: int = 0        # MLA: kv_lora_rank + qk_rope_head_dim (one latent per token)
     state_elems: int = 0    # linear/mamba: conv + recurrent state elements per layer per sequence
+    # csa (DeepSeek-V4 compressed sparse attention): one head_dim latent per token in a `window` sliding cache, plus
+    # (compress_ratio > 1) one latent per compress_ratio tokens and (index_dim) an indexer key per compressed token
+    compress_ratio: int = 0
+    index_dim: int = 0
 
 
 @dataclass(frozen=True)
@@ -36,10 +50,11 @@ class ArchSpec:
     torch_dtype: str = "bfloat16"
     quant: str = "bf16"
     assumptions: tuple[str, ...] = ()  # fields that were missing and defaulted
+    unmodeled: tuple[str, ...] = ()    # attention / KV fields present but not modelled (_UNMODELED_ATTENTION_KEY)
 
     @property
     def confident(self) -> bool:
-        return not self.assumptions
+        return not self.assumptions and not self.unmodeled
 
 
 def _merged(cfg: dict[str, Any]) -> dict[str, Any]:
@@ -94,6 +109,27 @@ def detect_quant(qc: dict | None, dtype: str) -> str:
     if (8, "int") in bits:
         return "w8a8"
     return method or "unknown"
+
+
+def _deepseek_v4_groups(c: dict[str, Any], n_layers: int, kv_heads: int, head_dim: int,
+                        window: Any) -> tuple[tuple[LayerGroup, ...], set[str]] | None:
+    """DeepSeek-V4's per-layer compressed sparse attention, as vLLM builds it (models/deepseek_v4/attention.py):
+    every layer keeps a sliding-window latent cache; compress_ratios[i] 4 / 128 adds a compressed latent cache (and
+    a compressor state), 4 also a lightning-indexer key cache. (groups, consumed keys), or None when the config is
+    not a layout vLLM's code implements (then its keys stay unmodelled)."""
+    ratios = c.get("compress_ratios")
+    if str(c.get("model_type")) != "deepseek_v4" or not isinstance(ratios, list) or len(ratios) < n_layers:
+        return None
+    ratios = ratios[:n_layers]  # the rest are the MTP layers (attention.py: layer_id >= num_hidden_layers -> 1)
+    if not all(isinstance(r, int) and r in _DSV4_RATIOS for r in ratios) or kv_heads != 1 or not window:
+        return None
+    index_dim = int(c.get("index_head_dim") or 0)
+    if 4 in ratios and not index_dim:
+        return None
+    counts = Counter(max(1, r) for r in ratios)
+    groups = tuple(LayerGroup("csa", counts[r], kv_heads=1, head_dim=head_dim, window=int(window), compress_ratio=r,
+                              index_dim=index_dim if r == 4 else 0) for r in sorted(counts))
+    return groups, {"compress_ratios", "compress_rope_theta", "index_head_dim", "index_n_heads", "index_topk"}
 
 
 def parse_hf_config(cfg: dict[str, Any]) -> ArchSpec:
@@ -181,6 +217,10 @@ def parse_hf_config(cfg: dict[str, Any]) -> ArchSpec:
             built.append(LayerGroup("linear", count, state_elems=linear_state))
         else:
             built.append(LayerGroup("mamba", count, state_elems=mamba_state))
+    consumed: set[str] = set()
+    if (dsv4 := _deepseek_v4_groups(c, n_layers, kv_heads, head_dim, window)) is not None:
+        built, consumed = list(dsv4[0]), dsv4[1]
+    unmodeled = tuple(k for k in c if _UNMODELED_ATTENTION_KEY.search(k) and k not in consumed)
 
     num_experts = c.get("num_experts") or c.get("num_local_experts") or c.get("n_routed_experts")
     is_moe = bool(num_experts and int(num_experts) > 1)
@@ -201,5 +241,5 @@ def parse_hf_config(cfg: dict[str, Any]) -> ArchSpec:
         layer_groups=tuple(built), intermediate_size=inter, is_moe=is_moe,
         num_experts=int(num_experts) if num_experts else None, experts_per_tok=per_tok,
         torch_dtype=dtype, quant=detect_quant(c.get("quantization_config"), dtype),
-        assumptions=tuple(dict.fromkeys(assumptions)),
+        assumptions=tuple(dict.fromkeys(assumptions)), unmodeled=unmodeled,
     )

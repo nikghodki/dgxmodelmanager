@@ -45,8 +45,8 @@ def test_cluster_specs_host_networking_and_api(vllm_engine, cluster_launch):
     # the engine key is the head's (it serves the API); headless workers have none
     assert head.spec.environment["VLLM_API_KEY"] == "k-test" and "VLLM_API_KEY" not in worker.spec.environment
     # per-rank utilisation from that node's reservation and memory total
-    assert _flag(head.spec.command, "--gpu-memory-utilization") == "0.10"
-    assert _flag(worker.spec.command, "--gpu-memory-utilization") == "0.20"
+    assert _flag(head.spec.command, "--gpu-memory-utilization") == "0.0991"  # 12 / 121, floored
+    assert _flag(worker.spec.command, "--gpu-memory-utilization") == "0.2000"
     # the worker mounts the node's own HF cache read-only
     assert [(m.host, m.mode) for m in worker.spec.mounts] == [("/home/dgxuser/.cache/huggingface", "ro")]
 

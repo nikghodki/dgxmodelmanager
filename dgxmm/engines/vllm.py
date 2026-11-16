@@ -152,7 +152,7 @@ class VllmEngine:
             cmd += ["--host", host, "--port", str(port)]
         cmd += ["--max-model-len", str(cfg.max_model_len), "--max-num-seqs", str(cfg.max_num_seqs),
                 "--max-num-batched-tokens", str(cfg.max_num_batched_tokens),
-                "--gpu-memory-utilization", f"{util:.2f}", "--kv-cache-dtype", cfg.kv_cache_dtype,
+                "--gpu-memory-utilization", f"{util:.4f}", "--kv-cache-dtype", cfg.kv_cache_dtype,
                 "--enable-prefix-caching" if cfg.enable_prefix_caching else "--no-enable-prefix-caching",
                 "--enable-chunked-prefill" if cfg.enable_chunked_prefill else "--no-enable-chunked-prefill"]
         if cfg.enable_auto_tool_choice:

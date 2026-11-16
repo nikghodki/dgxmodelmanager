@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import math
+from collections import Counter
 
 from dgxmm.inventory.archspec import ArchSpec
 
@@ -36,7 +37,107 @@ def kv_cache_bytes(spec: ArchSpec, *, tokens_total: int, seqs: int, context: int
             w = min(context, g.window or context)
             tokens = min(tokens_total, w * seqs + window_slack)
             total += g.count * 2 * g.kv_heads * g.head_dim * bytes_per_elem * tokens
+        elif g.kind == "csa":  # engine-neutral: window latents + compressed latents + indexer keys (no packing)
+            w = min(context, g.window or context)
+            total += g.count * g.head_dim * bytes_per_elem * min(tokens_total, w * seqs + window_slack)
+            if g.compress_ratio > 1:
+                total += g.count * (g.head_dim + g.index_dim) * bytes_per_elem * tokens_total / g.compress_ratio
     return int(math.ceil(total))
+
+
+def kv_shards(spec: ArchSpec) -> int:
+    """How many ways vLLM's tensor parallelism can split this model's KV cache: the KV heads of its attention
+    groups (a rank holds max(1, heads // tp) of them). MLA and DeepSeek-V4 caches hold one latent per token
+    (num_kv_heads=1 in vLLM's MLAAttentionSpec): replicated on every rank. 0: no per-token KV."""
+    heads = [1 if g.kind in ("mla", "csa") else g.kv_heads for g in spec.layer_groups if g.kind in
+             ("full", "sliding", "mla", "csa")]
+    return max(min(heads), 1) if heads else 0
+
+
+# ---- vLLM's packed KV pool for DeepSeek-V4 (vllm/v1/core/kv_cache_utils.py, image pinned-2026-08-27) ----
+# The model registers several caches per layer with different page sizes (models/deepseek_v4/attention.py,
+# compressor.py, v1/attention/backends/mla/sparse_swa.py). vLLM groups them (group_and_unify_kv_cache_specs,
+# _get_kv_cache_groups_uniform_groups) and every group draws blocks from ONE shared pool whose block is as large as
+# the largest group's pages (_get_kv_cache_bytes_per_block), so a small compressor-state page still costs a full
+# pool block. A request needs the sum of its per-group block counts (_max_memory_usage_bytes_from_groups).
+VLLM_DSV4_BLOCK = 256          # DeepseekSparseSWABackend.get_preferred_block_size
+VLLM_DSV4_SWA_BLOCK = 64       # DeepseekV4SWACache.block_size
+VLLM_MAX_CONCURRENT_BATCHES = 2  # async scheduling (default): VllmConfig.max_concurrent_batches, pp=1
+
+
+def _cdiv(a: int, b: int) -> int:
+    return -(-a // b)
+
+
+def _round_up(x: int, a: int) -> int:
+    return _cdiv(x, a) * a
+
+
+def _approximate_gcd(values: list[int], lower_bound: int) -> int:
+    """kv_cache_utils._approximate_gcd: the d >= lower_bound minimising the round-up padding (ties: larger d)."""
+    best_d, best_pad = lower_bound, None
+    for d in range(lower_bound, max(max(values), lower_bound) + 1):
+        pad = sum((d - x % d) % d for x in values)
+        if best_pad is None or pad <= best_pad:
+            best_d, best_pad = d, pad
+    return best_d
+
+
+def _dsv4_caches(spec: ArchSpec, kv_dtype: str, model_dtype: str) -> list[tuple[int, int, int | None, int]]:
+    """(page bytes, block size, sliding window or None = full, layer count) of every cache vLLM registers."""
+    ds_mla = str(kv_dtype).startswith("fp8")  # fp8 -> fp8_ds_mla (attention.py _resolve_dsv4_kv_cache_dtype)
+    align = 576 if ds_mla else 512
+    out: list[tuple[int, int, int | None, int]] = []
+    for g in spec.layer_groups:
+        if g.kind != "csa":
+            continue
+        latent = 584 if ds_mla else int(g.head_dim * kv_dtype_bytes(kv_dtype, model_dtype))  # bytes per state
+        out.append((_round_up(VLLM_DSV4_SWA_BLOCK * latent, align), VLLM_DSV4_SWA_BLOCK, g.window, g.count))
+        r = g.compress_ratio
+        if r > 1:
+            out.append((_round_up(VLLM_DSV4_BLOCK // r * latent, align), VLLM_DSV4_BLOCK, None, g.count))
+            coff = 1 + (r == 4)  # compressor state: fp32 kv + score, overlapping windows for ratio 4
+            bs = 4 if r == 4 else 8
+            out.append((_round_up(bs * 2 * coff * g.head_dim * 4, align), bs, coff * r, g.count))
+        if r == 4 and g.index_dim:  # indexer keys: fp8 + one fp32 scale per 128 (132 B), and their compressor
+            key = g.index_dim + g.index_dim // 128 * 4
+            out.append((_round_up(VLLM_DSV4_BLOCK // r * key, align), VLLM_DSV4_BLOCK, None, g.count))
+            out.append((_round_up(4 * 2 * 2 * g.index_dim * 4, align), 4, 8, g.count))
+    return out
+
+
+def vllm_dsv4_pool_bytes(spec: ArchSpec, *, tokens_total: int, seqs: int, context: int, kv_dtype: str,
+                         max_num_batched_tokens: int) -> int:
+    """Bytes of vLLM's shared DeepSeek-V4 KV pool for `tokens_total` tokens over `seqs` concurrent sequences of up
+    to `context` tokens. One sequence at its full context reproduces vLLM's start-up check exactly (plus the null
+    block the pool holds back). Several sequences: the full-attention groups hold their tokens (plus a partial
+    block each); a windowed group's blocks are bounded by every sequence's window (+2 blocks for block alignment)
+    plus the in-flight tokens once (SlidingWindowSpec.max_admission_blocks_per_request)."""
+    caches = _dsv4_caches(spec, kv_dtype, spec.torch_dtype)
+    if not caches:
+        return 0
+    in_flight = VLLM_MAX_CONCURRENT_BATCHES * max_num_batched_tokens
+    full: Counter[int] = Counter()
+    windowed: dict[tuple[int, int], Counter[int]] = {}
+    for page, bs, window, count in caches:
+        if window is None:
+            full[page] += count
+        else:
+            windowed.setdefault((bs, window), Counter())[page] += count
+    tuples = [full.most_common(1)[0][1]] + [c.most_common(1)[0][1] for c in windowed.values()]
+    t = _approximate_gcd(tuples, lower_bound=tuples[0])
+    bytes_per_block = sum(p * n for p, n in full.items())
+    blocks = max(_cdiv(context, VLLM_DSV4_BLOCK),
+                 _cdiv(tokens_total, VLLM_DSV4_BLOCK) + max(min(seqs, _cdiv(tokens_total, max(context, 1))) - 1, 0))
+    for (bs, window), pages in windowed.items():
+        layers = max(pages.values())
+        n_sub = _cdiv(layers, t)
+        tuple_bytes = sum(pages)
+        bytes_per_block = max(bytes_per_block, _cdiv(layers, n_sub) * tuple_bytes)
+        one = _cdiv(min(window - 1 + in_flight, context), bs) + 1
+        many = seqs * (_cdiv(min(window - 1, context), bs) + 2) + _cdiv(min(in_flight, tokens_total), bs) - 1
+        blocks += n_sub * max(one, min(many, seqs * (_cdiv(context, bs) + 1)))
+    return bytes_per_block * (blocks + 1)  # + the null block (get_kv_cache_configs: check_memory)
 
 
 def state_bytes(spec: ArchSpec, seqs: int, elem_bytes: int = 4) -> int:

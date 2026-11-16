@@ -71,7 +71,7 @@ def test_container_spec(settings, tiny):
     c = spec.command
     assert spec.name == "dgxmm-q" and spec.image == settings.images.vllm and spec.port == 8105
     assert c[c.index("--model") + 1] == "Qwen/Qwen3-Tiny" and c[c.index("--revision") + 1] == tiny.revision
-    assert c[c.index("--gpu-memory-utilization") + 1] == "0.25"
+    assert c[c.index("--gpu-memory-utilization") + 1] == "0.2500"
     assert c[c.index("--served-model-name") + 1] == "qwen3-tiny"
     assert json.loads(c[c.index("--speculative-config") + 1]) == {"method": "mtp", "num_speculative_tokens": 2}
     assert "--enable-sleep-mode" in c and c[-1] == "--enforce-eager"
