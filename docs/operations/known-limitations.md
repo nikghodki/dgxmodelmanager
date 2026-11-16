@@ -39,11 +39,16 @@ description: "What DGXMM does not do, or does only on a best-effort basis."
 - **GB10 unified memory and cgroup accounting.** On GB10, CUDA allocations are not charged to
   cgroups or RSS, so the container's measured memory is only its host-side memory (the process, page
   cache, tmpfs). Keep a host-level GPU-aware OOM guard to prevent the host from running out of
-  unified memory. This is a known GB10 driver behavior.
-- **Memory estimator accuracy for novel attention architectures.** Memory estimates for models with
-  novel attention mechanisms (such as DeepSeek-V4's compressed/sliding/indexer attention) may be lower
-  than actual usage. <!-- TODO estimator fix --> A fix for improved estimation accuracy is being integrated
-  separately; until then, monitor actual memory usage for these models and adjust manually if needed.
+  unified memory. This is a known GB10 driver behavior. See
+  [Host memory protection](../operations/host-memory-protection.md).
+- **Memory estimator accuracy for novel attention architectures.** DeepSeek-V4 compressed/sliding/indexer
+  KV is now modelled from vLLM's packed pool (matches vLLM byte-for-byte for the pinned image
+  vllm/vllm-openai:pinned-2026-08-27); single-KV-head / MLA KV is counted in full on every TP rank;
+  config.json attention fields the parser doesn't model now give low confidence + the 20% margin (split per
+  rank like its base). The `--gpu-memory-utilization` is floored to 4 decimals so it never exceeds the
+  reservation. After a vLLM image upgrade, run `tools/vllm_dsv4_pool_sim.py` to verify the pool calculation
+  still matches; estimates stored before the upgrade keep the old even split until the model is re-prepared
+  (see upgrade notes).
 
 ## Next steps
 

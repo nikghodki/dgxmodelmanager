@@ -56,6 +56,18 @@ All notable changes to DGXMM are documented in this file. The format is based on
 - **A cluster "Sleep (stops all nodes)" asks first.** Like Stop, it opens a confirmation (type the name when the
   deployment is ready), since it stops the containers on every node.
 
+
+### Fixed
+
+- **DeepSeek-V4 memory estimation.** DeepSeek-V4 compressed/sliding/indexer KV is now modelled from vLLM's
+  packed pool (matches vLLM byte-for-byte for the pinned image vllm/vllm-openai:pinned-2026-08-27);
+  single-KV-head / MLA KV is counted in full on every TP rank; config.json attention fields the parser doesn't
+  model now give low confidence + the 20% margin (split per rank like its base).
+- **GPU memory utilization never exceeds reservation.** `--gpu-memory-utilization` is now floored to 4 decimals
+  (was ceil to 0.01, up to 1.2 GiB over); vLLM estimates carry 16 MiB slack so the floored budget still covers them.
+- **tools/vllm_dsv4_pool_sim.py** added to verify DeepSeek-V4 pool calculation against vLLM ground truth after
+  image upgrades.
+
 ### Security
 
 - **Node SSH key.** The SSH key for Docker-over-SSH on remote nodes (`node_ssh_key_file`, default
