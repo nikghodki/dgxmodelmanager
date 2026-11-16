@@ -60,3 +60,22 @@ async def test_a_remote_row_stored_with_sleep_mode_still_starts_without_it(deplo
                                  mem_total=2**37, node="dgx-2").items() if k in params}
     spec = engine.container_spec(d.inventory.get("Qwen/Qwen3-Tiny"), cfg, None, LaunchContext(**kw), d.settings)
     assert "--enable-sleep-mode" not in spec.command and "VLLM_SERVER_DEV_MODE" not in spec.environment
+
+
+@pytest.mark.usefixtures("vllm_level1_sleep")
+async def test_sleep_is_refused_when_the_node_no_longer_allows_sleep_mode(deployer_two_nodes, qwen_req):
+    """sleep() gates on supports_sleep (the node's rule included), not on the stored enable_sleep_mode: a remote
+    row started with sleep mode while remote_dev_endpoints was on answers 409 once it is off, and nothing is sent
+    to the engine."""
+    from dgxmm.deployer.service import DeployError
+    d = deployer_two_nodes
+    d.settings.remote_dev_endpoints = True
+    req = qwen_req.model_copy(update={"node": "dgx-2", "config": {**qwen_req.config, "enable_sleep_mode": True}})
+    v = await d.deploy(req, user_id=1)
+    d.engines_http.healthy.add(v["port"])
+    assert await d.wait_ready(v["id"], 5) == "ready"
+    d.settings.remote_dev_endpoints = False
+    with pytest.raises(DeployError) as e:
+        await d.sleep(v["id"])
+    assert e.value.code == "sleep_unsupported" and e.value.status == 409
+    assert v["port"] not in d.engines_http.sleeping and d.state(v["id"]) == "ready"

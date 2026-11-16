@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 from typing import Literal
 from urllib.parse import urlsplit
@@ -72,6 +73,7 @@ class Mount(BaseModel):
 
 
 LOCAL_NODE_ID = "local"
+NODE_ID_PATTERN = r"^[a-z0-9][a-z0-9-]{0,31}$"  # NodeConfig.id of a remote node ("local" is the local node)
 
 
 def unsafe_publish_reason(addr: str | None) -> str | None:
@@ -379,6 +381,9 @@ class Settings(BaseModel):
             
             # Validate remote nodes
             for node in remote_nodes:
+                if not re.fullmatch(NODE_ID_PATTERN, node.id):
+                    raise ValueError(f"remote node id {node.id!r} is not a valid node id: 1-32 lowercase letters, "
+                                     "digits and '-', starting with a letter or digit (e.g. dgx-2)")
                 if not node.cluster_ip:
                     raise ValueError(f"remote node {node.id} requires cluster_ip")
                 if not node.known_hosts:

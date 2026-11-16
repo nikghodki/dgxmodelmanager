@@ -17,7 +17,7 @@ import httpx
 from pydantic import BaseModel, Field, StringConstraints, ValidationError, model_validator
 from sqlalchemy import select
 
-from dgxmm.config import LOCAL_NODE_ID, Settings
+from dgxmm.config import LOCAL_NODE_ID, NODE_ID_PATTERN, Settings
 from dgxmm.db import Database, Deployment, DeploymentEvent
 from dgxmm.deployer.logtail import SCAN_LINES, oom_evidence, stored_tail
 from dgxmm.deployer.gate import GateTimeout, GateWithdrawn, StartupGate
@@ -46,7 +46,6 @@ IDLE_TIMEOUT_MIN_S, IDLE_TIMEOUT_MAX_S = 60, 86400  # per-deployment idle_timeou
 # already in use") or by a container it knows ("port is already allocated").
 _PORT_CONFLICT = re.compile(r"address already in use|port is already allocated", re.I)
 PORT_ATTEMPTS = 4
-NODE_ID_PATTERN = r"^[a-z0-9][a-z0-9-]{0,31}$"  # NodeConfig.id ("local" is the local node)
 UNREACHABLE_BACKOFF_MAX_S = 60.0  # longest wait between monitor polls while a remote node is unreachable
 REMOTE_LIVENESS_TIMEOUT_S = 5.0  # longest a liveness check waits on a remote node's Docker (the budget loop runs it)
 
@@ -1684,9 +1683,9 @@ class Deployer:
             if self.sleep_label(dep) == SLEEP_AS_STOP_LABEL:  # vllm_sleep "stop": the container is stopped
                 return await self._stop_locked(dep, "sleep", f"{SLEEP_AS_STOP_LABEL}: stopping the container")
             engine = self.engines[dep.engine]
-            cfg = engine.validate_config(dep.config)
-            if not (engine.supports_sleep and engine.sleep_enabled(cfg)):
-                raise DeployError("sleep_unsupported", "this deployment was not started with sleep mode", 409)
+            if not self.supports_sleep(dep):  # the node's rule too (remote_dev_endpoints), not only the stored config
+                raise DeployError("sleep_unsupported", "this deployment has no sleep mode (not started with it, or its "
+                                                       "node does not allow it)", 409)
             try:
                 await engine.sleep(self.http, self._engine_url(dep), api_key=dep.engine_api_key)
             except Exception as e:  # the engine may be asleep, half asleep or broken now: never leave it "ready"

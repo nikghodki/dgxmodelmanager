@@ -59,3 +59,19 @@ def test_remote_publish_bind_accepts_cluster_addresses(settings_factory):
     assert s.node("dgx-2").publish_bind == "192.0.2.12" and s.node("dgx-2").engine_address() == "192.0.2.12"
     s = settings_factory(nodes=_remote())
     assert s.node("dgx-2").engine_address() == "192.0.2.2"
+
+
+@pytest.mark.parametrize("node_id", ["DGX-2", "dgx_2", "-dgx2", "dgx 2", "a" * 33, ""])
+def test_remote_node_id_must_match_the_node_id_pattern(settings_factory, node_id):
+    """A remote id outside NODE_ID_PATTERN is refused at load (it would fail later, as a 500 on placement)."""
+    nodes = _remote()
+    nodes[1]["id"] = node_id
+    with pytest.raises(ValidationError, match="node id"):
+        settings_factory(nodes=nodes)
+
+
+@pytest.mark.parametrize("node_id", ["dgx-2", "2", "a" * 32, "spark-b0"])
+def test_remote_node_id_accepts_valid_ids(settings_factory, node_id):
+    nodes = _remote()
+    nodes[1]["id"] = node_id
+    assert settings_factory(nodes=nodes).node(node_id).id == node_id
