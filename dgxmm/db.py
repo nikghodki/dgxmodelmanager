@@ -427,6 +427,9 @@ def enable_wal(cur, timeout_s: float = 5.0) -> None:
         delay = min(delay * 2, 0.2)
 
 
+SCHEMA_RACE = ("already exists", "database schema has changed")  # create_all lost a race with another process
+
+
 class Database:
     def __init__(self, url: str):
         self.engine = create_engine(url, connect_args={"check_same_thread": False})
@@ -441,13 +444,14 @@ class Database:
 
         from dgxmm import migrations  # imports this module's Base lazily (no cycle)
         # Concurrent startups (the app and an admin CLI) can race on CREATE TABLE: every lost race means another
-        # process created a table, so re-checking converges within one round per table.
+        # process created a table ("already exists", or SQLITE_SCHEMA "database schema has changed" when its
+        # CREATE landed between our check and our statement), so re-checking converges within one round per table.
         for attempt in range(len(Base.metadata.tables) + 1):
             try:
                 Base.metadata.create_all(self.engine)
                 break
             except OperationalError as e:
-                if "already exists" not in str(e) or attempt == len(Base.metadata.tables):
+                if not any(m in str(e) for m in SCHEMA_RACE) or attempt == len(Base.metadata.tables):
                     raise
         add_missing_columns(self.engine)
         migrations.add_missing_indexes(self.engine, Base.metadata)

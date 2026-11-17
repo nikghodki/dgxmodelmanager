@@ -42,6 +42,24 @@ def test_wal_switch_does_not_retry_other_errors(monkeypatch):
     assert len(cur.calls) == 1
 
 
+@pytest.mark.parametrize("message", ["table users already exists", "database schema has changed"])
+def test_create_all_retries_after_losing_a_schema_race(tmp_path, monkeypatch, message):
+    """Another process changing the schema between create_all's check and its CREATE (seen on a GitHub runner as
+    SQLITE_SCHEMA) is retried, like a table that already exists."""
+    from sqlalchemy.exc import OperationalError
+    real = db.Base.metadata.create_all
+    calls = []
+
+    def flaky(engine):
+        calls.append(1)
+        if len(calls) == 1:
+            raise OperationalError("CREATE TABLE", {}, sqlite3.OperationalError(message))
+        return real(engine)
+    monkeypatch.setattr(db.Base.metadata, "create_all", flaky)
+    db.Database(f"sqlite:///{tmp_path / 'x.sqlite3'}").engine.dispose()
+    assert len(calls) == 2
+
+
 def test_concurrent_first_opens_of_a_rollback_journal_database(tmp_path):
     """Regression (GitHub runner): four threads open a fresh rollback-journal database at once, many times."""
     for i in range(15):
