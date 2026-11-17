@@ -1,12 +1,13 @@
 import secrets
 from dataclasses import dataclass
+from datetime import timedelta
 
 from fastapi import Depends, Request
 
 from dgxmm.api.errors import api_error
-from dgxmm.auth.sessions import resolve_session
+from dgxmm.auth.sessions import delete_session, resolve_session
 from dgxmm.context import AppContext
-from dgxmm.db import User, UserSession
+from dgxmm.db import User, UserSession, as_aware, utcnow
 
 COOKIE = "dgxmm_session"
 SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
@@ -63,6 +64,9 @@ def current_principal(request: Request, ctx: AppContext = Depends(get_ctx)) -> P
     if not found:
         raise api_error(401, "not_authenticated", "log in first")
     sess, user = found
+    if user.auth_source == "sso" and not _sso_session_valid(ctx, sess):
+        delete_session(ctx.db, request.cookies.get(COOKIE))
+        raise api_error(401, "not_authenticated", "sign in again")
     if request.method not in SAFE_METHODS:
         sent = request.headers.get("x-csrf-token", "")
         if not secrets.compare_digest(sent, sess.csrf_token):
@@ -71,6 +75,15 @@ def current_principal(request: Request, ctx: AppContext = Depends(get_ctx)) -> P
     if user.must_change_pw and path not in PW_CHANGE_ALLOWED:
         raise api_error(403, "password_change_required", "change your password before continuing")
     return Principal(user, sess)
+
+
+def _sso_session_valid(ctx: AppContext, sess: UserSession) -> bool:
+    """An SSO session needs OIDC still enabled and ends reauth_after_s after its sign-in (the role is re-read from
+    the IdP at every sign-in, so this bounds how long a removed group keeps working)."""
+    cfg = ctx.settings.auth.oidc
+    if not cfg.enabled or sess.created_at is None:
+        return False
+    return as_aware(sess.created_at) + timedelta(seconds=cfg.reauth_after_s) > utcnow()
 
 
 def require_admin(p: Principal = Depends(current_principal)) -> Principal:

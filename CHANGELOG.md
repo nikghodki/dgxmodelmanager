@@ -5,6 +5,28 @@ All notable changes to DGXMM are documented in this file. The format is based on
 sections before it are identified by their date (the package version was `0.1.0` throughout). Upgrade notes for
 existing installs are in [upgrade](docs/getting-started/upgrade.md#upgrading-an-existing-install).
 
+## [Unreleased]
+
+### Added
+
+- **Single sign-on with OpenID Connect** (off by default). Configure `auth.oidc` in `config.yaml` with your
+  identity provider (Pocket ID, Keycloak, Authentik, …) and the login page gets a **Sign in with …** button, or
+  goes straight to the IdP with `auto_redirect: true`. Authorization Code flow with PKCE S256, full ID token
+  validation against the IdP's keys, and roles from a claim (`groups` by default) at every sign-in: someone in
+  no mapped group is refused. The first sign-in creates the DGXMM user (`auto_provision`). Password accounts,
+  the local `admin` (break-glass) and the admin CLI are unchanged; `local_login: false` turns password sign-in
+  off. See [single sign-on](docs/user-guide/single-sign-on.md) and the
+  [threat model](docs/security.md#single-sign-on-openid-connect).
+
+### Upgrade notes
+
+- `./install.sh` creates an empty `secrets/oidc_client_secret` (a new compose secret). Starting DGXMM with
+  `docker compose up` without running the installer first fails until that file exists:
+  `install -m 600 /dev/null secrets/oidc_client_secret`.
+- New database columns (`users.auth_source`, `sessions.created_at`) and table (`sso_identities`) are added at
+  start; 0.2.0 reads and writes the upgraded database.
+- New dependency: PyJWT (with `cryptography`, already present).
+
 ## [0.2.0] — 2026-11-16
 
 The first tagged release: multi-node deployments (models on a second DGX Spark, or one model across two as a

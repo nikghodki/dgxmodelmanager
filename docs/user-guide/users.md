@@ -16,6 +16,10 @@ an admin creates or resets.
 | **viewer** | See the dashboard, deployments (including each one's LiteLLM endpoint and model name), models, catalog, downloads, planner and processes, and run memory checks. Cannot see users, audit log, container logs, the LiteLLM page or virtual keys. |
 | **admin** | Everything: deploy, start, stop, sleep, switch, reconfigure, remove, download, delete weights, benchmark, view container logs, configure LiteLLM and manage virtual keys, configure the decision model, manage users, read the audit log. |
 
+If your admin set up [single sign-on](single-sign-on.md), the login page also has a button such as
+**Sign in with Pocket ID** (or takes you to the sign-in service straight away). Your DGXMM role then comes
+from your groups there, at every sign-in.
+
 After 5 failed sign-ins within a minute (per IP or per username), further attempts are refused for a
 minute. Sessions last 12 hours from the last activity. Forgot the admin password? See
 [operations](../operations/troubleshooting.md#forgot-the-admin-password).
@@ -24,7 +28,9 @@ minute. Sessions last 12 hours from the last activity. Forgot the admin password
 
 **Users** (admins): add users with a role and a temporary password, change roles, reset passwords
 (users must change the temporary password at next sign-in, and their sessions end), and delete users.
-You cannot delete yourself or remove the last admin.
+You cannot delete yourself or remove the last admin. Single sign-on users have an **SSO** badge and their
+email: their role follows their groups at the identity provider, so it can't be changed here, and they have
+no password to reset. Deleting one ends their sessions (see [single sign-on](single-sign-on.md#users-and-roles)).
 
 **Audit log** (admins): who did what and when. It covers sign-ins (including failed ones), deploys,
 stops, switches, reconfigures, model name changes, downloads, weight deletions and clean-ups (also
@@ -35,5 +41,6 @@ Filter by action.
 
 ## Next steps
 
+- [Single sign-on](single-sign-on.md)
 - [Settings](settings.md)
 - [Application security model](../security/application.md)

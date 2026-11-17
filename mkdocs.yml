@@ -148,6 +148,7 @@ nav:
       - user-guide/calling-models.md
       - user-guide/processes.md
       - user-guide/users.md
+      - user-guide/single-sign-on.md
       - user-guide/settings.md
   - Architecture:
       - architecture/index.md

@@ -1,4 +1,6 @@
 const BASE = import.meta.env.BASE_URL.replace(/\/$/, "");
+/** The UI's base path without a trailing slash (e.g. /dgxmm). */
+export const basePath = BASE;
 let csrf = "";
 export const setCsrf = (t: string) => {
   csrf = t;

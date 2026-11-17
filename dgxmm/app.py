@@ -24,6 +24,7 @@ from dgxmm.api import insights as insights_api
 from dgxmm.api import deploy_advice as deploy_advice_api
 from dgxmm.api import schedules as schedules_api
 from dgxmm.api import commands as commands_api
+from dgxmm.api import sso as sso_api
 from dgxmm.context import AppContext
 from dgxmm.ondemand import gateway as ondemand_gateway
 
@@ -32,7 +33,7 @@ BACKGROUND_STOP_S = 3.0  # how long shutdown waits for cancelled background loop
 
 ROUTERS = [auth_api, users_api, host_api, inventory_api, engines_api, deployments_api, stream_api, audit_api, containers_api, catalog_api, downloads_api, planner_api, metrics_api, integrations_api, decider_api,
            decider_features_api, insights_api, deploy_advice_api, decider_ops_api, schedules_api,
-           commands_api, nodes_api]
+           commands_api, nodes_api, sso_api]
 
 
 class BodyLimit:
@@ -118,6 +119,11 @@ def create_app(ctx: AppContext) -> FastAPI:
     app.add_middleware(ondemand_gateway.PeerGuard, prefix=f"{bp}/ondemand", ctx=ctx)
     for module in ROUTERS:
         app.include_router(module.router, prefix=bp)
+    # the OIDC redirect URI (auth.oidc.redirect_path), before the SPA's catch-all
+    app.add_api_route(bp + ctx.settings.auth.oidc.redirect_path, sso_api.oidc_callback, methods=["GET"],
+                      include_in_schema=False)
+    from dgxmm.auth.oidc import redact_access_log
+    redact_access_log(bp + ctx.settings.auth.oidc.redirect_path)  # its query has the code and state
     # the on-demand gateway LiteLLM calls: its own bearer key, outside session auth / CSRF, its own body cap
     app.state.ondemand_gateway = ondemand_gateway.Gateway(ctx)
     app.include_router(ondemand_gateway.router, prefix=bp)

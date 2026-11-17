@@ -14,7 +14,7 @@ const TABS = [
 
 export function MobileTabBar({ isAdmin }: { isAdmin: boolean }) {
   const [more, setMore] = useState(false);
-  const { logout } = useAuth();
+  const { user, logout } = useAuth();
   const nav = useNavigate();
   const rest = visibleGroups(isAdmin).flatMap((g) => g.items).filter((i) => !MOBILE_TABS.includes(i.to));
   const tabCls = ({ isActive }: { isActive: boolean }) =>
@@ -36,7 +36,7 @@ export function MobileTabBar({ isAdmin }: { isAdmin: boolean }) {
             {rest.map(({ to, label, icon: Icon }) => (
               <li key={to}><button type="button" onClick={() => { setMore(false); nav(to); }} className="flex min-h-[44px] w-full items-center gap-3 rounded-md px-3 text-sm hover:bg-accent"><Icon className="h-4 w-4" />{label}</button></li>
             ))}
-            <li><button type="button" onClick={() => { setMore(false); nav("/change-password"); }} className="flex min-h-[44px] w-full items-center gap-3 rounded-md px-3 text-sm hover:bg-accent"><KeyRound className="h-4 w-4" />Change password</button></li>
+            {user?.auth_source !== "sso" && <li><button type="button" onClick={() => { setMore(false); nav("/change-password"); }} className="flex min-h-[44px] w-full items-center gap-3 rounded-md px-3 text-sm hover:bg-accent"><KeyRound className="h-4 w-4" />Change password</button></li>}
             <li><button type="button" onClick={() => { setMore(false); logout(); }} className="flex min-h-[44px] w-full items-center gap-3 rounded-md px-3 text-sm text-status-critical hover:bg-accent"><LogOut className="h-4 w-4" />Log out</button></li>
           </ul>
         </SheetContent>

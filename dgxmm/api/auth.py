@@ -8,7 +8,7 @@ from dgxmm.auth.deps import COOKIE, Principal, current_principal, get_ctx
 from dgxmm.auth.passwords import DUMMY_HASH, hash_password, validate_new_password, verify_password
 from dgxmm.auth.sessions import create_session, delete_session, delete_user_sessions
 from dgxmm.context import AppContext
-from dgxmm.db import User
+from dgxmm.db import SsoIdentity, User
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
@@ -23,21 +23,38 @@ class ChangePasswordIn(BaseModel):
     new_password: str
 
 
-def user_out(u: User) -> dict:
-    return {"id": u.id, "username": u.username, "role": u.role, "must_change_pw": u.must_change_pw}
+def user_out(u: User, email: str | None = None) -> dict:
+    return {"id": u.id, "username": u.username, "role": u.role, "must_change_pw": u.must_change_pw,
+            "auth_source": u.auth_source or "local", "email": email}
 
 
-def _secure(request: Request, ctx: AppContext) -> bool:
+def sso_email(ctx: AppContext, user_id: int) -> str | None:
+    with ctx.db.session() as s:
+        ident = s.scalar(select(SsoIdentity).where(SsoIdentity.user_id == user_id))
+        return ident.email if ident else None
+
+
+def secure_cookie(request: Request, ctx: AppContext) -> bool:
     mode = ctx.settings.secure_cookies
     if mode != "auto":
         return mode == "always"
     return request.headers.get("x-forwarded-proto", request.url.scheme) == "https"
 
 
+def start_session(ctx: AppContext, request: Request, response: Response, user_id: int, ip: str) -> str:
+    """Create a session and set its cookie (password and SSO sign-ins alike); returns the CSRF token."""
+    token, csrf = create_session(ctx.db, user_id, ip, ctx.settings.session_ttl_s)
+    response.set_cookie(COOKIE, token, httponly=True, samesite="strict", secure=secure_cookie(request, ctx),
+                        max_age=ctx.settings.session_ttl_s, path=ctx.settings.base_path or "/")
+    return csrf
+
+
 @router.post("/login")
 def login(body: LoginIn, request: Request, response: Response, ctx: AppContext = Depends(get_ctx)):
     ip = request.client.host if request.client else "unknown"
     username = body.username.strip().lower()
+    if not ctx.settings.auth.local_login:
+        raise api_error(403, "local_login_disabled", "password sign-in is turned off; use single sign-on")
     ip_ok = ctx.login_limiter.hit(f"ip:{ip}")
     user_ok = ctx.login_limiter.hit(f"user:{username}")
     if not (ip_ok and user_ok):
@@ -45,15 +62,15 @@ def login(body: LoginIn, request: Request, response: Response, ctx: AppContext =
         raise api_error(429, "too_many_attempts", "too many login attempts; wait a minute")
     with ctx.db.session() as s:
         user = s.scalar(select(User).where(User.username == username))
-    if user is None:
+    if user is None or user.auth_source == "sso":  # SSO users have no password (same timing as unknown users)
         verify_password(DUMMY_HASH, body.password)
+        if user is not None:
+            audit(ctx.db, user.id, "login_failed", username, {"ip": ip, "reason": "sso_user"})
         raise api_error(401, "invalid_credentials", "wrong username or password")
     if not verify_password(user.pw_hash, body.password):
         audit(ctx.db, user.id, "login_failed", username, {"ip": ip})
         raise api_error(401, "invalid_credentials", "wrong username or password")
-    token, csrf = create_session(ctx.db, user.id, ip, ctx.settings.session_ttl_s)
-    response.set_cookie(COOKIE, token, httponly=True, samesite="strict", secure=_secure(request, ctx),
-                        max_age=ctx.settings.session_ttl_s, path=ctx.settings.base_path or "/")
+    csrf = start_session(ctx, request, response, user.id, ip)
     audit(ctx.db, user.id, "login", username, {"ip": ip})
     return {"user": user_out(user), "csrf_token": csrf}
 
@@ -67,13 +84,17 @@ def logout(request: Request, response: Response, p: Principal = Depends(current_
 
 
 @router.get("/me")
-def me(p: Principal = Depends(current_principal)):
-    return {"user": user_out(p.user), "csrf_token": p.session.csrf_token}
+def me(p: Principal = Depends(current_principal), ctx: AppContext = Depends(get_ctx)):
+    email = sso_email(ctx, p.user.id) if p.user.auth_source == "sso" else None
+    sso = {"email": email} if p.user.auth_source == "sso" else None
+    return {"user": user_out(p.user, email), "csrf_token": p.session.csrf_token, "sso": sso}
 
 
 @router.post("/change-password")
 def change_password(body: ChangePasswordIn, request: Request, p: Principal = Depends(current_principal),
                     ctx: AppContext = Depends(get_ctx)):
+    if p.user.auth_source == "sso":
+        raise api_error(409, "sso_managed", "this account signs in with single sign-on and has no DGXMM password")
     if not verify_password(p.user.pw_hash, body.current_password):
         raise api_error(401, "invalid_credentials", "current password is wrong")
     try:

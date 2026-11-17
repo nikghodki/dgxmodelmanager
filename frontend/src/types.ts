@@ -1,4 +1,10 @@
-export interface User { id: number; username: string; role: "admin" | "viewer"; must_change_pw: boolean }
+export interface User {
+  id: number; username: string; role: "admin" | "viewer"; must_change_pw: boolean;
+  /** "sso": signs in with OpenID Connect (no DGXMM password; the role follows the IdP). Older servers omit it. */
+  auth_source?: "local" | "sso"; email?: string | null;
+}
+/** GET /auth/config: what the login page offers. */
+export interface AuthConfig { local_login: boolean; oidc: { label: string; auto_redirect: boolean; login_path: string } | null }
 export interface DeploymentUsage { deployment_id: number; name: string; state: string; reserved: number; actual: number }
 export interface Budget {
   total: number; available: number; margin: number; os_reserve: number; usable: number; committed: number;

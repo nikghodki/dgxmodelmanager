@@ -8,9 +8,10 @@ SQLite tables (`dgxmm/db.py`):
 
 | Table | Contents |
 |---|---|
-| `users` | username, argon2id hash, role (`admin` / `viewer`), `must_change_pw` |
+| `users` | username, argon2id hash, role (`admin` / `viewer`), `must_change_pw`, `auth_source` (`NULL` / `local`: a password account; `sso`: created by single sign-on, with an unusable hash) |
+| `sso_identities` | the OpenID Connect identity of an SSO user: issuer and subject (unique together), email, last sign-in (deleted with the user) |
 | `cli_tokens` | SHA-256 of a short-lived admin CLI token, user, scope, expiry (deleted when the command ends) |
-| `sessions` | SHA-256 of the session token, user, CSRF token, client IP, expiry |
+| `sessions` | SHA-256 of the session token, user, CSRF token, client IP, expiry, creation time (SSO sessions end `auth.oidc.reauth_after_s` after it) |
 | `deployments` | name, engine, model reference, validated config, state, container id, port, priority, alias (the LiteLLM model name), reservation and estimate, LiteLLM status, last error, exit code, whether the last exit was an OOM kill (`oom_killed`), `system` (the decision model), `mode` (`on_demand` / `always_on`; `NULL` reads as always on) and `idle_timeout_s` (`NULL` = `ondemand_idle_timeout_s`, see [on-demand gateway](ondemand.md#data-model)). Ids are never reused (`AUTOINCREMENT`, migration 30). |
 | `app_settings` | runtime settings changed in the UI (key, value, updated at): the LiteLLM URLs, enabled flag, master key and the URL it is bound to; the decision model's `decider.*` settings |
 | `decisions` | one row per decision-model question: feature, subject, source (`rules` / `model` / `none`), choice, confidence, probabilities, latency, model and revision, SHA-256 of the input, error code, feedback (30 days / 50 000 rows) |

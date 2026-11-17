@@ -13,7 +13,8 @@ import { titleFor } from "./nav";
 import { ThemeToggle } from "./theme";
 
 export function TopBar({ onOpenPalette }: { onOpenPalette: () => void }) {
-  const { user, logout } = useAuth();
+  const { user, sso, logout } = useAuth();
+  const isSso = user?.auth_source === "sso";
   const nav = useNavigate();
   const { pathname } = useLocation();
   const t = titleFor(pathname);
@@ -44,9 +45,10 @@ export function TopBar({ onOpenPalette }: { onOpenPalette: () => void }) {
           </Button>
         </DropdownMenuTrigger>
         <DropdownMenuContent align="end" className="w-52">
-          <DropdownMenuLabel className="font-normal"><div className="text-sm font-medium">{user?.username}</div><div className="text-xs capitalize text-muted-foreground">{user?.role}</div></DropdownMenuLabel>
+          <DropdownMenuLabel className="font-normal"><div className="text-sm font-medium">{user?.username}</div><div className="text-xs capitalize text-muted-foreground">{user?.role}</div>
+            {isSso && <div className="mt-1 text-xs text-muted-foreground">Single sign-on{(sso?.email ?? user?.email) ? <> · <span className="break-all">{sso?.email ?? user?.email}</span></> : null}</div>}</DropdownMenuLabel>
           <DropdownMenuSeparator />
-          <DropdownMenuItem onSelect={() => nav("/change-password")}><KeyRound className="mr-2 h-4 w-4" />Change password</DropdownMenuItem>
+          {!isSso && <DropdownMenuItem onSelect={() => nav("/change-password")}><KeyRound className="mr-2 h-4 w-4" />Change password</DropdownMenuItem>}
           <DropdownMenuItem onSelect={() => logout()}><LogOut className="mr-2 h-4 w-4" />Log out</DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenu>

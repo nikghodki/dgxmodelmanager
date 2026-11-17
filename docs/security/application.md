@@ -10,6 +10,11 @@ residual risks) is in [security.md](../security.md).
 - **Authentication** (`auth/`): username and password with argon2id hashes. New passwords need at
   least 12 characters. For unknown users, login still verifies a dummy hash, so response timing does not reveal which usernames exist. Failed and rate-limited
   logins are audited.
+- **Single sign-on** (optional, `auth.oidc`): OpenID Connect Authorization Code with PKCE S256, `state`,
+  `nonce` and a browser-binding cookie; the ID token is fully validated against the IdP's JWKS and the role
+  comes from a claim at every sign-in (no mapped group: refused). SSO users (`users.auth_source = "sso"`,
+  identity in `sso_identities`) have no password, and their sessions end `reauth_after_s` after sign-in. See
+  [threat model: single sign-on](../security.md#single-sign-on-openid-connect).
 - **Sessions**: a random token in an HTTP-only, `SameSite=Strict` cookie `dgxmm_session` scoped to
   `/dgxmm`. Only its SHA-256 is stored. Sessions expire after `session_ttl_s` (12 h) of inactivity
   (the expiry slides on each request). The cookie is `Secure` when the request arrived over HTTPS
@@ -20,7 +25,8 @@ residual risks) is in [security.md](../security.md).
   token in `cli_tokens` (hashed), uses it over the admin unix socket only and deletes it afterwards. It
   is refused on the TCP port and on requests with forwarding headers, accepted only on the decider
   routes and the inventory refresh, and audited with `"via": "cli"`.
-- **Rate limiting**: 5 login attempts per 60 seconds, per client IP and per username; per-user limits on
+- **Rate limiting**: 5 login attempts per 60 seconds, per client IP and per username; 20 single sign-on
+  steps (start or callback) per 60 seconds per client IP; per-user limits on
   the decision-model routes (see [API limits](../configuration/decision-model.md#api-limits)).
 - **First login**: users created by bootstrap, by an admin or by a reset must change their password
   before any other API call.
@@ -30,7 +36,8 @@ residual risks) is in [security.md](../security.md).
   live container logs, the audit log, the adoptable-container list,
   delete previews (they contain host paths), LiteLLM API bases or virtual keys, and the UI hides the
   admin pages. `admin` is needed for every change. The last admin cannot be deleted or demoted.
-- **Audit**: logins (also failed and rate-limited ones), password changes, deploy, start, stop, remove,
+- **Audit**: logins (also failed and rate-limited ones), single sign-ons (`sso_login`, `sso_user_provisioned`,
+  `sso_role_changed`, `sso_login_denied`, `sso_login_failed`, `sso_rate_limited`), password changes, deploy, start, stop, remove,
   sleep, wake, switch and reconfigure (plus their failures), model name changes, adopt, downloads and
   cancellations, inventory rescans, weight deletions and clean-ups (also refused and failed ones),
   LiteLLM settings changes, syncs and virtual-key changes, benchmarks, user changes, watchdog stops,

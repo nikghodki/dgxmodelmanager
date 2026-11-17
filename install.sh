@@ -948,6 +948,9 @@ ensure_secrets() {
   else
     ensure_secret dgxmm_ondemand_key "sk-$(random_token 48)" "generated"
   fi
+  # OpenID Connect client secret (single sign-on, auth.oidc in config.yaml): an empty placeholder until you paste
+  # the secret your identity provider issued; compose needs the file to exist
+  ensure_secret oidc_client_secret "" ""
   local key="${LITELLM_MASTER_KEY:-}" source="from LITELLM_MASTER_KEY"
   if ((WITH_LITELLM)); then
     ensure_bundled_secrets
@@ -1338,7 +1341,7 @@ cmd_status() {
   done
   local with_litellm
   with_litellm=$(bool01 "$(env_file_get DGXMM_WITH_LITELLM || echo 0)") || with_litellm=0
-  local secret_names=(hf_token litellm_master_key dgxmm_ondemand_key admin_password)
+  local secret_names=(hf_token litellm_master_key dgxmm_ondemand_key oidc_client_secret admin_password)
   if [ "$with_litellm" = 1 ]; then secret_names+=(litellm_bundled_master_key litellm_salt_key litellm_db_password); fi
   for f in "${secret_names[@]}"; do
     if [ -s "$SECRETS_DIR/$f" ]; then note "secrets/$f: set"; else note "secrets/$f: not set"; fi

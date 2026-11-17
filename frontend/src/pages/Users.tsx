@@ -38,10 +38,12 @@ function UsersPage() {
 
   const columns = useMemo<ColumnDef<User, any>[]>(() => [
     { accessorKey: "username", header: "Username", cell: ({ row }) => <span className="flex items-center gap-2 font-medium">{row.original.username}
-      {row.original.id === me?.id && <Badge variant="secondary">you</Badge>}{row.original.must_change_pw && <Badge variant="outline" className="text-status-warning">must change password</Badge>}</span> },
+      {row.original.id === me?.id && <Badge variant="secondary">you</Badge>}
+      {row.original.auth_source === "sso" && <Badge variant="outline" title={row.original.email ? `Single sign-on: ${row.original.email}` : "Single sign-on"}>SSO</Badge>}
+      {row.original.auth_source === "sso" && row.original.email && <span className="hidden text-xs font-normal text-muted-foreground lg:inline">{row.original.email}</span>}{row.original.must_change_pw && <Badge variant="outline" className="text-status-warning">must change password</Badge>}</span> },
     { accessorKey: "role", header: "Role", cell: ({ row }) => (
-      <Select value={row.original.role} disabled={row.original.id === me?.id || patch.isPending} onValueChange={(r) => patch.mutate({ id: row.original.id, body: { role: r } })}>
-        <SelectTrigger className="h-8 w-28" aria-label={`Role for ${row.original.username}`}><SelectValue /></SelectTrigger>
+      <Select value={row.original.role} disabled={row.original.id === me?.id || row.original.auth_source === "sso" || patch.isPending} onValueChange={(r) => patch.mutate({ id: row.original.id, body: { role: r } })}>
+        <SelectTrigger className="h-8 w-28" aria-label={`Role for ${row.original.username}`} title={row.original.auth_source === "sso" ? "Set by the identity provider's groups at each sign-in" : undefined}><SelectValue /></SelectTrigger>
         <SelectContent><SelectItem value="viewer">Viewer</SelectItem><SelectItem value="admin">Admin</SelectItem></SelectContent>
       </Select>) },
   ], [me?.id, patch]);
@@ -57,7 +59,7 @@ function UsersPage() {
           <DropdownMenu>
             <DropdownMenuTrigger asChild><Button variant="ghost" size="icon" className="h-8 w-8" aria-label={`Actions for ${u.username}`}><MoreHorizontal className="h-4 w-4" /></Button></DropdownMenuTrigger>
             <DropdownMenuContent align="end">
-              <DropdownMenuItem onSelect={() => { setReset(u); setResetPw(""); }}><KeyRound className="mr-2 h-4 w-4" />Reset password</DropdownMenuItem>
+              {u.auth_source !== "sso" && <DropdownMenuItem onSelect={() => { setReset(u); setResetPw(""); }}><KeyRound className="mr-2 h-4 w-4" />Reset password</DropdownMenuItem>}
               {u.id !== me?.id && <DropdownMenuItem className="text-status-critical focus:text-status-critical" onSelect={() => setDel(u)}><Trash2 className="mr-2 h-4 w-4" />Delete</DropdownMenuItem>}
             </DropdownMenuContent>
           </DropdownMenu>

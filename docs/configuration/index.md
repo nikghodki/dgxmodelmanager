@@ -347,6 +347,7 @@ gateway. The two timeouts are the defaults; a deployment's own idle timeout (Mod
 | `session_ttl_s` | int | `43200` (12 h) | Login session lifetime. It is extended on every request. |
 | `secure_cookies` | `auto` / `always` / `never` | `auto` | `auto`: the cookie is `Secure` when the request is HTTPS (directly or via `X-Forwarded-Proto`). Use `always` behind an HTTPS proxy. |
 | `tz` | IANA zone or null | `null` | Time zone of daily/weekly schedules (background insight jobs, sleep/wake schedules), e.g. `Europe/Berlin`. Set from `DGXMM_TZ` in `.env`, which the installer detects from the host. `null`: `$TZ`, then `/etc/localtime`, then UTC. Across DST changes a time that does not exist runs just after the gap (02:30 becomes 03:30), and a time that occurs twice runs once, at its first occurrence. |
+| `auth.oidc.*` | mapping | off | Single sign-on with OpenID Connect: issuer, client id, role mapping, auto-redirect, password sign-in on or off. All keys are in the [single sign-on guide](../user-guide/single-sign-on.md#options). |
 | `trusted_proxies` | comma-separated IPs/CIDRs (or a YAML list) | `127.0.0.1,::1` | IPs/subnets trusted to set `X-Forwarded-For` (for correct client IPs in logs and rate limiting). Default is loopback-only; an empty value means the default. Set it to your proxy's IP or Docker network subnet, for example `172.18.0.0/16`. `*` trusts every client (logged as a warning; not recommended). Invalid entries stop DGXMM from starting. Peers on the decider's internal network (`decider_network`) are never trusted, even when a range here covers them. `DGXMM_TRUSTED_PROXIES` in `.env` overrides it. |
 
 ### Polling intervals
@@ -451,13 +452,15 @@ if the networks differ.
 ## Secrets
 
 `secrets/` has mode 700 and every file in it has mode 600. Compose mounts `hf_token`,
-`litellm_master_key` and `dgxmm_ondemand_key` into the `dgxmm` container at `/run/secrets/`.
+`litellm_master_key`, `dgxmm_ondemand_key` and `oidc_client_secret` into the `dgxmm` container at
+`/run/secrets/`.
 
 | File | Meaning |
 |---|---|
 | `secrets/hf_token` | Hugging Face token (optional; needed for gated repos). |
 | `secrets/litellm_master_key` | Master key of the LiteLLM DGXMM registers models with (optional). |
 | `secrets/dgxmm_ondemand_key` | Key LiteLLM uses to call DGXMM's [on-demand gateway](../architecture/ondemand.md). The installer generates it when it is missing or empty (`sk-` and 48 random letters and digits, about 286 bits) and never overwrites it. DGXMM puts it on the LiteLLM entries of on-demand deployments; you never enter it anywhere. |
+| `secrets/oidc_client_secret` | The OpenID Connect client secret for [single sign-on](../user-guide/single-sign-on.md) (optional). The installer creates it empty; DGXMM reads it at every sign-in, so a new secret written into it applies without a restart. Empty: a public client (PKCE only). |
 | `secrets/litellm_bundled_master_key` | Bundled LiteLLM only: its own master key. Mounted only into `dgxmm-litellm`. |
 | `secrets/litellm_salt_key` | Bundled LiteLLM only: encrypts credentials in its database. Never change it once set. |
 | `secrets/litellm_db_password` | Bundled LiteLLM only: Postgres password. |

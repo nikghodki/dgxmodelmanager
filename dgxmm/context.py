@@ -22,6 +22,10 @@ class AppContext:
     db: Database
     events: EventBroker
     login_limiter: SlidingWindowLimiter = field(default_factory=lambda: SlidingWindowLimiter(5, 60))
+    # single sign-on (dgxmm/api/sso.py): sign-in starts and callbacks per client IP; the IdP client and pending flows
+    sso_limiter: SlidingWindowLimiter = field(default_factory=lambda: SlidingWindowLimiter(20, 60))
+    oidc: Any = None        # dgxmm.auth.oidc.OidcClient, created on first use
+    oidc_flows: Any = None  # dgxmm.auth.oidc.FlowStore, created on first use
     inventory: Any = None
     budget: Any = None
     deployer: Any = None

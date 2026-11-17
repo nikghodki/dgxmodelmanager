@@ -150,6 +150,78 @@ class Images(BaseModel):
     decision: str = "dgxmm-decider:3"
 
 
+OIDC_PATH = re.compile(r"^(/[A-Za-z0-9._~-]+)+$")
+OIDC_CLAIM = re.compile(r"^[A-Za-z0-9_:/.-]{1,128}$")
+
+
+class OidcRoleMapping(BaseModel):
+    """Which values of an ID token claim (a list or a single string) map to DGXMM's roles. A user whose claim holds
+    none of them is refused; one in both lists is an admin."""
+    claim: str = Field("groups", pattern=OIDC_CLAIM.pattern)  # a dotted path reads a nested claim (realm_access.roles)
+    admin: list[str] = []
+    viewer: list[str] = []
+
+
+class OidcSettings(BaseModel):
+    """OpenID Connect sign-in (dgxmm/auth/oidc.py, docs/user-guide/single-sign-on.md). Off by default."""
+    enabled: bool = False
+    issuer: str = ""  # exact issuer URL; discovery at <issuer>/.well-known/openid-configuration
+    client_id: str = ""
+    # read at every code exchange (rotation needs no restart); a missing or empty file = a public client (PKCE only)
+    client_secret_file: str = "/run/secrets/oidc_client_secret"
+    redirect_path: str = "/api/auth/oidc/callback"  # under base_path: register <public_url><base_path><this>
+    # external origin users reach DGXMM at (https://dgx.example.com). Empty: the request's scheme and Host header
+    public_url: str = ""
+    scopes: list[str] = ["openid", "email", "profile", "groups"]
+    ca_bundle: str | None = None  # PEM file that replaces the system CA store for calls to the IdP
+    button_label: str = Field("Sign in with SSO", min_length=1, max_length=64)
+    role_mapping: OidcRoleMapping = Field(default_factory=OidcRoleMapping)
+    auto_provision: bool = True  # create the DGXMM user at the first sign-in (else only users that exist may sign in)
+    auto_redirect: bool = False  # the login page goes straight to the IdP (?local=1 shows the password form)
+    local_login: bool = True     # password sign-in stays available (break-glass); only off when OIDC is on
+    timeout_s: float = Field(10.0, gt=0, le=60)
+    # an SSO session ends this long after its sign-in, however active (the role is re-read at every sign-in)
+    reauth_after_s: int = Field(12 * 3600, ge=300)
+
+    @field_validator("issuer", "public_url")
+    @classmethod
+    def _strip(cls, v: str) -> str:
+        return (v or "").strip()
+
+    @model_validator(mode="after")
+    def _check(self) -> "OidcSettings":
+        if not self.enabled:
+            return self
+        parts = urlsplit(self.issuer)
+        if parts.scheme != "https" or not parts.hostname or parts.query or parts.fragment or parts.username:
+            raise ValueError("auth.oidc.issuer must be an https:// URL without credentials, query or fragment")
+        if not self.client_id.strip():
+            raise ValueError("auth.oidc.client_id is required")
+        if self.public_url:
+            self.public_url = validate_http_url(self.public_url, "auth.oidc.public_url")
+            if urlsplit(self.public_url).path not in ("", "/"):
+                raise ValueError("auth.oidc.public_url is an origin (scheme and host), without a path")
+        if not OIDC_PATH.fullmatch(self.redirect_path) or "/../" in self.redirect_path + "/":
+            raise ValueError("auth.oidc.redirect_path must be an absolute path such as /api/auth/oidc/callback")
+        if "openid" not in self.scopes:
+            raise ValueError("auth.oidc.scopes must include openid")
+        if any(not re.fullmatch(r"[\x21\x23-\x5b\x5d-\x7e]+", s) for s in self.scopes):
+            raise ValueError("auth.oidc.scopes: invalid scope")
+        if not (self.role_mapping.admin or self.role_mapping.viewer):
+            raise ValueError("auth.oidc.role_mapping needs at least one admin or viewer value (everyone else is "
+                             "refused)")
+        return self
+
+
+class AuthSettings(BaseModel):
+    oidc: OidcSettings = Field(default_factory=OidcSettings)
+
+    @property
+    def local_login(self) -> bool:
+        """Password sign-in is on unless OIDC is on and configured to turn it off (never a lock-out)."""
+        return self.oidc.local_login or not self.oidc.enabled
+
+
 class Settings(BaseModel):
     base_path: str = "/dgxmm"
     # data_dir also holds data/litellm-db, the bundled LiteLLM's live Postgres (owned by Postgres, not
@@ -256,6 +328,7 @@ class Settings(BaseModel):
     helper_image: str | None = None  # image for root delete helpers; None → this container's image, else dgxmm:latest
     helper_timeout_s: float = 120.0
     session_ttl_s: int = 12 * 3600
+    auth: AuthSettings = Field(default_factory=AuthSettings)  # auth.oidc: single sign-on (OidcSettings)
     secure_cookies: str = "auto"  # auto | always | never
     trusted_proxies: str = "127.0.0.1,::1"  # IPs/CIDRs that may set X-Forwarded-For
     nodes: list[NodeConfig] = []

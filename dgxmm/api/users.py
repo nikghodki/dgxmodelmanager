@@ -11,7 +11,7 @@ from dgxmm.auth.deps import Principal, current_principal, get_ctx, require_admin
 from dgxmm.auth.passwords import hash_password, validate_new_password
 from dgxmm.auth.sessions import delete_user_sessions
 from dgxmm.context import AppContext
-from dgxmm.db import User
+from dgxmm.db import SsoIdentity, User
 
 router = APIRouter(prefix="/api/users", tags=["users"])
 USERNAME = r"^[a-z0-9_.-]{3,32}$"
@@ -31,7 +31,8 @@ class UserPatch(BaseModel):
 @router.get("")
 def list_users(p: Principal = Depends(require_admin), ctx: AppContext = Depends(get_ctx)):
     with ctx.db.session() as s:
-        return [user_out(u) for u in s.scalars(select(User).order_by(User.username))]
+        emails = {i.user_id: i.email for i in s.scalars(select(SsoIdentity))}
+        return [user_out(u, emails.get(u.id)) for u in s.scalars(select(User).order_by(User.username))]
 
 
 @router.post("", status_code=201)
@@ -61,6 +62,10 @@ def update_user(user_id: int, body: UserPatch, p: Principal = Depends(require_ad
         u = s.get(User, user_id)
         if u is None:
             raise api_error(404, "not_found", "no such user")
+        if u.auth_source == "sso" and ((body.role and body.role != u.role) or body.password):
+            # the IdP's claim sets the role at every sign-in, and there is no password to reset
+            raise api_error(409, "sso_managed", "this user signs in with single sign-on: change their groups at "
+                                                "the identity provider")
         if body.role and body.role != u.role:
             if u.role == "admin" and _admin_count(s) <= 1:
                 raise api_error(409, "last_admin", "cannot demote the last admin")

@@ -15,8 +15,8 @@ risk remains. It covers the whole application and, in more detail, the decision 
 | Asset | Where | Why it matters |
 |---|---|---|
 | Host control | Docker socket mounted into `dgxmm` | Starting containers is root-equivalent on the host |
-| User accounts and sessions | `data/dgxmm.sqlite3` (`users`, `sessions`) | Admin sessions can deploy, stop and delete |
-| Secrets | `secrets/` (HF token, LiteLLM keys, the on-demand gateway key), `app_settings` (LiteLLM master key), `data/secrets/decider_api_key` | Access to gated models, the LiteLLM proxy, the decider |
+| User accounts and sessions | `data/dgxmm.sqlite3` (`users`, `sessions`, `sso_identities`) | Admin sessions can deploy, stop and delete |
+| Secrets | `secrets/` (HF token, LiteLLM keys, the on-demand gateway key, the OIDC client secret), `app_settings` (LiteLLM master key), `data/secrets/decider_api_key` | Access to gated models, the LiteLLM proxy, the decider |
 | Model weights and caches | HF cache, GGUF roots | Large, slow to replace; their code (remote code, `d3_server.py`) runs in containers |
 | Running deployments | engine containers | Users depend on them; memory is shared (GB10 unified memory) |
 | Decision log, diagnoses | `decisions`, `diagnoses`, `artifact_kinds` tables | Must not leak secrets that appear in engine logs |
@@ -27,7 +27,8 @@ risk remains. It covers the whole application and, in more detail, the decision 
 |---|---|
 | DGXMM admin | Trusted with root (the Docker socket). Every change needs this role. |
 | DGXMM viewer | Read-only; must not change anything or see secrets, the live container logs, users or host paths. Viewers do see the **redacted log tails** stored with failed deployments (Events tab) and the redacted excerpt of a diagnosis: the same redaction as the admin log view (see [residual risks](#residual-risks)). |
-| Anonymous network client | Can reach the login page only. |
+| Anonymous network client | Can reach the login page only, and start a single sign-on (which ends at the IdP). |
+| OpenID Connect identity provider (IdP, optional) | Trusted to say who a user is and which groups they are in, for its own issuer only: whoever controls the IdP (or its signing key) can sign in as any admin it chooses. Not trusted beyond that: its responses are validated and size-capped (see [single sign-on](#single-sign-on-openid-connect)). |
 | Other containers on the shared engine network (`docker_network`, e.g. LiteLLM, nginx, TTS) | Not trusted with DGXMM's secrets. They can reach engine ports on that network, and DGXMM's on-demand gateway up to its key check (see [on-demand gateway](#on-demand-gateway)). |
 | Other local users and processes on the host | Not trusted. They can reach ports published on the host. |
 | Model repositories (config.json, chat templates, model cards, custom code) and everything an engine writes to its log | **Untrusted input.** A repository author controls most of it. |
@@ -38,7 +39,8 @@ The HF cache is therefore a trust boundary: nothing in it is trusted as code by 
 private, hash-verified copies of its pinned files (see [container](#container): Integrity); the weights it reads
 from the cache are checked against the pinned manifest but the large shards only by size.
 
-Boundaries: browser ↔ DGXMM API (authentication, CSRF, roles); DGXMM ↔ Docker daemon (container guard);
+Boundaries: browser ↔ DGXMM API (authentication, CSRF, roles); DGXMM ↔ identity provider (single sign-on:
+exact issuer, signed ID tokens, PKCE, registered redirect URI); DGXMM ↔ Docker daemon (container guard);
 DGXMM ↔ engine containers (engine network); LiteLLM ↔ on-demand gateway (Docker-network peers only + bearer key); DGXMM ↔ decider (internal network + bearer key); untrusted
 text ↔ decider prompt (quoted state blocks, redaction, closed option sets); decider answer ↔ any change
 (advisory only, admin confirmation).
@@ -58,6 +60,32 @@ Summary (details in [architecture](security/application.md)):
   log view (`GET /api/deployments/{id}/logs`) is redacted line by line (`memory/redact.py: redact_log`, which also
   masks multi-line PEM private keys, and runs of three or more base64 key lines whose BEGIN line a tail cut off) —
   engines can echo tokens, `Authorization` headers and URL credentials.
+
+## Single sign-on (OpenID Connect)
+
+Optional, off by default (`auth.oidc`, [user guide](user-guide/single-sign-on.md)); code in `dgxmm/auth/oidc.py`
+and `dgxmm/api/sso.py`. It adds one trust boundary, DGXMM ↔ the IdP, and two unauthenticated routes:
+`GET /api/auth/oidc/login` (start) and the callback (`auth.oidc.redirect_path`). Both answer only with redirects
+and are rate limited per client IP (20 a minute, with an audited `sso_rate_limited`).
+
+| Threat | Control |
+|---|---|
+| Stolen or injected authorization code | Authorization Code flow with **PKCE S256**: the 256-bit verifier never leaves DGXMM, and the code is useless without it. The code goes to the token endpoint over TLS together with the client secret (`client_secret_basic`, or `client_secret_post` when the IdP supports only that), and the redirect URI must match the one in the request. |
+| Login CSRF (a victim's browser completes the attacker's sign-in) | A pending sign-in is bound to the browser that started it: a random `dgxmm_oidc` cookie (HttpOnly, `SameSite=Lax` so it comes back on the IdP's redirect, 10 minutes, path `/dgxmm/api/auth/oidc`), whose SHA-256 the flow keeps. A callback without that cookie fails. |
+| Replayed or forged callback | `state` is 256 bits, kept server-side as its SHA-256 only (in memory, at most 512 pending, 10 minutes) and removed at first use, so a second callback with the same `state` fails. RFC 9207: the response's `iss` must be the configured issuer, and is required when the IdP announces it (mix-up defence). |
+| Forged or replayed ID token | The signature is checked against the IdP's JWKS (fetched over TLS, cached 1 h; an unknown `kid` refetches at most once a minute, so key rotation works and a flood of bad tokens does not hammer the IdP). Only asymmetric algorithms are accepted (RS*, PS*, ES*, EdDSA; never `none` or HMAC, which would allow algorithm confusion), and the key type must match the algorithm. `iss` must equal the issuer, `aud` the client id (`azp` too when there are several audiences), `exp`, `iat` (60 s leeway; issued at most 10 minutes ago) and `nonce` (256 bits, per sign-in, compared in constant time). |
+| A malicious or compromised discovery document | Its `issuer` must equal `auth.oidc.issuer` exactly, its authorization, token and JWKS endpoints must be `https`, PKCE S256 must be supported, redirects are not followed, and every response is capped at 1 MiB. `ca_bundle` pins the IdP to a private CA if you set it. |
+| Open redirect after sign-in | `return_to` is only ever a UI path: an absolute path without scheme, host, `//`, backslash, dot segments, encoded separators or control characters, and never the login page, `/api/` or `/ondemand/`. Anything else becomes `/`. The redirect always goes to `<base_path><path>` on DGXMM's own origin. |
+| Redirect URI tampering | The redirect URI is `public_url` + base path + `redirect_path`. Without `public_url`, a forged `Host` header only yields a URI the IdP has not registered, so the IdP refuses it. |
+| Account takeover through the IdP | SSO users are keyed by issuer + `sub`, never matched to existing accounts by username or email. An SSO user has no usable password (`pw_hash` is not an argon2 hash): password sign-in is refused with the same timing as an unknown user. Admins can't set a password or a role for an SSO user. |
+| Lost group membership keeps access | The role is read from the claim at every sign-in: no mapped value means refused (audited `sso_login_denied`), and that user's sessions are ended. An SSO session also ends `reauth_after_s` (12 h) after its sign-in, however active, and every SSO session ends when OIDC is turned off. |
+| Secrets in logs | Codes, tokens, `state`, `nonce`, the verifier and the client secret are never logged or audited. uvicorn's access-log line of the callback drops its query string. The client secret is a file (`secrets/oidc_client_secret`, mode 600, a compose secret) read at each exchange. |
+| Lock-out | `local_login` (password sign-in, so the local `admin` is break-glass) stays on by default and is always on while OIDC is off. The admin CLI does not depend on either. |
+
+A successful sign-in creates an ordinary session (`start_session`): the same `SameSite=Strict`, HTTP-only cookie,
+`Secure` behind an HTTPS proxy, the same TTL and CSRF token as a password sign-in. Audited: `sso_login`,
+`sso_user_provisioned`, `sso_role_changed`, `sso_login_denied`, `sso_login_failed` (with a reason code),
+`sso_rate_limited`.
 
 ### Untrusted text and the event loop
 
@@ -579,7 +607,15 @@ Per user and per minute, and for all users together where a second number is giv
   Keep untrusted containers off that network, and rotate the key (see
   [configuration](configuration/index.md#secrets)) if LiteLLM's database was exposed.
 - **Rate limits are per process and in memory**: they reset on restart and are not shared between instances
-  (DGXMM runs as a single instance).
+  (DGXMM runs as a single instance). The same holds for pending single sign-ons: a restart during a sign-in
+  makes its callback fail (*expired or was already used*), and the user starts again.
+- **The IdP is trusted for its users.** Whoever controls the IdP, its admin account or its signing key can sign
+  in to DGXMM as an admin by putting an identity in an admin group. Protect the IdP like the DGXMM admin role
+  (root on the host). DGXMM does not revoke a session when the IdP does: removed groups take effect at the next
+  sign-in or after `reauth_after_s` at the latest, and an admin can delete the user to end their sessions at once.
+- **The callback URL in proxy logs.** The authorization code and `state` travel in the callback's query
+  string, which a reverse proxy in front of DGXMM may log. The code is single use, expires within minutes and
+  is useless without the PKCE verifier, which never leaves DGXMM; still, keep proxy logs private.
 - **Decision-log churn from viewers.** Viewers' model consultations (compat checks the rules cannot answer) are
   still logged, within the all-user caps (120 per minute per bucket). Feedback rows cannot be pushed out (they are
   exempt from the row cap), but at the caps the newest-50 000 window of other rows turns over in hours, so
@@ -606,7 +642,10 @@ loop), `tests/test_decider_output_validation.py` (answer validation, reply size 
 (decider network never a proxy), `tests/test_stream_topics.py` (SSE topics by role), `tests/test_ondemand_gateway.py`
 (peer guard, explicit allowed ranges through the production wiring, forwarding headers, path checks,
 endpoint allowlist, key, rotation without a restart and rate limit, nothing logged),
-`tests/test_litellm_ondemand.py` (entry parameters and timeouts that follow the queue limit, key fingerprint
+`tests/test_oidc.py` (single sign-on against a fake IdP: PKCE, state replay, browser binding, `iss` parameter,
+expired, wrong-audience, wrong-issuer, wrong-nonce, too old, unsigned, HMAC and wrong-key tokens, JWKS rotation and
+throttling, discovery checks, role mapping and denial, session end after a lost group, `return_to`, auto-provision,
+rate limit, nothing secret logged), `tests/test_litellm_ondemand.py` (entry parameters and timeouts that follow the queue limit, key fingerprint
 and rotation, key never logged).
 
 Manual, on the DGX (throwaway containers; the recorded results follow below):

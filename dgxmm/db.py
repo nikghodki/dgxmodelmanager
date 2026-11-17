@@ -34,6 +34,21 @@ class User(Base):
     role: Mapped[str] = mapped_column(String(16))  # admin | viewer
     must_change_pw: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    # None / "local": a password account. "sso": created by an OpenID Connect sign-in (dgxmm/auth/oidc.py); its
+    # pw_hash is unusable, its role follows the IdP's claim at every sign-in, and its identity is in sso_identities.
+    auth_source: Mapped[str | None] = mapped_column(String(16), nullable=True)
+
+
+class SsoIdentity(Base):
+    """The OpenID Connect identity (issuer + subject) of an SSO user. Never matched by username or email."""
+    __tablename__ = "sso_identities"
+    __table_args__ = (UniqueConstraint("issuer", "subject", name="uq_sso_identity"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), unique=True)
+    issuer: Mapped[str] = mapped_column(String(512))
+    subject: Mapped[str] = mapped_column(String(255))
+    email: Mapped[str] = mapped_column(String(320), default="")
+    last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class UserSession(Base):
@@ -43,6 +58,8 @@ class UserSession(Base):
     csrf_token: Mapped[str] = mapped_column(String(64))
     ip: Mapped[str] = mapped_column(String(64), default="")
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    # when the session was created (sign-in time); SSO sessions end auth.oidc.reauth_after_s after it
+    created_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, default=utcnow)
 
 
 class CliToken(Base):

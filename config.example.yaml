@@ -129,6 +129,24 @@ litellm_url: http://litellm-proxy:4000
 #                                  # Default is loopback-only; set to your reverse proxy IP/subnet.
 #                                  # DGXMM_TRUSTED_PROXIES in .env, when set, wins over this value.
 
+# --- Single sign-on (OpenID Connect; docs/user-guide/single-sign-on.md) ------------------
+# auth:
+#   oidc:
+#     enabled: false
+#     issuer: https://id.example.com      # exact issuer; https only
+#     client_id: dgxmm
+#     # client secret: secrets/oidc_client_secret (empty file = public client, PKCE only)
+#     public_url: https://dgx.example.com # origin browsers use; redirect URI = <public_url>/dgxmm/api/auth/oidc/callback
+#     button_label: Sign in with SSO
+#     role_mapping:                       # claim values -> DGXMM role; everyone else is refused
+#       claim: groups
+#       admin: [dgxmm-admins]
+#       viewer: [dgxmm-viewers]
+#     auto_provision: true                # create the DGXMM user at the first sign-in
+#     auto_redirect: false                # skip the login page (/dgxmm/login?local=1 shows the password form)
+#     local_login: true                   # keep password sign-in (the local admin is break-glass)
+#     # ca_bundle: /app/data/certs/idp-ca.pem   # private CA of the IdP (PEM, under data/)
+
 # --- Polling intervals (seconds) ----------------------------------------------------------
 # monitor_poll_s: 3           # deployment state checks while starting/stopping
 # budget_interval_s: 2        # memory budget refresh (drives the live UI and the watchdog)
