@@ -224,7 +224,7 @@ describe("DeployWizard — parser suggestions", () => {
     renderWizard();
     expect(await screen.findByText("Suggested: hermes · 92% · AI")).toBeInTheDocument();
     expect(sugCalls()[0][1]).toEqual({ method: "POST", body: { model_ref: "org/model-a", engine: "vllm" } });
-    expect(screen.getByLabelText("Tool-call parser")).toHaveValue("hermes");
+    await waitFor(() => expect(screen.getByLabelText("Tool-call parser")).toHaveValue("hermes"));
     expect(screen.getByText(/Filled automatically/)).toBeInTheDocument();
     await waitFor(() => expect(previews.some((b) => b.config.tool_call_parser === "hermes")).toBe(true));
     // no reasoning-parser suggestion → no chip for it
