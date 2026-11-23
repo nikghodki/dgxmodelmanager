@@ -26,7 +26,8 @@ Open **Deploy model** (Dashboard, Deployments, or the command palette). It needs
    shared KV pool size, prefix caching, sleep mode, **Speculative decoding** and so on. Advanced options
    include tool-call and reasoning parsers, trust_remote_code, the served model name, and allowlisted
    extra flags. The suggestions in this step (suggested config, engine, parsers, draft model, code scan)
-   are described in [deploy-time advice](#deploy-time-advice).
+   are described in [deploy-time advice](#deploy-time-advice). **Engine image** appears when the host's
+   `config.yaml` allows images besides the engine's default: see [engine images](#engine-images).
 4. **Where to run** (when multiple nodes are configured): DGXMM shows placement options with their
    per-node memory need and whether each fits. Options are single nodes (dgx-1, dgx-2) and the cluster
    (dgx-1 + dgx-2). One is marked **Recommended**: the single node with the most free memory if the model
@@ -76,6 +77,30 @@ After **Deploy** you land on the deployment's page. It moves through *Starting* 
 An on-demand deployment starts right away too, and is put to sleep once it has been idle for its timeout.
 The first vLLM start of a model can take several minutes, because it compiles kernels (cached for later
 starts) and may pull the engine image.
+
+## Engine images
+
+Every vLLM deployment runs `images.vllm` and every llama.cpp deployment `images.llamacpp` unless the host owner
+allows other images in `config.yaml`, for example a vLLM build that knows a model architecture the default image
+does not:
+
+```yaml
+images:
+  vllm_allowed:
+    - vllm/vllm-openai:new-model@sha256:<digest of that build>
+```
+
+Then the deploy wizard and the **Switch** / **Reconfigure** dialogs show an **Engine image** select (*Default* and
+each allowed image) and the choice is stored in the deployment's config as `image`; the API takes the same
+`config.image`. Only images on the engine's own list are accepted (`422 image_not_allowed` otherwise, also for an
+image allowed for the other engine), each entry must be pinned by digest, and the choice is kept by every
+restart, on-demand wake, switch and reconfigure. If a model's architecture is only known to an allowed image,
+deploying it on the default image is refused with the images that can serve it. A chosen image is for single-node
+deployments only (`422 image_single_node_only` for a cluster). The image is pulled on the node that runs the
+deployment when it is missing there, with a *pulling image …* event (large images are best pulled beforehand with
+`docker pull` on that node); a failed pull fails the deployment with `image_pull_failed` and the reason. Removing
+an image from the list does not stop deployments that run it, but they no longer start until their config names
+an allowed image. Why the list lives in `config.yaml` only: [security](../security.md#engine-images).
 
 ## Deploy-time advice
 

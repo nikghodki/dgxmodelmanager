@@ -7,8 +7,8 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useActionMutation } from "@/hooks/use-action-mutation";
 import { submitState } from "@/logic";
-import type { Artifact, Deployment, PlanAction, Preview } from "@/types";
-import { ConfigForm } from "./config-form";
+import type { Artifact, Deployment, EngineInfo, PlanAction, Preview } from "@/types";
+import { ConfigForm, imageChoice } from "./config-form";
 import { EstimatePanel } from "./estimate-panel";
 import { ModelSelect } from "./model-select";
 import { useParserSuggestions } from "./parser-suggestions";
@@ -29,6 +29,7 @@ export function SwitchDialog({ mode, deployment, initialPatch, patchSource = "th
   const { model_ref: _patchRef, ...patchFields } = initialPatch ?? {};
   const patchKeys = Object.keys(patchFields);
   const inv = useQuery({ queryKey: ["inventory"], queryFn: () => api<Artifact[]>("/inventory") });
+  const engines = useQuery({ queryKey: ["engines"], queryFn: () => api<EngineInfo[]>("/engines") });
   const [ref, setRef] = useState<string>(initialPatch?.model_ref ?? deployment.model_ref);
   // A null in the patch means "remove this setting" (e.g. drop a bad parser): delete the key rather than send null.
   const [config, setConfig] = useState<Record<string, any>>(() => {
@@ -107,7 +108,8 @@ export function SwitchDialog({ mode, deployment, initialPatch, patchSource = "th
               </ul>
             </div>
           )}
-          <ConfigForm engine={deployment.engine} value={config} onChange={(c) => { parsers.noteChange(config, c); setConfig(c); setPlan(null); }} showAdvanced={advanced} hints={parsers.hints} alwaysShow={patchKeys} />
+          <ConfigForm engine={deployment.engine} value={config} onChange={(c) => { parsers.noteChange(config, c); setConfig(c); setPlan(null); }} showAdvanced={advanced} hints={parsers.hints} alwaysShow={patchKeys}
+            images={imageChoice(engines.data, deployment.engine)} />
           <Button variant="link" className="h-auto p-0 text-xs" onClick={() => setAdvanced(!advanced)}>{advanced ? "Hide" : "Show"} advanced settings</Button>
           <p className="text-xs text-muted-foreground">If the new deployment fails to become ready, DGXMM rolls back automatically.</p>
         </div>

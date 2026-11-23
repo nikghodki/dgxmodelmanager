@@ -176,7 +176,7 @@ class DecisionEngine:
     def validate_config(self, raw: dict[str, Any]) -> DecisionConfig:
         return DecisionConfig.model_validate(raw)
 
-    def supports(self, artifact: ModelArtifact) -> bool:
+    def supports(self, artifact: ModelArtifact, image: str | None = None) -> bool:
         return (artifact.source == "hf" and artifact.ref in ALLOWED_MODELS
                 and artifact.revision == ALLOWED_MODELS[artifact.ref])
 

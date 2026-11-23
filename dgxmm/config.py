@@ -134,6 +134,14 @@ def _default_vllm_cache_mounts() -> list[Mount]:
     ]
 
 
+# An image reference as engine configs may name it (``image``): [registry[:port]/]repository[:tag][@sha256:digest].
+IMAGE_REF = (r"^(?:[a-z0-9][a-z0-9.-]{0,252}(?::[0-9]{1,5})?/)?[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*"
+             r"(?:/[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*){0,8}(?::[A-Za-z0-9_][A-Za-z0-9_.-]{0,127})?"
+             r"(?:@sha256:[0-9a-f]{64})?$")
+# ... and one pinned by digest (the only kind an allowlist accepts)
+PINNED_IMAGE = re.compile(IMAGE_REF[:-len(r"(?:@sha256:[0-9a-f]{64})?$")] + r"@sha256:[0-9a-f]{64}$")
+
+
 class Images(BaseModel):
     vllm: str = "vllm/vllm-openai@sha256:22d3b1217fda569653f32f1e00a2a4e64119c1601c67ff94cc72d7ca5ef352c8"
     # llama.cpp build b11669 (server-cuda-b11669; multi-arch manifest list, arm64 + amd64). To update: see
@@ -148,6 +156,26 @@ class Images(BaseModel):
     # built locally from deploy/decider (never pulled). Bump the tag when the image's contract with the app changes
     # (2: non-root, read-only rootfs, key delivered as a file): an older image is then "missing" and gets rebuilt.
     decision: str = "dgxmm-decider:3"
+    # Images a single-node deployment may run instead of `vllm` / `llamacpp`: its engine config's `image` must be
+    # one of these (docs/security.md, "Engine images"). Choosing an image is choosing the code that runs with the
+    # GPU and the HF cache, so the list is config.yaml's (the host owner's), never the API's, and every entry is
+    # pinned by digest: a tag can be moved to other code after it was allowed. Empty (the default): every
+    # deployment runs the default image.
+    vllm_allowed: list[str] = []
+    llamacpp_allowed: list[str] = []
+
+    @field_validator("vllm_allowed", "llamacpp_allowed")
+    @classmethod
+    def _pinned(cls, v: list[str]) -> list[str]:
+        for ref in v:
+            if not PINNED_IMAGE.fullmatch(ref):
+                raise ValueError(f"allowed engine image {ref!r} must be pinned by digest: "
+                                 "<repository>[:<tag>]@sha256:<64 hex digits>")
+        return list(dict.fromkeys(v))
+
+    def allowed(self, engine: str) -> list[str]:
+        """The images a deployment of ``engine`` may choose (none for an engine without an allowlist)."""
+        return list(getattr(self, f"{engine}_allowed", None) or [])
 
 
 OIDC_PATH = re.compile(r"^(/[A-Za-z0-9._~-]+)+$")

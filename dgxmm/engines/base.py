@@ -96,6 +96,19 @@ REMOTE_NETWORK = "bridge"  # a remote node's default Docker network: DGXMM's own
 HF_TARGET = "/root/.cache/huggingface"
 
 
+def engine_image(settings: Settings, engine: str, chosen: str | None) -> str:
+    """The image a deployment of ``engine`` runs: the default ``images.<engine>``, or the image its config chose
+    (``image``) when that is on ``images.<engine>_allowed``. A chosen image that is not (or no longer) allowed is
+    refused, never silently replaced by the default: the deployment would run code its admin did not pick."""
+    default = getattr(settings.images, engine)
+    if not chosen or chosen == default:
+        return default
+    if chosen not in settings.images.allowed(engine):
+        raise SpecError("image_not_allowed", f"engine image {chosen} is not allowed for {engine} deployments: "
+                                             f"add it to images.{engine}_allowed in config.yaml")
+    return chosen
+
+
 def remote_hf_mount(settings: Settings, node_id: str) -> tuple[Mount, str]:
     """(read-only mount of the remote node's HF cache, the node's publish address). Only the node's own HF cache is
     mounted there: the local node's other host paths (e.g. vllm_cache_mounts) do not exist on it."""
@@ -116,7 +129,7 @@ class Engine(Protocol):
     seqs_key: str
 
     def validate_config(self, raw: dict[str, Any]) -> BaseModel: ...
-    def supports(self, artifact: ModelArtifact) -> bool: ...
+    def supports(self, artifact: ModelArtifact, image: str | None = None) -> bool: ...
     def draft_ref(self, cfg: Any) -> str | None: ...
     def served_name(self, cfg: Any, model_ref: str) -> str: ...
     def sleep_enabled(self, cfg: Any) -> bool: ...

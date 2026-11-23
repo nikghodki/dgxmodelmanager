@@ -36,8 +36,8 @@ from dgxmm.planner.plans import base_model_name
 
 log = logging.getLogger(__name__)
 FEATURE = "draft"
-METHODS = ("draft_model", "eagle", "eagle3", "dflash", "mtp", "ngram")
-NO_DRAFT = ("mtp", "ngram")
+METHODS = ("draft_model", "eagle", "eagle3", "dflash", "dspark", "mtp", "ngram")
+NO_DRAFT = ("dspark", "mtp", "ngram")  # dspark, mtp: the drafter is in the target checkpoint
 HEAD_METHODS = ("eagle", "eagle3", "dflash")
 IDEAL_RATIO = 0.08  # draft size / target size the rules order prefers (fast, still a good guesser)
 TOKENIZER_FILES = ("tokenizer.json", "tokenizer.model", "vocab.json")

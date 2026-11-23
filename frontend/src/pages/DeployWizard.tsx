@@ -4,7 +4,7 @@ import { Navigate, useNavigate, useSearchParams } from "react-router-dom";
 import { Loader2 } from "lucide-react";
 import { ApiError, api } from "@/api";
 import { useIsAdmin } from "@/auth";
-import { ConfigForm } from "@/components/app/config-form";
+import { ConfigForm, imageChoice } from "@/components/app/config-form";
 import { EstimatePanel } from "@/components/app/estimate-panel";
 import { ModelSelect } from "@/components/app/model-select";
 import { ModeFields, ONDEMAND_NEEDS_LITELLM, idleInvalid, useIdleDefaultMinutes, useOnDemandReady } from "@/components/app/mode-fields";
@@ -285,7 +285,8 @@ function DeployWizardPage() {
                   <ConfigAdviceCard modelRef={ref} engine={engine} goal={goal} config={config} touched={touched}
                     fits={preview ? preview.fit.fits : null} onFill={(c) => { setConfig(c); setPlan(null); }} />
                 </div>
-                <ConfigForm engine={engine} value={config} onChange={userEdit} showAdvanced={advanced} hints={parsers.hints} />
+                <ConfigForm engine={engine} value={config} onChange={userEdit} showAdvanced={advanced} hints={parsers.hints}
+                  images={imageChoice(engines.data, engine)} />
                 {engine === "vllm" && (
                   <div className="mt-4"><SpeculativeField modelRef={ref} value={config.speculative} drafts={inv.data ?? []}
                     onChange={(v) => { const { speculative: _old, ...rest } = config; userEdit(v ? { ...rest, speculative: v } : rest); }} /></div>

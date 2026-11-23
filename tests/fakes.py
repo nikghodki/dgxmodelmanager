@@ -118,6 +118,12 @@ class FakeImages:
         from types import SimpleNamespace
         return SimpleNamespace(labels=self.client.image_labels.get(name, self.client.default_image_labels()))
 
+    def pull(self, repository, tag=None, **kw):
+        self.client.pulls.append(repository if tag is None else f"{repository}:{tag}")
+        if self.client.pull_error is not None:
+            raise self.client.pull_error
+        self.client.missing_images.discard(repository)
+
 
 class FakeExecSocket:
     """What ``api.exec_start(socket=True)`` returns: stdin bytes go to the container's file on shutdown(SHUT_WR)."""
@@ -358,6 +364,8 @@ class FakeDockerClient:
         self.secret_writes: list[tuple[str, str, bytes]] = []  # (container id, path, content) via exec stdin
         self.images_checked: list[str] = []
         self.missing_images: set[str] = set()
+        self.pulls: list[str] = []
+        self.pull_error: Exception | None = None
         self.image_labels: dict[str, dict] = {}  # tag -> labels (default: a decider image built from this tree)
         self.run_calls: list[dict] = []
         self.run_calls_raw: list[dict] = []  # raw kwargs including None values, for baseline tests

@@ -301,9 +301,18 @@ def weight_nodes(engine: str, placement: Placement) -> list[str]:
     return [placement.head] if engine == "llamacpp" else list(placement.nodes)
 
 
+def require_single_image(prep: Prepared, placement: Placement) -> None:
+    """A chosen engine image (config ``image``) runs on a single node only: a cluster runs the engine's cluster
+    image on every rank (docs/security.md, "Engine images")."""
+    if placement.kind == "cluster" and getattr(prep.cfg, "image", None):
+        raise DeployError("image_single_node_only", "a chosen engine image is supported on single-node deployments "
+                          "only; remove image from the config or deploy on one node", 422)
+
+
 async def _checks(d, prep: Prepared, placement: Placement) -> dict[str, set[int]]:
-    """Before mem_lock: every node configured, the weights where they are read (``weight_nodes``; worker threads),
-    unmanaged ports."""
+    """Before mem_lock: a chosen image only on a single node, every node configured, the weights where they are
+    read (``weight_nodes``; worker threads), unmanaged ports."""
+    require_single_image(prep, placement)
     for n in placement.nodes:
         d._require_node(n)
     for n in weight_nodes(prep.engine.name, placement):

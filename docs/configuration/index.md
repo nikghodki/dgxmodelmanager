@@ -47,6 +47,8 @@ the container.
 |---|---|---|---|
 | `images.vllm` | string | `vllm/vllm-openai@sha256:22d3b121…352c8` | vLLM image (public multi-arch image, pinned by digest). |
 | `images.llamacpp` | string | `ghcr.io/ggml-org/llama.cpp@sha256:e4cfff28…c2b5` | llama.cpp server image (build b11669, multi-arch, pinned by digest). |
+| `images.vllm_allowed` | list of strings | `[]` | Images a single-node vLLM deployment may choose instead of `images.vllm` (its config's `image`; the **Engine image** select). Each entry must be pinned by digest (`<repository>[:<tag>]@sha256:<digest>`), else DGXMM refuses to start. Their model registries are read like the default image's (pulled on the DGXMM host for that). See [engine images](../user-guide/deploying.md#engine-images) and [security](../security.md#engine-images). |
+| `images.llamacpp_allowed` | list of strings | `[]` | The same for llama.cpp deployments (instead of `images.llamacpp`; cluster deployments always run `images.llamacpp_rpc`). |
 | `images.llamacpp_rpc` | string | `dgxmm-llamacpp-rpc:61dbf49-u1` | llama.cpp image for cluster deployments (`ggml-rpc-server` workers, `llama-server --rpc` head): built locally from `deploy/llamacpp-rpc` (commit 61dbf49, `GGML_RPC=ON`, CUDA sm_121) and loaded on every node of the cluster (`docker save … \| ssh <node> docker load`). A local build has no registry digest, so it is referenced by tag; the Dockerfile pins its bases by digest and the source by commit. |
 | `docker_network` | string | `dgxmm` | Docker network that engine containers join. **Must equal `DGXMM_NETWORK` in `.env`.** |
 | `port_range` | `[low, high]` | `[8100, 8199]` | Host ports handed to engine containers (1024–65535, ascending). Ports used by other containers are skipped. |

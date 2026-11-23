@@ -90,7 +90,7 @@ export const ENGINE_REASONS: Record<string, string> = {
 };
 export const engineReason = (r: string | null | undefined) => (r ? ENGINE_REASONS[r] ?? "" : "");
 
-export const DRAFT_METHODS = ["draft_model", "eagle", "eagle3", "dflash", "mtp", "ngram"] as const;
+export const DRAFT_METHODS = ["draft_model", "eagle", "eagle3", "dflash", "dspark", "mtp", "ngram"] as const;
 export const DRAFT_REASONS: Record<string, string> = {
   same_tokenizer: "identical tokenizer", same_family_vocab: "same family and vocabulary", matching_head: "draft head built for this model",
 };

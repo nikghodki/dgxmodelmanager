@@ -232,7 +232,8 @@ def build_context(settings: Settings, client_factory=None) -> AppContext:
 
     from dgxmm.catalog.support import VllmArchRegistry
     archs = VllmArchRegistry(settings, docker)
-    engines["vllm"].arch_source = archs.get
+    engines["vllm"].arch_source = archs.get_any
+    engines["vllm"].image_arch_source = archs.get_for
     ctx.archs = archs
 
     async def _archs():

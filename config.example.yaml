@@ -32,6 +32,12 @@ images:
   # llama.cpp image for cluster (multi-node, RPC) GGUF deployments: built locally from deploy/llamacpp-rpc (llama.cpp
   # commit 61dbf49, GGML_RPC=ON) and loaded on every node; a local build has no registry digest, hence the tag
   # llamacpp_rpc: dgxmm-llamacpp-rpc:61dbf49-u1
+  # Images a single-node deployment may choose instead of the default (the deployment config's `image`, the
+  # "Engine image" select), e.g. a vLLM build for a new model architecture. Pinned by digest, each one
+  # (docs/security.md, "Engine images"):
+  # vllm_allowed:
+  #   - vllm/vllm-openai:<tag>@sha256:<manifest-list digest>
+  # llamacpp_allowed: []
 docker_network: dgxmm         # docker network engines join; must equal DGXMM_NETWORK in .env
 port_range: [8100, 8199]      # host ports handed to engine containers (1024-65535, ascending)
 cluster_port_range: [29500, 29599]  # cluster deployments: vLLM's --master-port and llama.cpp's RPC ports (1024-65535)

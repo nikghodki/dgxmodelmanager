@@ -536,6 +536,11 @@ class DockerController:
         except docker.errors.ImageNotFound:
             return False
 
+    def pull_image(self, image: str) -> None:
+        """Pull ``image`` (``repo[:tag][@sha256:digest]``) on this daemon: a remote node's pulls through SSH with
+        that node's own registry access. Blocks until the pull is done."""
+        self.client.images.pull(image)
+
     def image_labels(self, tag: str) -> dict | None:
         """Labels of a local image (None if it does not exist)."""
         try:

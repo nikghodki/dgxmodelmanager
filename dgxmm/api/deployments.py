@@ -91,7 +91,8 @@ async def create(body: DeployIn, p: Principal = Depends(require_admin), ctx: App
     except DeployError as e:
         await ctx.deployer.undo_actions(applied)
         raise deploy_error(e)
-    audit(ctx.db, p.user.id, "deploy", req.name, {"model": req.model_ref, "engine": req.engine, "actions": body.actions})
+    audit(ctx.db, p.user.id, "deploy", req.name, {"model": req.model_ref, "engine": req.engine, "actions": body.actions,
+                                                  **_image_detail(req.config)})
     return view
 
 
@@ -302,6 +303,12 @@ class ReconfigureIn(BaseModel):
     actions: list[PlanAction] = []
 
 
+def _image_detail(config: dict | None) -> dict:
+    """The chosen engine image of a request, for its audit entry (the reconfigure entry has the whole config)."""
+    image = (config or {}).get("image")
+    return {"image": image} if isinstance(image, str) and image else {}
+
+
 async def _run(ctx, p, action: str, target: str, coro, detail: dict | None = None):
     try:
         view = await coro
@@ -342,9 +349,11 @@ async def switch(dep_id: int, body: SwitchIn, p: Principal = Depends(require_adm
                         notes=pv.get("notes", []))
     except DeployError as e:
         audit(ctx.db, p.user.id, "switch_failed", f"{dep_id}->{body.request.name}",
-              {"model": body.request.model_ref, "actions": body.actions, "code": e.code})
+              {"model": body.request.model_ref, "actions": body.actions, "code": e.code,
+               **_image_detail(body.request.config)})
         raise deploy_error(e)
-    audit(ctx.db, p.user.id, "switch", f"{dep_id}->{body.request.name}", {"model": body.request.model_ref, "actions": body.actions})
+    audit(ctx.db, p.user.id, "switch", f"{dep_id}->{body.request.name}", {"model": body.request.model_ref, "actions": body.actions,
+                                                                         **_image_detail(body.request.config)})
     return view
 
 

@@ -23,7 +23,7 @@ from dgxmm.deployer.logtail import SCAN_LINES, oom_evidence, stored_tail
 from dgxmm.deployer.gate import GateTimeout, GateWithdrawn, StartupGate
 from dgxmm.deployer.states import ACTIVE_STATES, assert_transition
 from dgxmm.docker_ctl import SecretDeliveryFailed
-from dgxmm.engines.base import LaunchContext, SpecError, container_name
+from dgxmm.engines.base import LaunchContext, SpecError, container_name, engine_image
 from dgxmm.engines.decision import is_system_engine
 from dgxmm.events import EventBroker
 from dgxmm.inventory.artifact import REPO_RE, ModelArtifact
@@ -536,15 +536,30 @@ class Deployer:
             cfg = engine.validate_config(raw_cfg)
         except (ValidationError, ValueError) as e:
             raise DeployError("invalid_config", str(e), 422)
+        image = getattr(cfg, "image", None)
+        if image:  # the allowlist is a security boundary: an arbitrary image is arbitrary code (docs/security.md)
+            try:
+                engine_image(self.settings, engine.name, image)
+            except SpecError as e:
+                raise DeployError(e.code, e.message, 422)
         artifact = self.inventory.get(model_ref)
         if artifact is None:
             raise DeployError("model_not_found", f"{model_ref} is not downloaded", 404)
         if not artifact.complete:
             raise DeployError("model_incomplete", "; ".join(artifact.problems) or "incomplete download", 409)
-        if not engine.supports(artifact) and not (
+
+        def supported(a: ModelArtifact) -> bool:  # by the image the deployment runs (its chosen one, else the default)
+            return engine.supports(a, image=image or getattr(self.settings.images, engine.name, None))
+        if not supported(artifact) and not (
                 existing_ref == model_ref and artifact.kind != "llm"
-                and engine.supports(dataclasses.replace(artifact, kind=classify_kind(artifact.architecture)))):
-            raise DeployError("engine_unsupported", f"{engine_name} cannot serve {artifact.format} model {model_ref}", 422)
+                and supported(dataclasses.replace(artifact, kind=classify_kind(artifact.architecture)))):
+            others = engine.images_supporting(artifact) if hasattr(engine, "images_supporting") else []
+            if others and not image:
+                raise DeployError("engine_unsupported", f"the default {engine_name} image cannot serve "
+                                  f"{artifact.architecture or artifact.format} model {model_ref}; choose an engine "
+                                  f"image that can: {', '.join(others)}", 422, images=others)
+            raise DeployError("engine_unsupported", f"{engine_name} cannot serve {artifact.format} model {model_ref}"
+                              + (f" with image {image}" if image else ""), 422)
         draft = None
         if dref := engine.draft_ref(cfg):
             self._check_not_deleting(dref)
@@ -607,6 +622,7 @@ class Deployer:
             old = self._get(replacing) if replacing is not None else None
             placement = self._placement_of(old) if old is not None else Placement(kind="single",
                                                                                    nodes=[LOCAL_NODE_ID])
+        cluster.require_single_image(prep, placement)
         budgets = await self._placement_budgets(placement)
         need = cluster.need_per_node(prep, placement, budgets)
         fit, node = cluster.fit_per_node(prep, placement, budgets, need,
@@ -725,7 +741,7 @@ class Deployer:
             prep = self.prepare(req.engine, req.model_ref, req.config)
         budgets = self.budget.all() if self.budget is not None else {}
         return build_options(prep.engine.name, prep.estimate, self.settings, budgets, stale=self._node_stale,
-                             allow_cluster=not is_system_engine(prep.engine))
+                             allow_cluster=not is_system_engine(prep.engine) and not getattr(prep.cfg, "image", None))
 
     async def deploy(self, req: DeployRequest, user_id: int | None) -> dict:
         if req.placement.kind == "cluster":
@@ -955,6 +971,7 @@ class Deployer:
             docker = self._docker_for(node)
             api_key = self._ensure_api_key(dep_id, prep)
             tried: set[int] = set()
+            pulled = False
             while True:
                 launch = LaunchContext(dep_id, name, port, prep.estimate.total, mem_total, node, api_key=api_key)
                 try:
@@ -965,6 +982,9 @@ class Deployer:
                     raise DeployError(code, str(e), 422)
                 if self.settings.install_id:
                     spec.labels = {**spec.labels, "dgxmm.install": self.settings.install_id}
+                if not pulled:
+                    await self._ensure_image(docker, dep_id, node, spec.image)
+                    pulled = True
                 try:
                     await asyncio.to_thread(docker.remove_by_name, spec.name)
                     cid = await asyncio.to_thread(docker.run, spec)
@@ -1012,6 +1032,24 @@ class Deployer:
             self.launching.pop(dep_id, None)
             if not started and self.gate.holders.get(dep_id) == "launch":
                 self.gate.release(dep_id)
+
+    async def _ensure_image(self, docker, dep_id: int, node: str, image: str) -> None:
+        """The engine image on the node that runs the container: pulled there first when it is missing (a remote
+        node pulls through its own daemon and registry access), with an event saying so. A failed pull fails the
+        deployment with that reason; an unreachable node drops a fresh deployment (as a failed start does).
+        Large images are best pulled ahead of time (``docker pull`` on the node): the deployment waits here."""
+        try:
+            if await asyncio.to_thread(docker.image_present, image):
+                return
+            self.note(dep_id, f"pulling image {image} on node {self._node_label(node)}", actor="deployer")
+            await asyncio.to_thread(docker.pull_image, image)
+        except NodeUnreachable as e:
+            self._drop_if_planned(dep_id)
+            raise DeployError("node_unreachable", str(e), 503)
+        except Exception as e:
+            msg = f"could not pull image {image} on node {self._node_label(node)}: {e}"
+            self._transition(dep_id, "failed", message=msg, last_error=msg)
+            raise DeployError("image_pull_failed", msg, 502)
 
     def _drop_if_planned(self, dep_id: int) -> None:
         """A fresh deploy that cannot launch: don't leave a row holding the name."""

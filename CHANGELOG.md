@@ -18,6 +18,16 @@ existing installs are in [upgrade](docs/getting-started/upgrade.md#upgrading-an-
   off. See [single sign-on](docs/user-guide/single-sign-on.md) and the
   [threat model](docs/security.md#single-sign-on-openid-connect).
 
+- **Engine images per deployment, from an allowlist.** `images.vllm_allowed` / `images.llamacpp_allowed` in
+  `config.yaml` (digest-pinned, empty by default) list images a single-node deployment may run instead of the
+  default one, e.g. a vLLM build for a model the default image cannot serve. The deploy wizard and the switch /
+  reconfigure dialogs get an **Engine image** select; the choice is the config's `image`, kept by restarts,
+  on-demand wakes, switches and reconfigures, checked against the list at every start and recorded in the audit
+  log. A missing image is pulled on the node that runs the deployment. See
+  [engine images](docs/user-guide/deploying.md#engine-images) and the [threat model](docs/security.md#engine-images).
+- vLLM speculative decoding: method `dspark` (the drafter bundled in Inkling 2 checkpoints) and
+  `draft_sample_method` (`greedy` / `probabilistic`).
+
 ### Upgrade notes
 
 - `./install.sh` creates an empty `secrets/oidc_client_secret` (a new compose secret). Starting DGXMM with

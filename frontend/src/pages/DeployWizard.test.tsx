@@ -406,4 +406,20 @@ describe("DeployWizard preview priority", () => {
     expect(screen.getByLabelText("Concurrent sequences")).toHaveValue(5);
     expect(screen.getByLabelText("Context length (tokens)")).toHaveValue(4096);
   });
+
+  it("sends the engine image chosen from the allowlist with the preview", async () => {
+    vi.mocked(auth.useIsAdmin).mockReturnValue(true);
+    const image = "vllm/vllm-openai:new-model@sha256:11";
+    const bodies: any[] = [];
+    vi.mocked(apiModule.api).mockImplementation((url: string, opts?: any) => {
+      if (url === "/inventory") return Promise.resolve([artifact]);
+      if (url === "/engines") return Promise.resolve([{ ...engines[0], image: "vllm/vllm-openai@sha256:aa", allowed_images: [image] }]);
+      if (url === "/deployments/preview") { bodies.push(opts?.body); return Promise.resolve(fitsPreview); }
+      return Promise.reject(new Error(`unexpected ${url}`));
+    });
+    renderWizard();
+    await userEvent.click(await screen.findByRole("combobox", { name: "Engine image" }));
+    await userEvent.click(await screen.findByRole("option", { name: image }));
+    await waitFor(() => expect(bodies.some((b) => b?.config?.image === image)).toBe(true));
+  });
 });

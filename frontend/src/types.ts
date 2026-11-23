@@ -146,7 +146,11 @@ export interface OnDemandStatus {
 export interface StartupQueue {
   position: number | null; waiting_for: string[]; reason: string; kind: "launch" | "wake"; since: number; limit: number;
 }
-export interface EngineInfo { name: string; supports_sleep: boolean; defaults: Record<string, any>; image: string | null }
+export interface EngineInfo {
+  name: string; supports_sleep: boolean; defaults: Record<string, any>; image: string | null;
+  /** Images a deployment may choose instead of `image` (config.yaml images.<engine>_allowed). */
+  allowed_images?: string[];
+}
 
 export interface LiteLLMStatus { reachable: boolean; version: string | null; db: string | null; error: string | null; checked_at: string }
 export interface LiteLLMSettings {

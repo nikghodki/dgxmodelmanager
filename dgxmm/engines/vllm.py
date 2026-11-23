@@ -7,11 +7,11 @@ from typing import Any, Literal
 import httpx
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from dgxmm.config import LOCAL_NODE_ID, Mount, Settings
+from dgxmm.config import IMAGE_REF, LOCAL_NODE_ID, Mount, Settings
 from dgxmm.engines.argguard import VLLM_EXTRA_FLAGS, validate_extra_args
 from dgxmm.engines.base import (RANK_LABEL, REMOTE_NETWORK, SERVED_NAME_RE, ContainerSpec, EngineMetrics,
-                                LaunchContext, RankSpec, SpecError, auth_headers, container_name, remote_hf_mount,
-                                default_served_name, managed_labels, openai_health)
+                                LaunchContext, RankSpec, SpecError, auth_headers, container_name, engine_image,
+                                remote_hf_mount, default_served_name, managed_labels, openai_health)
 from dgxmm.engines.prom import buckets, counter, gauge, parse_samples
 from dgxmm.inventory.artifact import REPO_RE, ModelArtifact
 from dgxmm.memory.estimate import MemoryEstimate, VllmSizing, default_kv_tokens, estimate_vllm, vllm_gpu_util
@@ -21,9 +21,12 @@ PARSER_RE = r"^[a-z0-9_]{1,32}$"
 
 class SpeculativeConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    method: Literal["dflash", "eagle", "eagle3", "mtp", "ngram", "draft_model"]
+    # dspark: the drafter bundled in the target checkpoint (Inkling 2), like mtp: no separate model
+    method: Literal["dflash", "dspark", "eagle", "eagle3", "mtp", "ngram", "draft_model"]
     model: str | None = Field(None, pattern=REPO_RE)
     num_speculative_tokens: int = Field(3, ge=1, le=16)
+    # how draft tokens are sampled: greedy (vLLM's default) or from the draft distribution
+    draft_sample_method: Literal["greedy", "probabilistic"] | None = None
 
     @model_validator(mode="after")
     def _needs_model(self):
@@ -34,6 +37,9 @@ class SpeculativeConfig(BaseModel):
 
 class VllmConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
+    # the engine image; None = images.vllm. Must be on images.vllm_allowed (checked against the live settings
+    # when the deployment is prepared and again when its container is built: engines.base.engine_image)
+    image: str | None = Field(None, max_length=400, pattern=IMAGE_REF)
     served_model_name: str | None = Field(None, pattern=SERVED_NAME_RE)
     max_model_len: int = Field(32768, ge=256, le=1_048_576)
     max_num_seqs: int = Field(8, ge=1, le=1024)
@@ -105,16 +111,32 @@ class VllmEngine:
 
     def __init__(self, settings: Settings):
         self.settings = settings
+        # () -> the architectures some image DGXMM may run can serve (the default and the allowed ones), or None
         self.arch_source = None
+        # (image) -> the architectures that image can serve, or None (not known yet)
+        self.image_arch_source = None
 
     def validate_config(self, raw: dict[str, Any]) -> VllmConfig:
         return VllmConfig.model_validate(raw)
 
-    def supports(self, artifact: ModelArtifact) -> bool:
+    def supports(self, artifact: ModelArtifact, image: str | None = None) -> bool:
+        """Can vLLM serve ``artifact``: with ``image`` (a deployment's chosen image), that image's model registry
+        decides; without, any image a deployment may run (the default or an allowed one). An image whose registry
+        is not known yet does not refuse (as before the registry was read)."""
         if not (artifact.source == "hf" and artifact.format == "safetensors" and artifact.kind == "llm"):
             return False
-        archs = self.arch_source() if self.arch_source else None
+        if image is not None and self.image_arch_source is not None:
+            archs = self.image_arch_source(image)
+        else:
+            archs = self.arch_source() if self.arch_source else None
         return archs is None or artifact.architecture in archs
+
+    def images_supporting(self, artifact: ModelArtifact) -> list[str]:
+        """The allowed images (images.vllm_allowed) whose model registry is known to serve ``artifact``."""
+        if self.image_arch_source is None:
+            return []
+        return [i for i in self.settings.images.allowed(self.name)
+                if self.image_arch_source(i) is not None and self.supports(artifact, image=i)]
 
     def draft_ref(self, cfg: VllmConfig) -> str | None:
         return cfg.speculative.model if cfg.speculative and cfg.speculative.model else None
@@ -164,6 +186,8 @@ class VllmEngine:
         if cfg.speculative:
             sc: dict[str, Any] = {"method": cfg.speculative.method,
                                   "num_speculative_tokens": cfg.speculative.num_speculative_tokens}
+            if cfg.speculative.draft_sample_method:
+                sc["draft_sample_method"] = cfg.speculative.draft_sample_method
             if cfg.speculative.model:
                 sc["model"] = cfg.speculative.model
                 # pinned like --revision: HF_HUB_OFFLINE resolves a bare repo id only through refs/main, which a
@@ -204,7 +228,8 @@ class VllmEngine:
         else:  # remote node: its own HF cache only, read-only; its default bridge, published on its cluster IP
             hf, publish_bind = remote_hf_mount(settings, launch.node)
             mounts, network = [hf], REMOTE_NETWORK
-        return ContainerSpec(name=container_name(launch.name), image=settings.images.vllm, command=cmd, environment=env,
+        return ContainerSpec(name=container_name(launch.name), image=engine_image(settings, self.name, cfg.image),
+                             command=cmd, environment=env,
                              mounts=mounts, labels=managed_labels(launch.deployment_id, self.name),
                              network=network, port=launch.port, publish_bind=publish_bind)
 
@@ -215,6 +240,9 @@ class VllmEngine:
         host network with the RDMA devices; the head (rank 0) serves the API on its cluster IP, the others are
         headless. ``launch``: the head's port and the engine key (head only); ``launch.rank_memory`` each rank's
         reservation and its node's memory total (its --gpu-memory-utilization)."""
+        if cfg.image:  # a chosen image is single-node only (docs/security.md, "Engine images")
+            raise SpecError("image_single_node_only", "a chosen engine image is supported on single-node deployments "
+                                                      "only; cluster deployments run images.vllm")
         head = nodes.config(placement.head)
         n = len(placement.nodes)
         # no sleep mode on clusters (yet): no --enable-sleep-mode and no VLLM_SERVER_DEV_MODE dev endpoints

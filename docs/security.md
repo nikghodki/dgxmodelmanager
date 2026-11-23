@@ -54,12 +54,41 @@ Summary (details in [architecture](security/application.md)):
 - `viewer` / `admin` roles checked on every route; the audit log records every change (and failures of the
   important ones);
 - the container guard: DGXMM only creates, stops or removes containers labelled `dgxmm.managed=true`;
-- strict engine config schemas and an allowlist for extra engine flags;
+- strict engine config schemas, an allowlist for extra engine flags and one for engine images
+  ([engine images](#engine-images));
 - secrets (LiteLLM master key, virtual keys, the decider key) are never returned, logged or audited; process
   command lines are masked before they leave the server, and so is live engine output: the admin-only container
   log view (`GET /api/deployments/{id}/logs`) is redacted line by line (`memory/redact.py: redact_log`, which also
   masks multi-line PEM private keys, and runs of three or more base64 key lines whose BEGIN line a tail cut off) —
   engines can echo tokens, `Authorization` headers and URL credentials.
+
+## Engine images
+
+Which image an engine container runs is which code runs with the GPU, the engine key, the HF cache mounted
+read-write (vLLM) and the engine network: an admin who could name any image could run anything there (and a
+moving tag could be repointed by whoever controls the registry repository). So:
+
+- the default images (`images.vllm`, `images.llamacpp`) and the images a deployment may choose instead
+  (`images.vllm_allowed`, `images.llamacpp_allowed`) come from `config.yaml` only, which the host owner controls.
+  No API changes them; the API only lists them (`GET /api/engines`: `allowed_images`);
+- an allowlist entry must be pinned by digest (`repo[:tag]@sha256:…`; DGXMM refuses to start otherwise), so an
+  allowed entry always means the same image content: a tag in it is only a label;
+- a deployment's config may name an image (`image`, schema-checked as an image reference). It must be on its
+  engine's own list: checked when the request is prepared (preview, deploy, switch, reconfigure, restart and
+  every on-demand wake: `422 image_not_allowed`) and again when the container is built
+  (`engines.base.engine_image`), so an image removed from the list later is refused at the next start instead of
+  being run or silently replaced by the default. A vLLM image is never accepted for llama.cpp or the other way
+  round;
+- the image is never passed to the engine as an argument and does not change any other part of the container
+  (mounts, user, network, published port, environment) — the container guard and the hardening are the same;
+- single-node only: cluster deployments always run `images.vllm` / `images.llamacpp_rpc` (`422
+  image_single_node_only`);
+- a missing image is pulled by the daemon of the node that runs it (a remote node with its own registry access),
+  with an event naming the image; the chosen image is recorded in the audit log (`deploy`, `switch`; the
+  `reconfigure` entry has the whole config).
+
+Residual risk: an allowed image is trusted at its digest like the default one — the allowlist decides *which*
+code may run, not whether that code is safe.
 
 ## Single sign-on (OpenID Connect)
 
@@ -642,7 +671,9 @@ loop), `tests/test_decider_output_validation.py` (answer validation, reply size 
 (decider network never a proxy), `tests/test_stream_topics.py` (SSE topics by role), `tests/test_ondemand_gateway.py`
 (peer guard, explicit allowed ranges through the production wiring, forwarding headers, path checks,
 endpoint allowlist, key, rotation without a restart and rate limit, nothing logged),
-`tests/test_oidc.py` (single sign-on against a fake IdP: PKCE, state replay, browser binding, `iss` parameter,
+`tests/test_engine_images.py` (engine image allowlist: digest pins, allowed / refused / other engine, kept by
+preview, deploy, switch, reconfigure and restart, refused after removal, single-node only, pull on the node that runs
+it, audit), `tests/test_oidc.py` (single sign-on against a fake IdP: PKCE, state replay, browser binding, `iss` parameter,
 expired, wrong-audience, wrong-issuer, wrong-nonce, too old, unsigned, HMAC and wrong-key tokens, JWKS rotation and
 throttling, discovery checks, role mapping and denial, session end after a lost group, `return_to`, auto-provision,
 rate limit, nothing secret logged), `tests/test_litellm_ondemand.py` (entry parameters and timeouts that follow the queue limit, key fingerprint

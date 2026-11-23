@@ -9,11 +9,11 @@ from typing import Any, Literal
 import httpx
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from dgxmm.config import LOCAL_NODE_ID, Mount, Settings
+from dgxmm.config import IMAGE_REF, LOCAL_NODE_ID, Mount, Settings
 from dgxmm.engines.argguard import LLAMACPP_EXTRA_FLAGS, validate_extra_args
 from dgxmm.engines.base import (RANK_LABEL, REMOTE_NETWORK, SERVED_NAME_RE, ContainerSpec, EngineMetrics,
                                 LaunchContext, RankSpec, SpecError, container_name, default_served_name,
-                                managed_labels, openai_health, remote_hf_mount)
+                                engine_image, managed_labels, openai_health, remote_hf_mount)
 from dgxmm.engines.vllm import metrics_from
 from dgxmm.inventory.artifact import ModelArtifact
 from dgxmm.memory.estimate import LlamaCppSizing, MemoryEstimate, estimate_llamacpp
@@ -40,6 +40,9 @@ def rank_user() -> str | None:
 
 class LlamaCppConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
+    # the engine image; None = images.llamacpp. Must be on images.llamacpp_allowed (engines.base.engine_image).
+    # Single-node only: cluster deployments run images.llamacpp_rpc
+    image: str | None = Field(None, max_length=400, pattern=IMAGE_REF)
     alias: str | None = Field(None, pattern=SERVED_NAME_RE)
     ctx_size: int = Field(32768, ge=512, le=1_048_576)
     parallel: int = Field(4, ge=1, le=64)
@@ -112,7 +115,7 @@ class LlamaCppEngine:
     def validate_config(self, raw: dict[str, Any]) -> LlamaCppConfig:
         return LlamaCppConfig.model_validate(raw)
 
-    def supports(self, artifact: ModelArtifact) -> bool:
+    def supports(self, artifact: ModelArtifact, image: str | None = None) -> bool:
         return artifact.source == "gguf" and artifact.kind == "llm"
 
     def draft_ref(self, cfg: LlamaCppConfig) -> str | None:
@@ -145,7 +148,8 @@ class LlamaCppEngine:
                "--metrics", "--slots", "-a", self.served_name(cfg, artifact.ref), *cfg.extra_args]
         # the key in the environment, never argv (--api-key would show in ps and docker inspect's Cmd)
         env = {"LLAMA_API_KEY": launch.api_key} if launch.api_key else {}
-        return ContainerSpec(name=container_name(launch.name), image=settings.images.llamacpp, command=cmd,
+        return ContainerSpec(name=container_name(launch.name), image=engine_image(settings, self.name, cfg.image),
+                             command=cmd,
                              environment=env, mounts=[mount], labels=managed_labels(launch.deployment_id, self.name),
                              network=network, port=launch.port, publish_bind=publish_bind, ipc_host=False)
 
@@ -165,6 +169,9 @@ class LlamaCppEngine:
         uid (rank_user(): never root)."""
         if draft is not None:
             raise SpecError("invalid_container_spec", "llama.cpp has no draft models")
+        if cfg.image:  # a chosen image is single-node only (docs/security.md, "Engine images")
+            raise SpecError("image_single_node_only", "a chosen engine image is supported on single-node deployments "
+                                                      "only; cluster deployments run images.llamacpp_rpc")
         cfg_nodes = {n: nodes.config(n) for n in placement.nodes}
         for node_id, node in cfg_nodes.items():
             if not node.cluster_ip:

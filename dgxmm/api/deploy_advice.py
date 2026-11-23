@@ -31,7 +31,7 @@ class ConfigAdviceIn(BaseModel):
 class DraftIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
     target_ref: str = Field(min_length=1, max_length=1024)
-    method: Literal["draft_model", "eagle", "eagle3", "dflash", "mtp", "ngram"]
+    method: Literal["draft_model", "eagle", "eagle3", "dflash", "dspark", "mtp", "ngram"]
 
 
 class EngineIn(BaseModel):
