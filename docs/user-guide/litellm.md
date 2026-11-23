@@ -10,6 +10,12 @@ start them. Clients then use one OpenAI-compatible endpoint, `<LiteLLM URL>/v1`,
 with `"model": "<model name>"`. LiteLLM adds API keys, budgets, rate limits and logging. To set up the
 LiteLLM side, see [configuration](../configuration/litellm.md#litellm-integration).
 
+Each entry carries the deployment's **context window** as `model_info.max_input_tokens` (LiteLLM's
+`/model/info`): the tokens one request may use, vLLM's `max_model_len` or a llama.cpp slot's share of the context
+(`ctx_size / parallel`, or all of `ctx_size` with `--kv-unified`). Coding tools can size their context and
+compaction from it. A reconfigure that changes it re-registers the entry once, adding the new entry before
+removing the old one; entries registered by an older DGXMM are replaced the same way once.
+
 The **LiteLLM** page (admins, under Integrations) has three parts. Notices at the top say when LiteLLM
 cannot be reached, no master key is set, or the integration is turned off. When LiteLLM is reachable,
 its version and database state are shown. The settings appear straight away; the connection status

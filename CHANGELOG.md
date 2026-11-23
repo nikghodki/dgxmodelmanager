@@ -28,7 +28,14 @@ existing installs are in [upgrade](docs/getting-started/upgrade.md#upgrading-an-
 - vLLM speculative decoding: method `dspark` (the drafter bundled in Inkling 2 checkpoints) and
   `draft_sample_method` (`greedy` / `probabilistic`).
 
+- **LiteLLM entries carry the context window** (`model_info.max_input_tokens`: vLLM `max_model_len`, a llama.cpp
+  slot's share of `ctx_size`), so clients reading `/model/info` (e.g. a coding tool's model sync) know each
+  model's real window. The deployment view has it as `context_window`. See [LiteLLM](docs/user-guide/litellm.md).
+
 ### Upgrade notes
+
+- On the first sync after the upgrade every DGXMM entry in LiteLLM is re-registered once (added before the old
+  one is removed) to carry its context window.
 
 - `./install.sh` creates an empty `secrets/oidc_client_secret` (a new compose secret). Starting DGXMM with
   `docker compose up` without running the installer first fails until that file exists:

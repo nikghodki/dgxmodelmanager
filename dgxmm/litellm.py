@@ -67,10 +67,17 @@ def params_fingerprint(params: dict, info: dict | None = None) -> str:
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()[:12]
 
 
+def window_info(v: dict) -> dict:
+    """model_info telling clients a deployment's context window (``max_input_tokens``: the tokens one request may
+    use, from the engine config; coding tools size their compaction from it). Empty when unknown."""
+    window = v.get("context_window")
+    return {"max_input_tokens": int(window)} if isinstance(window, int) and window > 0 else {}
+
+
 def _params_match(fp: str | None, litellm_params: dict, params: dict | None, info: dict | None = None,
                   model_info: dict | None = None) -> bool:
-    if not params:
-        return True
+    if not params:  # an always-on entry: no params fingerprint; its model_info (context window) field by field
+        return all((model_info or {}).get(k) == v for k, v in (info or {}).items())
     if fp is not None:
         return fp == params_fingerprint(params, info)
     if any((model_info or {}).get(k) != v for k, v in (info or {}).items()):
@@ -620,13 +627,13 @@ class LiteLLMSync:
                     continue
                 api_base = f"{settings.dgxmm_internal_url}/ondemand/{v['id']}/v1"
                 want[(str(v["id"]), name)] = (api_base, v["served_name"], key, ondemand_params(settings),
-                                                ondemand_info())
+                                                {**ondemand_info(), **window_info(v)})
             else:
                 api_base = self.deployer.base_url_for(v) + "/v1"
                 # the engine's own key (none for a deployment from before engine keys); a key that appears or
                 # changes is a new fingerprint, so _sync replaces the entry
                 engine_key = self.deployer.api_key_for(v) or "none"
-                want[(str(v["id"]), name)] = (api_base, v["served_name"], engine_key, None, None)
+                want[(str(v["id"]), name)] = (api_base, v["served_name"], engine_key, None, window_info(v) or None)
         self.conflicts = conflicts
         self.ondemand = ondemand
         if conflicts:

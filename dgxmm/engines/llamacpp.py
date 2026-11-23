@@ -127,6 +127,11 @@ class LlamaCppEngine:
     def sleep_enabled(self, cfg: LlamaCppConfig) -> bool:
         return False
 
+    def context_window(self, cfg: LlamaCppConfig) -> int | None:
+        """Most tokens one request may use: a slot's share of -c (ctx_size / parallel), or all of it with
+        --kv-unified (every slot then draws on the one shared cache)."""
+        return cfg.ctx_size if "--kv-unified" in cfg.extra_args else cfg.ctx_size // cfg.parallel
+
     def estimate(self, artifact: ModelArtifact, cfg: LlamaCppConfig, draft, settings: Settings) -> MemoryEstimate:
         if artifact.arch is None:
             raise ValueError("GGUF header could not be parsed")

@@ -118,7 +118,8 @@ async def test_always_on_unchanged_only_ready(stack, key):
 
 
 async def test_existing_always_on_registration_survives_upgrade(stack, key):
-    """An entry an older DGXMM registered for an always-on deployment is left exactly as it is."""
+    """An entry an older DGXMM registered for an always-on deployment is left exactly as it is (one that already
+    carries the context window; without it, it is replaced once: tests/test_litellm_context_window.py)."""
     fake = FakeLiteLLM()
     sync = make(stack, fake)
     d = await ready(stack, "a", "always_on", alias="chat")
@@ -127,7 +128,7 @@ async def test_existing_always_on_registration_survives_upgrade(stack, key):
         s.get(Deployment, d["id"]).engine_api_key = None
     old = {"model_name": "chat", "litellm_params": {"model": "openai/qwen3-tiny",
                                                     "api_base": f"http://engines.test:{d['port']}/v1", "api_key": "none"},
-           "model_info": {"dgxmm_id": str(d["id"]), "id": "old-chat", "db_model": True}}
+           "model_info": {"dgxmm_id": str(d["id"]), "id": "old-chat", "db_model": True, "max_input_tokens": 4096}}
     fake.models.append(json.loads(json.dumps(old)))
     assert await sync.sync()
     assert writes(fake) == [] and mine(fake) == [old]
@@ -322,7 +323,8 @@ async def test_entry_without_params_fingerprint_kept_when_its_params_match(stack
     d = await ready(stack, "a", "on_demand", alias="chat")
     entry = {"model_name": "chat", "litellm_params": {"model": "openai/qwen3-tiny", "api_base": GATEWAY.format(d["id"]),
                                                       **ondemand_params(stack.deployer.settings)},
-             "model_info": {"dgxmm_id": str(d["id"]), "id": "earlier", "dgxmm_key_fp": fp(KEY), **HEALTH_INFO}}
+             "model_info": {"dgxmm_id": str(d["id"]), "id": "earlier", "dgxmm_key_fp": fp(KEY), **HEALTH_INFO,
+                            "max_input_tokens": 4096}}
     fake.models.append(json.loads(json.dumps(entry)))
     assert await sync.sync() and writes(fake) == []
     fake.models[-1]["litellm_params"].update(timeout=1200.0, stream_timeout=1200.0)

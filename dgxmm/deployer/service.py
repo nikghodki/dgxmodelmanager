@@ -1550,12 +1550,14 @@ class Deployer:
 
     def _view(self, d: Deployment) -> dict:
         engine = self.engines.get(d.engine)
-        served = None
+        served = window = None
         if engine is not None:
             try:
-                served = engine.served_name(engine.validate_config(d.config), d.model_ref)
+                cfg = engine.validate_config(d.config)
+                served = engine.served_name(cfg, d.model_ref)
+                window = engine.context_window(cfg) if hasattr(engine, "context_window") else None
             except (ValidationError, ValueError):
-                served = None
+                served = window = None
         return {
             "id": d.id, "name": d.name, "engine": d.engine, "model_ref": d.model_ref, "state": d.state,
             "port": d.port, "priority": d.priority, "alias": d.alias, "reserved_bytes": d.reserved_bytes,
@@ -1571,6 +1573,7 @@ class Deployer:
                         is not None else None,
             "startup_queue": self.gate.info(d.id),  # why it waits for a start-up slot (state queued / waking)
             "model_name": d.alias or served,  # what clients pass as "model" to the single LiteLLM endpoint
+            "context_window": window,  # tokens one request may use; registered as LiteLLM's max_input_tokens
             "litellm_error": self.litellm_error(d.id, d.state) if self.litellm_error is not None else None,
             **self._endpoints(d),
             # the engine needs its key (never in a view): its direct URLs answer 401 without it (call it via LiteLLM)

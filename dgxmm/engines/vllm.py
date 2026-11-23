@@ -147,6 +147,10 @@ class VllmEngine:
     def sleep_enabled(self, cfg: VllmConfig) -> bool:
         return cfg.enable_sleep_mode
 
+    def context_window(self, cfg: VllmConfig) -> int | None:
+        """Most tokens (prompt + output) one request may use: --max-model-len."""
+        return cfg.max_model_len
+
     @staticmethod
     def pool_tokens(cfg: VllmConfig) -> int:
         """KV pool the reservation is sized for: kv_tokens, or the default shared pool."""

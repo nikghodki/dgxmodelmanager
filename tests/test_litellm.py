@@ -59,7 +59,7 @@ async def test_migration_removes_second_name(stack):
     base = f"http://engines.test:{d['port']}/v1"
     for name in ("qwen3-tiny", "chat"):
         fake.models.append({"model_name": name, "litellm_params": {"model": "openai/qwen3-tiny", "api_base": base, "api_key": "none"},
-                            "model_info": {"dgxmm_id": str(d["id"]), "id": f"old-{name}"}})
+                            "model_info": {"dgxmm_id": str(d["id"]), "id": f"old-{name}", "max_input_tokens": 4096}})
     assert await sync.sync()
     mine = [(m["model_name"], m["model_info"]["id"]) for m in fake.models if m["model_info"].get("dgxmm_id")]
     assert mine == [("chat", "old-chat")]  # the alias entry is kept as-is, the served-name entry deleted

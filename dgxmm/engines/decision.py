@@ -190,6 +190,9 @@ class DecisionEngine:
     def sleep_enabled(self, cfg: DecisionConfig) -> bool:
         return False
 
+    def context_window(self, cfg) -> int | None:
+        return None  # a system deployment: never a LiteLLM model
+
     def estimate(self, artifact: ModelArtifact, cfg: DecisionConfig, draft, settings: Settings) -> MemoryEstimate:
         m = DECIDER_MODELS.get(artifact.ref)
         if m is None:
