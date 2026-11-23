@@ -1,8 +1,11 @@
 import "@testing-library/jest-dom/vitest";
 import { afterEach, vi } from "vitest";
-import { cleanup } from "@testing-library/react";
+import { cleanup, configure } from "@testing-library/react";
 
 afterEach(() => cleanup());
+// findBy*/waitFor give up after 1 s by default: on a loaded CI runner a debounced preview (350 ms) plus its render can
+// take longer, which made the deploy wizard's tests flaky there. Passing tests are not slowed down.
+configure({ asyncUtilTimeout: 5000 });
 
 // jsdom lacks these browser APIs used by Radix, cmdk and our media-query hook.
 if (!window.matchMedia) {
